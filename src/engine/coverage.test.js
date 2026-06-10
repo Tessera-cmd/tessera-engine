@@ -1,0 +1,145 @@
+// src/engine/coverage.test.js
+// Closes the engine test-coverage gaps flagged in CLAUDE.md (behaviour implemented but
+// not previously isolated by a golden test): the ±1 hit-roll clamp, Plunging Fire as a
+// separate BS bucket, Blast, Overwatch, FNP-on-mortals, evalValue dice strings, and the
+// damage min-1 floor. Same closed-form-vs-Monte-Carlo style as combat.test.js.
+
+import { describe, it, expect } from 'vitest';
+import { runSimulation } from './monteCarlo.js';
+
+const N = 30000;
+const SEED = 0x1234abcd;
+
+function approx(actual, expected, rel = 0.05, abs = 0.5) {
+  const tol = Math.max(abs, rel * Math.abs(expected));
+  expect(
+    Math.abs(actual - expected),
+    `expected ~${expected}, got ${actual} (tol ${tol.toFixed(3)})`,
+  ).toBeLessThanOrEqual(tol);
+}
+
+const attacker = (weapon, count = 100) => ({
+  models: count,
+  weapons: [{ type: 'ranged', count, ...weapon }],
+});
+const target = (over = {}) => ({
+  models: 100000,
+  T: 4,
+  SV: 7,
+  W: 1,
+  INV: null,
+  FNP: null,
+  damageReduction: null,
+  halveDamage: false,
+  keywords: ['INFANTRY'],
+  ...over,
+});
+const run = (atk, def, opts = {}) => runSimulation(atk, def, { iterations: N, seed: SEED, ...opts });
+
+const P_W_S4T4 = 3 / 6;
+
+describe('hit-roll modifier ±1 clamp (bucket A)', () => {
+  it('a big +hitModifier is clamped to +1 (BS3 -> 2+, 5/6)', () => {
+    const res = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), { hitModifier: 5 });
+    approx(res.kills.mean, 100 * (5 / 6) * P_W_S4T4); // 41.67
+  });
+  it('+5 behaves identically to +1 (proves the clamp)', () => {
+    const a = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), { hitModifier: 5 });
+    const b = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), { hitModifier: 1 });
+    expect(a.kills.mean).toBe(b.kills.mean);
+  });
+  it('a big -hitModifier is clamped to -1 (BS3 -> 4+, 3/6)', () => {
+    const res = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), { hitModifier: -9 });
+    approx(res.kills.mean, 100 * (3 / 6) * P_W_S4T4); // 25.0
+  });
+});
+
+describe('Plunging Fire is a separate BS bucket (stacks past the ±1 cap)', () => {
+  it('Plunging alone improves BS by 1 (BS3 -> 2+, 5/6)', () => {
+    const res = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), { plungingFire: true });
+    approx(res.kills.mean, 100 * (5 / 6) * P_W_S4T4); // 41.67
+  });
+  it('Cover (-1 BS, bucket B) + a -1 hitModifier (bucket A) stack to -2', () => {
+    // BS3 -> Cover makes effTarget 4; hitMod -1 -> only 5,6 hit = 2/6. Worse than either alone (3/6),
+    // which is impossible if both lived in one ±1-clamped bucket.
+    const res = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), {
+      targetInCover: true,
+      hitModifier: -1,
+    });
+    approx(res.kills.mean, 100 * (2 / 6) * P_W_S4T4); // 16.67
+    const coverOnly = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), { targetInCover: true });
+    expect(res.kills.mean).toBeLessThan(coverOnly.kills.mean); // stacked past one step
+  });
+  it('Plunging cancels Cover (effTarget back to base)', () => {
+    const res = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), {
+      targetInCover: true,
+      plungingFire: true,
+    });
+    approx(res.kills.mean, 100 * (4 / 6) * P_W_S4T4); // 33.33 (base BS3)
+  });
+});
+
+describe('Blast: +1 attack per 5 models in the target unit', () => {
+  it('adds floor(models/5) dice per carrier', () => {
+    // 1 carrier, A1, vs 20 models -> blast 4 -> 5 attacks total (deterministic count).
+    const withBlast = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['BLAST'] }, 1), target({ models: 20 }));
+    expect(withBlast.breakdown.attacks).toBeCloseTo(5, 5);
+    const noBlast = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }, 1), target({ models: 20 }));
+    expect(noBlast.breakdown.attacks).toBeCloseTo(1, 5);
+  });
+});
+
+describe('Overwatch: hits only on an unmodified 6', () => {
+  it('P(hit) is 1/6 regardless of BS', () => {
+    const res = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), { overwatch: true });
+    approx(res.kills.mean, 100 * (1 / 6) * P_W_S4T4); // 8.33
+  });
+  it('modifiers do not change Overwatch (still 1/6 with +1 to hit)', () => {
+    const res = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), {
+      overwatch: true,
+      hitModifier: 1,
+    });
+    approx(res.kills.mean, 100 * (1 / 6) * P_W_S4T4); // 8.33
+  });
+});
+
+describe('Feel No Pain applies to Devastating-Wounds mortal wounds', () => {
+  it('FNP reduces applied mortal wounds by its pass rate', () => {
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['DEVASTATING WOUNDS'] };
+    const noFnp = run(attacker(w, 600), target({ SV: 2 }));
+    const fnp5 = run(attacker(w, 600), target({ SV: 2, FNP: 5 }));
+    // mortal instances per attack = (4/6 hit)(1/6 crit) -> ~66.7 mortal points (D1).
+    approx(noFnp.mortalWounds.mean, 600 * (4 / 6) * (1 / 6)); // ~66.7 applied (no FNP)
+    approx(fnp5.mortalWounds.mean, 600 * (4 / 6) * (1 / 6) * (4 / 6)); // ~44.4 (FNP5 ignores 2/6)
+    expect(fnp5.mortalWounds.mean).toBeLessThan(noFnp.mortalWounds.mean);
+    expect(fnp5.breakdown.fnpIgnored).toBeGreaterThan(0);
+  });
+});
+
+describe('evalValue dice strings (A and D)', () => {
+  it('A "D6" averages 3.5 attacks per carrier', () => {
+    const res = run(attacker({ A: 'D6', BS: 3, S: 4, AP: 0, D: 1 }, 1000), target());
+    approx(res.breakdown.attacks, 1000 * 3.5, 0.05, 20); // ~3500
+  });
+  it('D "D3" averages 2 damage per failed save (into a fat model)', () => {
+    const fat = { ...target(), models: 1, W: 1000000 };
+    const res = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 'D3' }, 100), fat);
+    // failed saves = 100 * 4/6 * 3/6 (SV7 -> all fail); each does E[D3]=2 into the fat model.
+    approx(res.woundsDealt.mean, 100 * (4 / 6) * (3 / 6) * 2); // ~66.7
+  });
+});
+
+describe('damage min-1 floor', () => {
+  it('-1 Damage on a D1 weapon still does 1 (not 0)', () => {
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1 };
+    const reduced = run(attacker(w), target({ damageReduction: 1 }));
+    const base = run(attacker(w), target());
+    approx(reduced.kills.mean, 100 * (4 / 6) * P_W_S4T4); // ~33.3, unchanged
+    expect(reduced.kills.mean).toBe(base.kills.mean); // floor holds: 1-1 -> 1, not 0
+  });
+  it('Halve Damage on a D1 weapon still does 1 (ceil(0.5)=1)', () => {
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1 };
+    const halved = run(attacker(w), target({ halveDamage: true }));
+    approx(halved.kills.mean, 100 * (4 / 6) * P_W_S4T4); // ~33.3, unchanged
+  });
+});

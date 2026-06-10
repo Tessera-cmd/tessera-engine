@@ -1,0 +1,212 @@
+// src/engine/effects.test.js
+// Two layers under test:
+//   1. The pure rules->options resolver (resolveEffects / applyToSim / collectEffects) —
+//      exact assertions, no randomness.
+//   2. The engine primitives those rules feed (woundModifier, apBonus, damageBonus,
+//      granted keywords) — Monte Carlo means vs closed-form expectation, fixed seed.
+
+import { describe, it, expect } from 'vitest';
+import { runSimulation } from './monteCarlo.js';
+import { groupWeapons } from './combat.js';
+import {
+  resolveEffects,
+  applyToSim,
+  collectEffects,
+  strongerReroll,
+} from './effects.js';
+
+// ---- 1. pure resolver ------------------------------------------------------
+describe('resolveEffects', () => {
+  it('filters by phase and by active condition', () => {
+    const effects = [
+      { side: 'attacker', phase: 'shooting', mods: { hitModifier: 1 } },
+      { side: 'attacker', phase: 'fight', mods: { hitModifier: 1 } },
+      { side: 'attacker', phase: 'any', condition: 'onCharge', mods: { woundModifier: 1 } },
+    ];
+    const shootNoCond = resolveEffects(effects, { phase: 'shooting' });
+    expect(shootNoCond.attacker.hitModifier).toBe(1); // only the shooting one
+    expect(shootNoCond.attacker.woundModifier).toBe(0); // onCharge not active
+
+    const fightCharging = resolveEffects(effects, { phase: 'fight', activeConditions: ['onCharge'] });
+    expect(fightCharging.attacker.hitModifier).toBe(1); // the fight one
+    expect(fightCharging.attacker.woundModifier).toBe(1); // onCharge active
+  });
+
+  it('sums modifiers, keeps the strongest re-roll, and unions keywords (deduped/upper)', () => {
+    const { attacker } = resolveEffects(
+      [
+        { mods: { hitModifier: 1, reroll: { hit: 'ones' } } },
+        { mods: { hitModifier: 1, reroll: { hit: 'failed' } } },
+        { mods: { grantKeywords: ['lethal hits'] } },
+        { mods: { grantKeywords: ['LETHAL HITS', 'Sustained Hits 1'] } },
+      ],
+      { phase: 'shooting' },
+    );
+    expect(attacker.hitModifier).toBe(2); // resolver sums; engine clamps later
+    expect(attacker.hitReroll).toBe('failed'); // strongest of ones/failed
+    expect(attacker.grantKeywords).toEqual(['LETHAL HITS', 'SUSTAINED HITS 1']);
+  });
+
+  it('buckets defender-side effects separately', () => {
+    const { attacker, defender } = resolveEffects(
+      [
+        { side: 'defender', mods: { fnp: 5, hitPenalty: 1 } },
+        { side: 'defender', mods: { fnp: 6, damageReduction: 1 } },
+      ],
+      { phase: 'shooting' },
+    );
+    expect(attacker.hitModifier).toBe(0);
+    expect(defender.fnp).toBe(5); // best (lowest) FNP
+    expect(defender.hitPenalty).toBe(1);
+    expect(defender.damageReduction).toBe(1);
+  });
+
+  it('strongerReroll orders none < ones < failed < all', () => {
+    expect(strongerReroll('none', 'ones')).toBe('ones');
+    expect(strongerReroll('failed', 'ones')).toBe('failed');
+    expect(strongerReroll('all', 'failed')).toBe('all');
+  });
+});
+
+describe('applyToSim', () => {
+  it('folds an attacker patch into options (manual + rule modifiers stack)', () => {
+    const resolved = resolveEffects(
+      [{ mods: { hitModifier: 1, apBonus: 1, damageBonus: 2, grantKeywords: ['LETHAL HITS'], reroll: { wound: 'failed' } } }],
+      { phase: 'shooting' },
+    );
+    const { options } = applyToSim({ hitModifier: 1, woundReroll: 'ones' }, { SV: 4 }, resolved);
+    expect(options.hitModifier).toBe(2); // 1 manual + 1 rule (engine clamps to +1 at run time)
+    expect(options.apBonus).toBe(1);
+    expect(options.damageBonus).toBe(2);
+    expect(options.grantKeywords).toContain('LETHAL HITS');
+    expect(options.woundReroll).toBe('failed'); // strongest of manual 'ones' + rule 'failed'
+  });
+
+  it('folds a defender patch onto the defender (best FNP/invuln, additive -Dmg, harder to hit)', () => {
+    const resolved = resolveEffects(
+      [{ side: 'defender', mods: { fnp: 5, invuln: 4, damageReduction: 1, hitPenalty: 1 } }],
+      { phase: 'shooting' },
+    );
+    const { options, defender } = applyToSim({ hitModifier: 0 }, { FNP: null, INV: null, damageReduction: null }, resolved);
+    expect(defender.FNP).toBe(5);
+    expect(defender.INV).toBe(4);
+    expect(defender.damageReduction).toBe(1);
+    expect(options.hitModifier).toBe(-1); // attacker is -1 to hit this defender
+  });
+});
+
+describe('collectEffects', () => {
+  const detachment = {
+    rule: { effects: [{ name: 'r', mods: { grantKeywords: ['LETHAL HITS'] } }] },
+    stratagems: [
+      { id: 's1', effects: [{ name: 's1', mods: { damageBonus: 1 } }] },
+      { id: 's2', effects: [{ name: 's2', mods: { hitModifier: 1 } }] },
+    ],
+    enhancements: [{ id: 'e1', effects: [{ name: 'e1', mods: { apBonus: 1 } }] }],
+  };
+  it('gathers abilities + army rule + detachment rule + only the selected extras', () => {
+    const effs = collectEffects({
+      abilities: [{ name: 'ab', mods: { woundModifier: 1 } }],
+      armyRule: { effects: [{ name: 'ar', mods: { hitModifier: 1 } }] },
+      detachment,
+      stratagems: new Set(['s1']), // s2 not selected
+      enhancements: new Set([]), // e1 not selected
+    });
+    const names = effs.map((e) => e.name);
+    expect(names).toEqual(expect.arrayContaining(['ab', 'ar', 'r', 's1']));
+    expect(names).not.toContain('s2');
+    expect(names).not.toContain('e1');
+    expect(effs.find((e) => e.name === 'ab').source).toBe('ability');
+    expect(effs.find((e) => e.name === 's1').source).toBe('stratagem');
+  });
+});
+
+// ---- 2. engine primitives (Monte Carlo vs closed form) ---------------------
+const N = 30000;
+const SEED = 0x51a7e;
+const approx = (actual, expected, rel = 0.05, abs = 0.6) => {
+  const tol = Math.max(abs, rel * Math.abs(expected));
+  expect(Math.abs(actual - expected), `expected ~${expected}, got ${actual}`).toBeLessThanOrEqual(tol);
+};
+// One ranged weapon, BS3+ S4 D1; target T4, no save unless overridden, never runs out.
+const atk = (over = {}, count = 200) => ({
+  models: count,
+  weapons: [{ type: 'ranged', count, name: 'gun', A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: [], ...over }],
+});
+const tgt = (over = {}) => ({
+  models: 1000000, T: 4, SV: 7, W: 1, INV: null, FNP: null, damageReduction: null, halveDamage: false, keywords: ['INFANTRY'], ...over,
+});
+const run = (a, d, opts = {}) => runSimulation(a, d, { iterations: N, seed: SEED, phase: 'ranged', ...opts });
+const PHIT3 = 4 / 6;
+
+describe('engine primitive: woundModifier', () => {
+  it('+1 to wound shifts S4-vs-T4 from 4+ to effectively 3+', () => {
+    const base = run(atk(), tgt()).kills.mean; // 200 * 4/6 * 3/6
+    const plus = run(atk(), tgt(), { woundModifier: 1 }).kills.mean; // 200 * 4/6 * 4/6
+    approx(base, 200 * PHIT3 * (3 / 6));
+    approx(plus, 200 * PHIT3 * (4 / 6));
+  });
+  it('clamps to +/-1 (woundModifier 5 == woundModifier 1)', () => {
+    const one = run(atk(), tgt(), { woundModifier: 1 }).kills.mean;
+    const five = run(atk(), tgt(), { woundModifier: 5 }).kills.mean;
+    approx(five, one, 0.05, 1);
+  });
+});
+
+describe('engine primitive: apBonus', () => {
+  it('+1 AP worsens a 4+ save to 5+', () => {
+    const base = run(atk(), tgt({ SV: 4 })).kills.mean; // fail 3/6
+    const ap1 = run(atk(), tgt({ SV: 4 }), { apBonus: 1 }).kills.mean; // fail 4/6
+    approx(base, 200 * PHIT3 * (3 / 6) * (3 / 6));
+    approx(ap1, 200 * PHIT3 * (3 / 6) * (4 / 6));
+  });
+});
+
+describe('engine primitive: damageBonus', () => {
+  it('+1 Damage doubles damage applied to a fat (no-spillover) target', () => {
+    const fat = tgt({ W: 1e9, models: 1 });
+    const base = run(atk(), fat).woundsDealt.mean; // 200*4/6*3/6*1
+    const plus = run(atk(), fat, { damageBonus: 1 }).woundsDealt.mean; // *2
+    approx(plus, base * 2, 0.05, 2);
+  });
+});
+
+describe('engine primitive: strengthBonus', () => {
+  it('+1 Strength shifts the wound TABLE (S4-vs-T4 4+ -> S5-vs-T4 3+)', () => {
+    const base = run(atk(), tgt()).kills.mean; // 200 * 4/6 * 3/6 (wounds on 4+)
+    const s1 = run(atk(), tgt(), { strengthBonus: 1 }).kills.mean; // 200 * 4/6 * 4/6 (3+)
+    approx(base, 200 * PHIT3 * (3 / 6));
+    approx(s1, 200 * PHIT3 * (4 / 6));
+    expect(s1).toBeGreaterThan(base);
+  });
+  it('is a characteristic add, NOT clamped to +/-1 (+2 beats +1)', () => {
+    const w = { S: 2 }; // vs T4: base 6+, +1 -> 5+, +2 -> 4+
+    const one = run(atk(w), tgt(), { strengthBonus: 1 }).kills.mean; // 200 * 4/6 * 2/6
+    const two = run(atk(w), tgt(), { strengthBonus: 2 }).kills.mean; // 200 * 4/6 * 3/6
+    approx(one, 200 * PHIT3 * (2 / 6));
+    approx(two, 200 * PHIT3 * (3 / 6));
+    expect(two).toBeGreaterThan(one);
+  });
+});
+
+describe('engine primitive: attackBonus', () => {
+  it('+1 Attack adds one attack per carrier (doubles A1 output)', () => {
+    const base = run(atk(), tgt()).kills.mean;
+    const plus = run(atk(), tgt(), { attackBonus: 1 }).kills.mean;
+    approx(plus, base * 2, 0.05, 2);
+  });
+});
+
+describe('engine primitive: granted keywords', () => {
+  it('groupWeapons merges options.grantKeywords into every weapon (deduped)', () => {
+    const groups = groupWeapons(atk({ keywords: ['ASSAULT'] }), { phase: 'ranged', grantKeywords: ['LETHAL HITS'] });
+    expect(groups[0].weapon.keywords).toEqual(expect.arrayContaining(['ASSAULT', 'LETHAL HITS']));
+  });
+  it('granted LETHAL HITS makes crit hits auto-wound (more total wounds)', () => {
+    const base = run(atk(), tgt()).breakdown.wounds; // 200 * 4/6 * 0.5 = 66.7
+    const lethal = run(atk(), tgt(), { grantKeywords: ['LETHAL HITS'] }).breakdown.wounds;
+    // per ATTACK die: P(crit 6)=1/6 auto-wound + P(normal hit 3,4,5)=3/6 * P(wound)=1/2 = 5/12
+    approx(lethal, 200 * (5 / 12));
+    expect(lethal).toBeGreaterThan(base);
+  });
+});

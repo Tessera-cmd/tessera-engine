@@ -1,0 +1,37 @@
+{
+  "name": "tessera-engine",
+  "version": "1.0.0",
+  "description": "Deterministic Monte Carlo combat engine for Warhammer 40,000 (11th edition) — the tested math core of Tessera (playtessera.gg).",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "vitest run"
+  },
+  "keywords": [
+    "warhammer-40000",
+    "warhammer-40k",
+    "monte-carlo",
+    "dice",
+    "combat-simulator",
+    "tabletop",
+    "wargaming"
+  ],
+  "author": "Tessera (https://playtessera.gg)",
+  "homepage": "https://playtessera.gg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tessera-cmd/tessera-engine.git"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

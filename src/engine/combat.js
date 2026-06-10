@@ -1,0 +1,378 @@
+// src/engine/combat.js
+// Warhammer 40,000 11th-edition attack sequence (shooting + fight).
+//
+// Entry point is the WHOLE UNIT: simulateUnitAttack() resolves every weapon group
+// plus an attached leader's weapons in one run, carrying wound/kill state across
+// groups. simulateAttackSequence() resolves one identical-profile group through the
+// four steps (Hit -> Wound -> Save -> Damage), with mortal wounds applied at the end
+// of the group.
+//
+// Rules verified against reference/Core Rules 11th.pdf. Key 11th-edition points:
+//   - Cover = -1 to the shooter's BS *characteristic* (13.08), NOT a save bonus, and
+//     it lives in a separate "bucket" from hit-roll modifiers (so it stacks past -1).
+//   - Hit-roll modifiers are capped at +/-1 (Heavy's +1 lives in this bucket).
+//   - Excess damage from a single attack is LOST — each attack resolves on ONE model
+//     (05.04.3). Devastating-Wounds mortals cap at one model per critical wound (24.10).
+//   - FNP applies to mortal wounds too (24.12: "each time a model would lose a wound").
+
+import { d6, evalValue } from './dice.js';
+
+const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+
+// ---- keyword helpers -------------------------------------------------------
+const kwList = (weapon) => (weapon.keywords || []).map((k) => String(k).toUpperCase());
+
+function hasKw(weapon, name) {
+  return kwList(weapon).some((k) => k === name || k.startsWith(name + ' '));
+}
+
+// Numeric suffix of a parameterised keyword, e.g. "SUSTAINED HITS 2" -> 2.
+function kwValue(weapon, name, dflt = 0) {
+  const k = kwList(weapon).find((x) => x === name || x.startsWith(name + ' '));
+  if (!k) return dflt;
+  const m = k.match(/(\d+)/);
+  return m ? +m[1] : dflt;
+}
+
+// Parse "ANTI-INFANTRY 4+" -> { keywords:['INFANTRY'], threshold:4 } (supports A/B).
+function antiKeyword(weapon) {
+  const k = kwList(weapon).find((x) => x.startsWith('ANTI-') || x.startsWith('ANTI '));
+  if (!k) return null;
+  const m = k.match(/^ANTI[- ]([A-Z/ ]+?)\s+(\d)\+?$/);
+  if (!m) return null;
+  return { keywords: m[1].split('/').map((s) => s.trim()), threshold: +m[2] };
+}
+
+function defenderHasKeyword(defender, names) {
+  const dkw = (defender.keywords || []).map((k) => String(k).toUpperCase());
+  return names.some((n) => dkw.includes(n.toUpperCase()));
+}
+
+// Effective save vs a weapon: the better of AP-modified armour and invuln (which
+// ignores AP). target > 6 means AP has stripped the save away entirely. Used for the
+// "Effective Save" line in the results breakdown (deterministic — display only).
+export function effectiveSave(weapon, defender) {
+  const ap = weapon.AP || 0;
+  const armour = defender.SV - ap;
+  const inv = defender.INV != null ? defender.INV : 7;
+  const target = Math.min(armour, inv);
+  return { target, usesInvuln: inv < armour && inv <= 6, none: target > 6 };
+}
+
+// ---- wound table (identical to 10th) --------------------------------------
+export function woundTarget(S, T) {
+  if (S >= T * 2) return 2;
+  if (S > T) return 3;
+  if (S === T) return 4;
+  if (S * 2 <= T) return 6; // S <= T/2
+  return 5; // S < T
+}
+
+// ---- defender state (uniform profile; mixed-profile allocation is v1.5) -----
+function makeDefenderState(defender) {
+  return {
+    modelsRemaining: defender.models,
+    currentWounds: defender.W, // wounds left on the current (partially damaged) model
+    kills: 0, // whole models removed
+    woundsDealt: 0, // damage points applied (post-save, post-FNP) = wounds removed
+    mortalWounds: 0, // mortal wounds applied (subset of woundsDealt), tracked for insight
+    // --- per-phase funnel tallies (averaged across the run for the results breakdown) ---
+    attacks: 0, // attack dice rolled
+    hits: 0, // successful hits (incl. Sustained extras + Lethal auto-wound hits)
+    wounds: 0, // successful wounds before saves (incl. Lethal auto-wounds + Dev crits)
+    savedWounds: 0, // save-eligible wounds that passed their save
+    failedSaves: 0, // save-eligible wounds that failed (proceed to damage)
+    mortalInstances: 0, // Devastating-Wounds crits that bypassed saves
+    fnpIgnored: 0, // damage points (incl. mortal) ignored by Feel No Pain
+  };
+}
+
+// Resolve `dmg` damage from ONE attack against the current model. No spillover:
+// if the model dies, remaining points are lost (11th rules, 05.04.3).
+function applyDamage(state, defender, dmg, rng) {
+  if (state.modelsRemaining <= 0) return;
+  for (let i = 0; i < dmg; i++) {
+    if (defender.FNP && d6(rng) >= defender.FNP) {
+      state.fnpIgnored++; // FNP ignores this wound
+      continue;
+    }
+    state.currentWounds--;
+    state.woundsDealt++;
+    if (state.currentWounds <= 0) {
+      state.kills++;
+      state.modelsRemaining--;
+      state.currentWounds = state.modelsRemaining > 0 ? defender.W : 0;
+      return; // excess damage from this attack is lost
+    }
+  }
+}
+
+// Mortal wounds from ONE Devastating-Wounds critical wound (= weapon D).
+// Capped at one model per critical wound; excess lost (24.10). FNP still applies.
+function applyMortalWounds(state, defender, count, rng) {
+  if (state.modelsRemaining <= 0) return;
+  for (let i = 0; i < count; i++) {
+    if (defender.FNP && d6(rng) >= defender.FNP) {
+      state.fnpIgnored++;
+      continue;
+    }
+    state.currentWounds--;
+    state.woundsDealt++;
+    state.mortalWounds++;
+    if (state.currentWounds <= 0) {
+      state.kills++;
+      state.modelsRemaining--;
+      state.currentWounds = state.modelsRemaining > 0 ? defender.W : 0;
+      return; // one model max per critical wound; excess lost
+    }
+  }
+}
+
+// Single d6 check with at most one re-roll.
+//   threshold : number needed (after characteristic mods are folded into it)
+//   mod       : roll modifier (already clamped to +/-1 by the caller)
+//   reroll    : 'none' | 'ones' | 'failed' | 'all'
+//   critOn    : a roll >= critOn is a critical (auto-pass). 7 = only an unmodified 6.
+// Returns { pass, crit }. Unmodified 1 always fails; unmodified 6 always passes/crits.
+function checkRoll(rng, { threshold, mod = 0, reroll = 'none', critOn = 7 }) {
+  const evaluate = (r) => {
+    if (r === 1) return { pass: false, crit: false }; // unmodified 1 always fails
+    if (r === 6 || r >= critOn) return { pass: true, crit: true }; // crit auto-passes
+    return { pass: (r + mod) >= threshold, crit: false };
+  };
+  let r = d6(rng);
+  let res = evaluate(r);
+  const needReroll =
+    (reroll === 'ones' && r === 1) ||
+    ((reroll === 'failed' || reroll === 'all') && !res.pass);
+  if (needReroll) {
+    r = d6(rng);
+    res = evaluate(r);
+  }
+  return res;
+}
+
+function rollSave(rng, saveTarget, reroll) {
+  if (saveTarget >= 7) return false; // AP stripped the save away; no invuln either
+  const passes = (r) => r !== 1 && r >= saveTarget; // unmodified 1 always fails
+  let r = d6(rng);
+  let saved = passes(r);
+  const needReroll =
+    (reroll === 'ones' && r === 1) ||
+    ((reroll === 'failed' || reroll === 'all') && !saved);
+  if (needReroll) {
+    r = d6(rng);
+    saved = passes(r);
+  }
+  return saved;
+}
+
+/**
+ * Resolve one identical-profile weapon group against the (uniform) defender,
+ * mutating `state`. `count` = number of models firing this exact profile.
+ */
+export function simulateAttackSequence(weapon, count, defender, state, options, rng) {
+  if (!count) return;
+  // The sequence resolves fully even if the unit is already destroyed, so the funnel
+  // tallies (attacks/hits/wounds/saves) reflect the whole unit's output. The kill cap
+  // lives in applyDamage/applyMortalWounds (they no-op once the unit is dead).
+
+  const ranged = weapon.type === 'ranged';
+  const o = options || {};
+
+  // --- gather attack dice (per carrier) -------------------------------------
+  const rapidFire =
+    ranged && hasKw(weapon, 'RAPID FIRE') && o.withinRapidFireRange
+      ? kwValue(weapon, 'RAPID FIRE')
+      : 0;
+  // BLAST: +1 die per 5 models in the *original* target unit (never in melee).
+  const blast =
+    ranged && hasKw(weapon, 'BLAST') ? Math.floor(defender.models / 5) : 0;
+  // attackBonus: +N to the Attacks characteristic per carrier (army/detachment rules).
+  // Not clamped; floored at 0 so a debuff can't make a weapon's base attacks negative.
+  const attackBonus = o.attackBonus || 0;
+  let attacks = 0;
+  for (let i = 0; i < count; i++) {
+    attacks += Math.max(0, evalValue(weapon.A, rng) + attackBonus) + rapidFire + blast;
+  }
+  if (attacks <= 0) return;
+  state.attacks += attacks;
+
+  // --- weapon abilities -----------------------------------------------------
+  const torrent = hasKw(weapon, 'TORRENT');
+  const hasLethal = hasKw(weapon, 'LETHAL HITS');
+  const hasDev = hasKw(weapon, 'DEVASTATING WOUNDS');
+  const sustained = hasKw(weapon, 'SUSTAINED HITS') ? kwValue(weapon, 'SUSTAINED HITS') : 0;
+
+  // ===== STEP 1: HIT ROLLS ==================================================
+  // Bucket A — hit-roll modifiers, capped at +/-1 (Heavy's +1 belongs here).
+  let hitMod = clamp(o.hitModifier ?? 0, -1, 1);
+  if (ranged && hasKw(weapon, 'HEAVY') && o.remainedStationary) {
+    hitMod = clamp(hitMod + 1, -1, 1);
+  }
+  // Bucket B — BS/WS *characteristic* modifiers (separate; Cover stacks past -1).
+  let effTarget = ranged ? weapon.BS : weapon.WS;
+  if (ranged) {
+    if (o.targetInCover && !hasKw(weapon, 'IGNORES COVER')) effTarget += 1; // Cover: worsen BS by 1
+    if (o.plungingFire) effTarget -= 1; // Plunging Fire: improve BS by 1
+  }
+
+  let autoWounds = 0; // hits that auto-wound (Lethal Hits on a critical hit)
+  let normalHits = 0; // hits that proceed to the wound roll
+
+  for (let i = 0; i < attacks; i++) {
+    let pass, crit;
+    if (torrent) {
+      pass = true;
+      crit = false; // no hit roll -> no critical hit -> Lethal/Sustained cannot trigger
+    } else if (o.overwatch) {
+      const r = d6(rng); // Overwatch: hits land only on an unmodified 6 (a critical hit)
+      pass = r === 6;
+      crit = r === 6;
+    } else {
+      ({ pass, crit } = checkRoll(rng, {
+        threshold: effTarget,
+        mod: hitMod,
+        reroll: o.hitReroll,
+        critOn: 7,
+      }));
+    }
+    if (!pass) continue;
+    if (crit && sustained) normalHits += sustained; // extra (normal) hits
+    // Lethal auto-wound on a crit — but decline if the weapon also has Dev Wounds,
+    // so the crit can instead roll to wound and (on a crit wound) deal mortals.
+    if (crit && hasLethal && !hasDev) autoWounds += 1;
+    else normalHits += 1;
+  }
+  state.hits += autoWounds + normalHits; // total successful hits (incl. Sustained extras)
+
+  // ===== STEP 2: WOUND ROLLS ===============================================
+  // strengthBonus: +N to the Strength characteristic (army/detachment rules). Folded
+  // into the wound TABLE (not the wound roll) — the rules-correct model, since +1 S
+  // shifts the threshold differently than +1 to the wound roll. Not clamped (+2 is real).
+  const effS = weapon.S + (o.strengthBonus || 0);
+  const wt = woundTarget(effS, defender.T);
+  const anti = antiKeyword(weapon);
+  const critWoundOn =
+    anti && defenderHasKeyword(defender, anti.keywords) ? anti.threshold : 7;
+
+  let woundMod = clamp(o.woundModifier ?? 0, -1, 1); // wound-roll modifiers cap at +/-1
+  if (hasKw(weapon, 'LANCE') && o.charging) woundMod = clamp(woundMod + 1, -1, 1);
+
+  let woundReroll = o.woundReroll && o.woundReroll !== 'none' ? o.woundReroll : 'none';
+  if (hasKw(weapon, 'TWIN-LINKED')) woundReroll = woundReroll === 'all' ? 'all' : 'failed';
+
+  let woundsToSave = autoWounds; // auto-wounds (Lethal) are normal wounds -> still get a save
+  let devCritWounds = 0; // critical wounds that trigger Devastating Wounds
+
+  for (let i = 0; i < normalHits; i++) {
+    const { pass, crit } = checkRoll(rng, {
+      threshold: wt,
+      mod: woundMod,
+      reroll: woundReroll,
+      critOn: critWoundOn,
+    });
+    if (!pass) continue;
+    if (crit && hasDev) devCritWounds += 1; // -> mortal wounds, no save (resolved below)
+    else woundsToSave += 1; // normal wound (incl. a crit wound on a non-Dev weapon)
+  }
+  state.wounds += woundsToSave + devCritWounds; // all successful wounds (pre-save)
+  state.mortalInstances += devCritWounds; // Dev crits bypass saves -> mortal wounds
+
+  // ===== STEP 3 & 4: SAVES + DAMAGE (normal damage first, then mortals) =====
+  const ap = (weapon.AP || 0) - (o.apBonus || 0); // AP (negative); apBonus improves it
+  const armourTarget = defender.SV - ap; // AP worsens the save; >6 => no armour save
+  const invulnTarget = defender.INV != null ? defender.INV : 7; // invuln ignores AP
+  const saveTarget = Math.min(armourTarget, invulnTarget); // use the better save
+  const meltaAdd =
+    hasKw(weapon, 'MELTA') && o.withinMeltaRange
+      ? (weapon.meltaBonus ?? kwValue(weapon, 'MELTA'))
+      : 0;
+
+  for (let i = 0; i < woundsToSave; i++) {
+    if (rollSave(rng, saveTarget, o.saveReroll)) {
+      state.savedWounds++;
+      continue;
+    }
+    state.failedSaves++;
+    // failed save -> compute damage in fixed order: add -> divide -> subtract -> round up -> min 1
+    let dmg = evalValue(weapon.D, rng);
+    dmg += meltaAdd + (o.damageBonus || 0); // MELTA + flat damage bonuses (add)
+    if (defender.halveDamage) dmg = dmg / 2; // Halve (divide)
+    if (defender.damageReduction) dmg = dmg - defender.damageReduction; // -1 Damage (subtract)
+    dmg = Math.max(1, Math.ceil(dmg)); // round fractions up; always at least 1
+    applyDamage(state, defender, dmg, rng);
+  }
+
+  // Devastating Wounds: mortals = weapon D per critical wound (MELTA can raise D).
+  for (let i = 0; i < devCritWounds; i++) {
+    const mortals = evalValue(weapon.D, rng) + meltaAdd + (o.damageBonus || 0);
+    applyMortalWounds(state, defender, mortals, rng);
+  }
+}
+
+// Group identical weapon profiles, summing the model counts that carry each.
+export function groupWeapons(attacker, options) {
+  const phase = options.phase || 'ranged'; // 'ranged' | 'melee' | 'all'
+  const groups = new Map();
+  // Army/detachment rules can grant keywords to the whole unit (e.g. LETHAL HITS).
+  const granted = (options.grantKeywords || []).map((k) => String(k).toUpperCase());
+  const add = (weapon, defaultCount) => {
+    if (phase !== 'all' && weapon.type !== phase) return;
+    const count = weapon.count != null ? weapon.count : defaultCount;
+    if (!count) return;
+    // Merge granted keywords (deduped) so they resolve and grouping stays consistent.
+    const mergedKw = granted.length ? [...new Set([...kwList(weapon), ...granted])] : kwList(weapon);
+    const w = granted.length ? { ...weapon, keywords: mergedKw } : weapon;
+    const key = JSON.stringify([
+      w.type,
+      w.A,
+      w.BS,
+      w.WS,
+      w.S,
+      w.AP,
+      w.D,
+      w.meltaBonus ?? null,
+      mergedKw.slice().sort(),
+    ]);
+    if (groups.has(key)) groups.get(key).count += count;
+    else groups.set(key, { weapon: w, count });
+  };
+  for (const w of attacker.weapons || []) add(w, attacker.models);
+  if (attacker.leader && attacker.leader.weapons) {
+    for (const w of attacker.leader.weapons) add(w, attacker.leader.models ?? 1);
+  }
+  return [...groups.values()];
+}
+
+/**
+ * Resolve a whole unit's attack output in one run: every weapon group plus the
+ * attached leader's weapons, against a uniform defender. State is carried across
+ * groups (a model part-killed by one weapon stays wounded for the next).
+ * Returns { kills, woundsDealt, mortalWounds }.
+ */
+export function simulateUnitAttack(attacker, defender, options = {}, rng) {
+  const state = makeDefenderState(defender);
+  // Damage attributed to each weapon group, in groupWeapons() order. Computed by
+  // diffing woundsDealt around each group — no extra rolls, no change to outcomes.
+  const perProfile = [];
+  for (const g of groupWeapons(attacker, options)) {
+    const before = state.woundsDealt;
+    simulateAttackSequence(g.weapon, g.count, defender, state, options, rng);
+    perProfile.push(state.woundsDealt - before);
+  }
+  return {
+    kills: state.kills,
+    woundsDealt: state.woundsDealt,
+    mortalWounds: state.mortalWounds,
+    // per-phase funnel tallies (aggregated into means by the Monte Carlo runner)
+    attacks: state.attacks,
+    hits: state.hits,
+    wounds: state.wounds,
+    savedWounds: state.savedWounds,
+    failedSaves: state.failedSaves,
+    mortalInstances: state.mortalInstances,
+    fnpIgnored: state.fnpIgnored,
+    perProfile,
+  };
+}
