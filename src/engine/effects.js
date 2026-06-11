@@ -125,6 +125,30 @@ export function resolveEffects(effects, ctx = {}) {
   return { attacker: atk, defender: def };
 }
 
+// Apply a defensive patch to ONE model-group object (the body, the leader, or a champion
+// sub-profile), keeping the BETTER save / summing -Damage / OR-ing halve. Null/0/false
+// mods are no-ops. The fields match the unit/leader/profile schema (FNP/INV capitalised).
+export function mergeDefensive(target, d) {
+  if (!target || typeof target !== 'object' || !d) return target;
+  const out = { ...target };
+  if (d.fnp != null) out.FNP = out.FNP == null ? d.fnp : Math.min(out.FNP, d.fnp);
+  if (d.invuln != null) out.INV = out.INV == null ? d.invuln : Math.min(out.INV, d.invuln);
+  if (d.damageReduction) out.damageReduction = (out.damageReduction || 0) + d.damageReduction;
+  if (d.halveDamage) out.halveDamage = true;
+  return out;
+}
+
+// Distribute a defensive patch across the WHOLE unit (19.04: a unit-wide ability applies
+// to every model): the body, the attached leader, and any champion sub-profiles. Each
+// group keeps the better of its own and the aura, so a Character's intrinsic invuln is
+// never downgraded by a worse unit-wide one.
+export function distributeDefensive(defender, d) {
+  let out = mergeDefensive(defender, d);
+  if (out.leader) out = { ...out, leader: mergeDefensive(out.leader, d) };
+  if (Array.isArray(out.profiles)) out = { ...out, profiles: out.profiles.map((p) => mergeDefensive(p, d)) };
+  return out;
+}
+
 /**
  * Fold a resolved patch into a base sim options object + base defender object,
  * returning fresh `{ options, defender }` for runSimulation. Manual SimConfig values
@@ -147,17 +171,8 @@ export function applyToSim(baseOptions, baseDefender, resolved) {
   options.saveReroll = strongerReroll(baseOptions.saveReroll || 'none', d.saveReroll);
   options.grantKeywords = [...(baseOptions.grantKeywords || []), ...a.grantKeywords];
 
-  const defender = { ...baseDefender };
-  if (d.fnp != null) {
-    defender.FNP = defender.FNP == null ? d.fnp : Math.min(defender.FNP, d.fnp);
-  }
-  if (d.invuln != null) {
-    defender.INV = defender.INV == null ? d.invuln : Math.min(defender.INV, d.invuln);
-  }
-  if (d.damageReduction) {
-    defender.damageReduction = (defender.damageReduction || 0) + d.damageReduction;
-  }
-  if (d.halveDamage) defender.halveDamage = true;
+  // Defensive auras apply unit-wide — to the body AND the attached leader/champions.
+  const defender = distributeDefensive(baseDefender, d);
 
   return { options, defender };
 }

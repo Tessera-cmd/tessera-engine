@@ -11,6 +11,7 @@ import { groupWeapons } from './combat.js';
 import {
   resolveEffects,
   applyToSim,
+  distributeDefensive,
   collectEffects,
   strongerReroll,
 } from './effects.js';
@@ -92,6 +93,35 @@ describe('applyToSim', () => {
     expect(defender.INV).toBe(4);
     expect(defender.damageReduction).toBe(1);
     expect(options.hitModifier).toBe(-1); // attacker is -1 to hit this defender
+  });
+
+  it('distributes a defensive aura to the attached leader + champions (19.04)', () => {
+    const resolved = resolveEffects(
+      [{ side: 'defender', mods: { fnp: 5, invuln: 6, damageReduction: 1, halveDamage: true } }],
+      { phase: 'shooting' },
+    );
+    const base = {
+      FNP: null,
+      INV: null,
+      leader: { name: 'Boss', FNP: null, INV: 4 }, // already has a better 4++ invuln
+      profiles: [{ name: 'Champ', FNP: null }],
+    };
+    const { defender } = applyToSim({}, base, resolved);
+    expect(defender.FNP).toBe(5); // body
+    expect(defender.leader.FNP).toBe(5); // aura reached the leader
+    expect(defender.leader.INV).toBe(4); // kept the better intrinsic 4++ (min(4,6))
+    expect(defender.leader.halveDamage).toBe(true);
+    expect(defender.profiles[0].FNP).toBe(5); // and the champion sub-profile
+  });
+});
+
+describe('distributeDefensive', () => {
+  it('null / 0 / false mods are no-ops (a unit with no aura is untouched)', () => {
+    const d = { FNP: 6, leader: { FNP: null }, profiles: [{ FNP: null }] };
+    const out = distributeDefensive(d, { fnp: null, invuln: null, damageReduction: 0, halveDamage: false });
+    expect(out.FNP).toBe(6);
+    expect(out.leader.FNP).toBeNull();
+    expect(out.profiles[0].FNP).toBeNull();
   });
 });
 

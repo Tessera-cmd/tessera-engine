@@ -11,6 +11,7 @@
 
 import { makeRng } from './dice.js';
 import { simulateUnitAttack, effectiveSave, groupWeapons } from './combat.js';
+import { defenderModelTotal, defenderWoundTotal } from './allocation.js';
 import { computeStats } from '../utils/stats.js';
 
 // Distinct effective-save targets across the weapons that actually fire. Returns the
@@ -92,10 +93,12 @@ export function runSimulation(attacker, defender, options = {}) {
     seed,
   };
 
-  // Per-phase funnel (means + derived rates). rate() guards against /0.
+  // Per-phase funnel (means + derived rates). rate() guards against /0. Totals span every
+  // allocation group, so a led/mixed defender's true model count + wound pool are reflected.
   const mean = (x) => +(x / N).toFixed(2);
   const rate = (num, den) => (den > 0 ? num / den : null);
-  const totalWounds = defender.models * defender.W;
+  const totalModels = defenderModelTotal(defender);
+  const totalWounds = defenderWoundTotal(defender);
 
   // Per-weapon-group mean damage (sums to ~woundsDealt.mean), in firing order.
   const perProfile = groups.map((g, i) => ({
@@ -125,7 +128,7 @@ export function runSimulation(attacker, defender, options = {}) {
     damageDealt: result.woundsDealt.mean,
     pctDamage: totalWounds > 0 ? result.woundsDealt.mean / totalWounds : null,
     save: summariseSave(attacker, defender, options),
-    totalModels: defender.models,
+    totalModels,
     totalWounds,
     hasFNP: defender.FNP != null,
     perProfile,

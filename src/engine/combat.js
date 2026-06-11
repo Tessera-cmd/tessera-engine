@@ -19,6 +19,13 @@
 //     dealt to the defender, which is the only thing this engine measures.
 
 import { d6, evalValue } from './dice.js';
+import {
+  isMixedDefender,
+  buildGroups,
+  currentWoundToughness,
+  resolveMixedSaves,
+  resolveMixedMortals,
+} from './allocation.js';
 
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
@@ -73,11 +80,14 @@ export function woundTarget(S, T) {
   return 5; // S < T
 }
 
-// ---- defender state (uniform profile; mixed-profile allocation is v1.5) -----
+// ---- defender state --------------------------------------------------------
+// A uniform (single-profile) defender keeps the flat fast path: one wound pool
+// (modelsRemaining / currentWounds). A MIXED defender (a multi-wound champion in the
+// squad, and/or an attached Leader when defending) carries `groups` instead, and the
+// save + damage step routes through allocation.js (11th-edition allocation order). The
+// funnel tallies are identical either way, so the Monte Carlo breakdown is unchanged.
 function makeDefenderState(defender) {
-  return {
-    modelsRemaining: defender.models,
-    currentWounds: defender.W, // wounds left on the current (partially damaged) model
+  const state = {
     kills: 0, // whole models removed
     woundsDealt: 0, // damage points applied (post-save, post-FNP) = wounds removed
     mortalWounds: 0, // mortal wounds applied (subset of woundsDealt), tracked for insight
@@ -89,7 +99,16 @@ function makeDefenderState(defender) {
     failedSaves: 0, // save-eligible wounds that failed (proceed to damage)
     mortalInstances: 0, // Devastating-Wounds crits that bypassed saves
     fnpIgnored: 0, // damage points (incl. mortal) ignored by Feel No Pain
+    totalModels: defender.models, // for Blast (floor(models / 5)); includes leader/champions when mixed
   };
+  if (isMixedDefender(defender)) {
+    state.groups = buildGroups(defender);
+    state.totalModels = state.groups.reduce((s, g) => s + g.models, 0);
+  } else {
+    state.modelsRemaining = defender.models;
+    state.currentWounds = defender.W; // wounds left on the current (partially damaged) model
+  }
+  return state;
 }
 
 // Resolve `dmg` damage from ONE attack against the current model. No spillover:
@@ -197,9 +216,10 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
     ranged && hasKw(weapon, 'RAPID FIRE') && o.withinRapidFireRange
       ? kwValue(weapon, 'RAPID FIRE')
       : 0;
-  // BLAST: +1 die per 5 models in the *original* target unit (never in melee).
+  // BLAST: +1 die per 5 models in the *original* target unit (never in melee). Counts
+  // the whole unit, including an attached leader/champions when the defender is mixed.
   const blast =
-    ranged && hasKw(weapon, 'BLAST') ? Math.floor(defender.models / 5) : 0;
+    ranged && hasKw(weapon, 'BLAST') ? Math.floor(state.totalModels / 5) : 0;
   // attackBonus: +N to the Attacks characteristic per carrier (army/detachment rules).
   // Not clamped; floored at 0 so a debuff can't make a weapon's base attacks negative.
   const attackBonus = o.attackBonus || 0;
@@ -263,10 +283,20 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   // into the wound TABLE (not the wound roll), the rules-correct model, since +1 S
   // shifts the threshold differently than +1 to the wound roll. Not clamped (+2 is real).
   const effS = weapon.S + (o.strengthBonus || 0);
-  const wt = woundTarget(effS, defender.T);
+  // 19.02: vs an attached/mixed unit the wound roll uses the highest bodyguard Toughness
+  // (the Leader's only once they are gone). A uniform defender just uses its single T.
+  const T = state.groups ? currentWoundToughness(state.groups) ?? defender.T : defender.T;
+  const wt = woundTarget(effS, T);
   const anti = antiKeyword(weapon);
+  // 19.03: an attached unit has all its components' keywords, so Anti-[keyword] can trigger
+  // off the leader's keyword even for wounds not allocated to it. Union the leader's in when
+  // the defender is mixed (uniform defenders are unchanged — byte-identical).
+  const antiKeywords =
+    state.groups && defender.leader
+      ? { keywords: [...(defender.keywords || []), ...(defender.leader.keywords || [])] }
+      : defender;
   const critWoundOn =
-    anti && defenderHasKeyword(defender, anti.keywords) ? anti.threshold : 7;
+    anti && defenderHasKeyword(antiKeywords, anti.keywords) ? anti.threshold : 7;
 
   let woundMod = clamp(o.woundModifier ?? 0, -1, 1); // wound-roll modifiers cap at +/-1
   if (hasKw(weapon, 'LANCE') && o.charging) woundMod = clamp(woundMod + 1, -1, 1);
@@ -293,13 +323,27 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
 
   // ===== STEP 3 & 4: SAVES + DAMAGE (normal damage first, then mortals) =====
   const ap = (weapon.AP || 0) - (o.apBonus || 0); // AP (negative); apBonus improves it
-  const armourTarget = defender.SV - ap; // AP worsens the save; >6 => no armour save
-  const invulnTarget = defender.INV != null ? defender.INV : 7; // invuln ignores AP
-  const saveTarget = Math.min(armourTarget, invulnTarget); // use the better save
   const meltaAdd =
     hasKw(weapon, 'MELTA') && o.withinMeltaRange
       ? (weapon.meltaBonus ?? kwValue(weapon, 'MELTA'))
       : 0;
+  const damageBonus = o.damageBonus || 0;
+
+  if (state.groups) {
+    // Mixed defender: full 11th-edition allocation (allocation.js). Devastating-Wounds
+    // mortals: attacker-side D mods (Melta, damageBonus) apply, the defender's halve /
+    // -1 Damage do NOT (the M-6 pinned position — 24.10 ends the attack at the crit).
+    const ctx = { ap, meltaAdd, damageBonus, saveReroll: o.saveReroll, weaponD: weapon.D };
+    resolveMixedSaves(state, woundsToSave, ctx, rng);
+    resolveMixedMortals(state, devCritWounds, { meltaAdd, damageBonus, weaponD: weapon.D }, rng);
+    return;
+  }
+
+  // Uniform (single-profile) defender: the original fast path, kept bit-identical to the
+  // golden tests (every model has the same save and wound pool, so ordering is moot).
+  const armourTarget = defender.SV - ap; // AP worsens the save; >6 => no armour save
+  const invulnTarget = defender.INV != null ? defender.INV : 7; // invuln ignores AP
+  const saveTarget = Math.min(armourTarget, invulnTarget); // use the better save
 
   for (let i = 0; i < woundsToSave; i++) {
     if (rollSave(rng, saveTarget, o.saveReroll)) {
@@ -309,21 +353,17 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
     state.failedSaves++;
     // failed save -> compute damage in fixed order: add -> divide -> subtract -> round up -> min 1
     let dmg = evalValue(weapon.D, rng);
-    dmg += meltaAdd + (o.damageBonus || 0); // MELTA + flat damage bonuses (add)
+    dmg += meltaAdd + damageBonus; // MELTA + flat damage bonuses (add)
     if (defender.halveDamage) dmg = dmg / 2; // Halve (divide)
     if (defender.damageReduction) dmg = dmg - defender.damageReduction; // -1 Damage (subtract)
     dmg = Math.max(1, Math.ceil(dmg)); // round fractions up; always at least 1
     applyDamage(state, defender, dmg, rng);
   }
 
-  // Devastating Wounds: mortals = the weapon's D per critical wound. Position (pinned by
-  // a golden test): attacker-side mods that raise the weapon's D (Melta, damageBonus)
-  // apply, but the defender's halveDamage / damageReduction deliberately do NOT. The
-  // 24.10 wording ends the attack sequence at the critical wound and the unit "suffers a
-  // number of mortal wounds equal to the D characteristic of that weapon", so the
-  // allocation step those defender abilities hook into never happens for this attack.
+  // Devastating Wounds: mortals = the weapon's D per critical wound (same pinned position
+  // as the mixed path above; see resolveMixedMortals).
   for (let i = 0; i < devCritWounds; i++) {
-    const mortals = evalValue(weapon.D, rng) + meltaAdd + (o.damageBonus || 0);
+    const mortals = evalValue(weapon.D, rng) + meltaAdd + damageBonus;
     applyMortalWounds(state, defender, mortals, rng);
   }
 }
