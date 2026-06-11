@@ -212,7 +212,7 @@ describe('no-spillover damage (11th rule: excess from one attack is lost)', () =
     const atk = attacker({ A: 1, BS: 3, S: 10, AP: -6, D: 3 }, 200);
     const res = run(atk, target({ W: 2 }));
     const failed = (4 / 6) * (5 / 6);
-    approx(res.kills.mean, 200 * failed); // ~111.1 (NOT ~222 — no spill to next model)
+    approx(res.kills.mean, 200 * failed); // ~111.1 (NOT ~222, no spill to next model)
     approx(res.woundsDealt.mean, 200 * failed * 2); // ~222.2 (2 wounds/kill, 3rd lost)
   });
 

@@ -11,7 +11,7 @@
 //   - Cover = -1 to the shooter's BS *characteristic* (13.08), NOT a save bonus, and
 //     it lives in a separate "bucket" from hit-roll modifiers (so it stacks past -1).
 //   - Hit-roll modifiers are capped at +/-1 (Heavy's +1 lives in this bucket).
-//   - Excess damage from a single attack is LOST — each attack resolves on ONE model
+//   - Excess damage from a single attack is LOST, each attack resolves on ONE model
 //     (05.04.3). Devastating-Wounds mortals cap at one model per critical wound (24.10).
 //   - FNP applies to mortal wounds too (24.12: "each time a model would lose a wound").
 
@@ -50,7 +50,7 @@ function defenderHasKeyword(defender, names) {
 
 // Effective save vs a weapon: the better of AP-modified armour and invuln (which
 // ignores AP). target > 6 means AP has stripped the save away entirely. Used for the
-// "Effective Save" line in the results breakdown (deterministic — display only).
+// "Effective Save" line in the results breakdown (deterministic, display only).
 export function effectiveSave(weapon, defender) {
   const ap = weapon.AP || 0;
   const armour = defender.SV - ap;
@@ -205,12 +205,12 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   const sustained = hasKw(weapon, 'SUSTAINED HITS') ? kwValue(weapon, 'SUSTAINED HITS') : 0;
 
   // ===== STEP 1: HIT ROLLS ==================================================
-  // Bucket A — hit-roll modifiers, capped at +/-1 (Heavy's +1 belongs here).
+  // Bucket A, hit-roll modifiers, capped at +/-1 (Heavy's +1 belongs here).
   let hitMod = clamp(o.hitModifier ?? 0, -1, 1);
   if (ranged && hasKw(weapon, 'HEAVY') && o.remainedStationary) {
     hitMod = clamp(hitMod + 1, -1, 1);
   }
-  // Bucket B — BS/WS *characteristic* modifiers (separate; Cover stacks past -1).
+  // Bucket B, BS/WS *characteristic* modifiers (separate; Cover stacks past -1).
   let effTarget = ranged ? weapon.BS : weapon.WS;
   if (ranged) {
     if (o.targetInCover && !hasKw(weapon, 'IGNORES COVER')) effTarget += 1; // Cover: worsen BS by 1
@@ -239,7 +239,7 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
     }
     if (!pass) continue;
     if (crit && sustained) normalHits += sustained; // extra (normal) hits
-    // Lethal auto-wound on a crit — but decline if the weapon also has Dev Wounds,
+    // Lethal auto-wound on a crit, but decline if the weapon also has Dev Wounds,
     // so the crit can instead roll to wound and (on a crit wound) deal mortals.
     if (crit && hasLethal && !hasDev) autoWounds += 1;
     else normalHits += 1;
@@ -248,7 +248,7 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
 
   // ===== STEP 2: WOUND ROLLS ===============================================
   // strengthBonus: +N to the Strength characteristic (army/detachment rules). Folded
-  // into the wound TABLE (not the wound roll) — the rules-correct model, since +1 S
+  // into the wound TABLE (not the wound roll), the rules-correct model, since +1 S
   // shifts the threshold differently than +1 to the wound roll. Not clamped (+2 is real).
   const effS = weapon.S + (o.strengthBonus || 0);
   const wt = woundTarget(effS, defender.T);
@@ -354,7 +354,7 @@ export function groupWeapons(attacker, options) {
 export function simulateUnitAttack(attacker, defender, options = {}, rng) {
   const state = makeDefenderState(defender);
   // Damage attributed to each weapon group, in groupWeapons() order. Computed by
-  // diffing woundsDealt around each group — no extra rolls, no change to outcomes.
+  // diffing woundsDealt around each group, no extra rolls, no change to outcomes.
   const perProfile = [];
   for (const g of groupWeapons(attacker, options)) {
     const before = state.woundsDealt;

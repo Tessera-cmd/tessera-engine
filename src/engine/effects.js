@@ -1,8 +1,8 @@
 // src/engine/effects.js
 // Army-rule / detachment-rule / stratagem / enhancement / unit-ability EFFECTS, and
 // the pure functions that resolve them into the combat engine's existing options +
-// keyword grants. THE ENGINE STAYS PURE: it knows nothing about armies or detachments
-// — this layer translates "rules" into the modifiers the engine already consumes
+// keyword grants. THE ENGINE STAYS PURE: it knows nothing about armies or detachments.
+// This layer translates "rules" into the modifiers the engine already consumes
 // (hitModifier, woundModifier, re-rolls, granted keywords, apBonus, damageBonus, and
 // the defender's FNP / damage reduction / halve / harder-to-hit).
 //
@@ -21,7 +21,7 @@
 //       // attacker-side (offensive):
 //       hitModifier?, woundModifier?,         // ints; the engine clamps each to +/-1
 //       apBonus?, damageBonus?,               // ints; improve AP / add flat Damage
-//       strengthBonus?, attackBonus?,         // ints; +N Strength (via wound table) / +N Attacks — NOT clamped
+//       strengthBonus?, attackBonus?,         // ints; +N Strength (via wound table) / +N Attacks, NOT clamped
 //       reroll?: { hit?, wound? },            // 'ones' | 'failed' | 'all'
 //       grantKeywords?: string[],             // weapon keywords granted to the unit
 //       // defender-side (defensive):
@@ -44,7 +44,7 @@ export const CONDITIONS = [
 ];
 
 const REROLL_RANK = { none: 0, ones: 1, failed: 2, all: 3 };
-// Re-rolls don't stack — keep the strongest of two (all > failed > ones > none).
+// Re-rolls don't stack, keep the strongest of two (all > failed > ones > none).
 export function strongerReroll(a, b) {
   const ra = REROLL_RANK[a] ?? 0;
   const rb = REROLL_RANK[b] ?? 0;
@@ -79,7 +79,7 @@ function emptyDefender() {
  * Resolve a flat list of effects (from any source) into attacker + defender patches,
  * keeping only those that match the active phase and whose condition is active. Each
  * effect carries its own `side`, so attacker and defender rules can be mixed in one
- * list. Pure — no engine calls, no randomness.
+ * list. Pure, no engine calls, no randomness.
  *
  * @param effects  Effect[]
  * @param ctx      { phase: 'shooting'|'fight', activeConditions?: Set<string>|string[] }

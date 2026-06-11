@@ -15,7 +15,7 @@
 // Batch mode (premium "Compare vs roster") runs many matchups sequentially in the one
 // worker and returns a COMPACT per-cell summary (no histograms) so the table stays light.
 //
-// The onProgress callback is created HERE, inside the worker — functions are not
+// The onProgress callback is created HERE, inside the worker, functions are not
 // passed across postMessage, so `options` from the main thread carries only data.
 //
 // When `variants` are supplied (one per toggled rule, each = the full selection minus

@@ -1,9 +1,9 @@
 // src/engine/effects.test.js
 // Two layers under test:
-//   1. The pure rules->options resolver (resolveEffects / applyToSim / collectEffects) —
+//   1. The pure rules->options resolver (resolveEffects / applyToSim / collectEffects),
 //      exact assertions, no randomness.
 //   2. The engine primitives those rules feed (woundModifier, apBonus, damageBonus,
-//      granted keywords) — Monte Carlo means vs closed-form expectation, fixed seed.
+//      granted keywords), Monte Carlo means vs closed-form expectation, fixed seed.
 
 import { describe, it, expect } from 'vitest';
 import { runSimulation } from './monteCarlo.js';

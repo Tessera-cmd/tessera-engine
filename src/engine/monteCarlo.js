@@ -52,7 +52,7 @@ export function runSimulation(attacker, defender, options = {}) {
   const kills = new Array(N);
   const wounds = new Array(N);
   const mortals = new Array(N);
-  // Funnel accumulators — only means are needed, so sum scalars rather than keep arrays.
+  // Funnel accumulators, only means are needed, so sum scalars rather than keep arrays.
   let sAttacks = 0;
   let sHits = 0;
   let sWounds = 0;
@@ -129,7 +129,7 @@ export function runSimulation(attacker, defender, options = {}) {
     perProfile,
   };
 
-  // Efficiency metric — only meaningful once a real points cost is set.
+  // Efficiency metric, only meaningful once a real points cost is set.
   if (attacker.points) {
     result.killsPerPoint = +(result.kills.mean / attacker.points).toFixed(4);
     result.woundsPerPoint = +(result.woundsDealt.mean / attacker.points).toFixed(4);

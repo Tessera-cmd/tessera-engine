@@ -2,7 +2,7 @@
 // Army-rule and detachment-rule LIBRARY for the combat simulator.
 //
 // ⚠ 11th-edition army & detachment rules are NOT yet fully announced. Nothing in this
-// file is real Games Workshop data — every entry is a clearly-marked **[Example]**
+// file is real Games Workshop data, every entry is a clearly-marked **[Example]**
 // that exists only to exercise the effects pipeline and the UI. When 11th rules are
 // announced (or a user supplies their own), real entries replace these, following the
 // Effect shape documented in src/engine/effects.js. This mirrors the project's
@@ -17,7 +17,7 @@ export const ARMY_RULES = [
     faction: 'Space Marines',
     name: '[Example] Marked for Death',
     isExample: true,
-    description: 'Example only — re-roll Hits and Wounds against a marked target (Oath-of-Moment shape).',
+    description: 'Example only, re-roll Hits and Wounds against a marked target (Oath-of-Moment shape).',
     effects: [
       { name: 'Re-roll Hits vs marked', side: 'attacker', phase: 'any', condition: 'targetMarked', mods: { reroll: { hit: 'all' } } },
       { name: 'Re-roll Wounds vs marked', side: 'attacker', phase: 'any', condition: 'targetMarked', mods: { reroll: { wound: 'all' } } },
@@ -28,7 +28,7 @@ export const ARMY_RULES = [
     faction: 'Orks',
     name: '[Example] Green Tide',
     isExample: true,
-    description: 'Example only — +1 to Hit while charging; +1 Strength and +1 Attack in melee on the charge (Waaagh! shape).',
+    description: 'Example only, +1 to Hit while charging; +1 Strength and +1 Attack in melee on the charge (Waaagh! shape).',
     effects: [
       { name: '+1 to Hit (charging)', side: 'attacker', phase: 'any', condition: 'onCharge', mods: { hitModifier: 1 } },
       { name: '+1 Strength (melee, charging)', side: 'attacker', phase: 'fight', condition: 'onCharge', mods: { strengthBonus: 1 } },
@@ -40,7 +40,7 @@ export const ARMY_RULES = [
     faction: 'Any',
     name: '[Example] Resilient (defensive)',
     isExample: true,
-    description: 'Example only — a 5+ Feel No Pain, and enemies subtract 1 from Hit rolls targeting this unit.',
+    description: 'Example only, a 5+ Feel No Pain, and enemies subtract 1 from Hit rolls targeting this unit.',
     effects: [
       { name: '5+ Feel No Pain', side: 'defender', phase: 'any', mods: { fnp: 5 } },
       { name: '-1 to be Hit', side: 'defender', phase: 'any', mods: { hitPenalty: 1 } },
@@ -88,7 +88,7 @@ export const DETACHMENTS = [
     faction: 'Orks',
     name: '[Example] War Horde',
     isExample: true,
-    description: 'Example detachment — grants Sustained Hits in melee with an aggressive stratagem.',
+    description: 'Example detachment, grants Sustained Hits in melee with an aggressive stratagem.',
     rule: {
       name: '[Example] Get Stuck In',
       effects: [

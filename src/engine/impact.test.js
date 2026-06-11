@@ -2,7 +2,7 @@
 // The "was it worth it?" planner. Verifies the leave-one-out plan structure and the
 // headline behaviour the Hints section relies on: a +1-Damage stratagem reads as
 // low-impact against 1-wound models (excess damage is lost) but high-impact against
-// 2-wound models — measured through the real plan + engine, as the worker does.
+// 2-wound models, measured through the real plan + engine, as the worker does.
 
 import { describe, it, expect } from 'vitest';
 import { runSimulation } from './monteCarlo.js';

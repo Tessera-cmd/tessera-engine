@@ -2,7 +2,7 @@
 // Summary statistics for Monte Carlo output arrays.
 
 // Build a histogram from an ascending-sorted array of integer outcomes.
-// Returns [{ value, count, pct }] sorted by value — ready for a bar chart.
+// Returns [{ value, count, pct }] sorted by value, ready for a bar chart.
 export function buildHistogram(sorted) {
   const counts = new Map();
   for (const v of sorted) counts.set(v, (counts.get(v) || 0) + 1);
@@ -18,7 +18,7 @@ export function buildHistogram(sorted) {
 
 // Cumulative "at least N" probabilities from a histogram (premium results view).
 // Input is the [{ value, count, pct }] distribution from buildHistogram (ascending).
-// Returns [{ value, pct }] where pct = P(outcome >= value) as a percentage — the
+// Returns [{ value, pct }] where pct = P(outcome >= value) as a percentage, the
 // "what are the odds I kill at least N?" curve. Empty in, empty out.
 export function cumulativeAtLeast(distribution) {
   if (!Array.isArray(distribution) || distribution.length === 0) return [];
