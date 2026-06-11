@@ -1,7 +1,7 @@
 {
   "name": "tessera-engine",
   "version": "1.0.0",
-  "description": "Deterministic Monte Carlo combat engine for Warhammer 40,000 (11th edition) — the tested math core of Tessera (playtessera.gg).",
+  "description": "Deterministic Monte Carlo combat engine for Warhammer 40,000 (11th edition), the tested maths core behind Tessera (playtessera.gg).",
   "type": "module",
   "license": "AGPL-3.0-only",
   "main": "src/index.js",
