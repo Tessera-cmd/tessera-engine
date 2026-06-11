@@ -11,7 +11,7 @@
 
 import { makeRng } from './dice.js';
 import { simulateUnitAttack, effectiveSave, groupWeapons } from './combat.js';
-import { defenderModelTotal, defenderWoundTotal, attachedChars } from './allocation.js';
+import { defenderModelTotal, defenderWoundTotal, defenderModelWounds, attachedChars } from './allocation.js';
 import { computeStats } from '../utils/stats.js';
 
 // Distinct effective-save targets across the weapons that actually fire. Returns the
@@ -130,6 +130,8 @@ export function runSimulation(attacker, defender, options = {}) {
     save: summariseSave(attacker, defender, options),
     totalModels,
     totalWounds,
+    modelWounds: defenderModelWounds(defender), // per-model wounds in allocation order (≤20 models), for the damage bar
+
     hasFNP: defender.FNP != null,
     perProfile,
   };

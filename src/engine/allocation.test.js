@@ -19,6 +19,7 @@ import {
   currentWoundToughness,
   defenderModelTotal,
   defenderWoundTotal,
+  defenderModelWounds,
   resolveMixedSaves,
   resolveMixedMortals,
   attachedChars,
@@ -118,6 +119,26 @@ describe('buildGroups', () => {
     const def = { models: 5, W: 2, SV: 3, T: 4 };
     expect(defenderModelTotal(def)).toBe(5);
     expect(defenderWoundTotal(def)).toBe(10);
+  });
+});
+
+describe('defenderModelWounds (per-model wounds for the damage bar)', () => {
+  it('lists per-model wounds in allocation order: cheap body first, characters last', () => {
+    const def = {
+      models: 10,
+      W: 1,
+      SV: 5,
+      T: 5,
+      profiles: [{ name: 'Boss Nob', count: 1, W: 2 }],
+      leader: { name: 'Warboss', models: 1, W: 6, SV: 4 },
+    };
+    expect(defenderModelWounds(def)).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 6]); // 9xW1, BossNob W2, Warboss W6
+  });
+  it('a uniform unit is a flat list of its W', () => {
+    expect(defenderModelWounds({ models: 3, W: 2 })).toEqual([2, 2, 2]);
+  });
+  it('returns null for very large units (the bar uses the continuous fallback)', () => {
+    expect(defenderModelWounds({ models: 100000, W: 1 })).toBeNull();
   });
 });
 

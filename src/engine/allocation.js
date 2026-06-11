@@ -149,6 +149,19 @@ export function defenderWoundTotal(defender) {
   return buildGroups(defender).reduce((s, g) => s + g.models * g.W, 0);
 }
 
+// Per-model wound counts in allocation order (cheap bodyguard models first, the Leader/
+// Support characters last) — for the results "damage done" bar, so it can size each model
+// by its real wounds instead of a misleading unit average. Returns null for very large
+// units (the bar uses a single continuous fill there anyway).
+export function defenderModelWounds(defender, cap = 20) {
+  const total = defenderModelTotal(defender);
+  if (!total || total > cap) return null;
+  if (!isMixedDefender(defender)) return Array(total).fill(defender.W ?? 1);
+  const out = [];
+  for (const g of buildGroups(defender)) for (let i = 0; i < g.models; i++) out.push(g.W);
+  return out;
+}
+
 const isWounded = (g) => g.currentWounds < g.W;
 
 // The current allocation group (05.04 / 06.02): non-CHARACTER before CHARACTER, and within
