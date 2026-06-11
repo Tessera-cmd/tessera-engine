@@ -29,7 +29,9 @@ function summariseSave(attacker, defender, options) {
   }
   const distinct = new Map();
   for (const w of weapons) {
-    const s = effectiveSave(w, defender);
+    // Rule-granted AP (options.apBonus) changes the save the engine actually rolls
+    // against, so the displayed target has to include it too.
+    const s = effectiveSave(w, defender, options.apBonus || 0);
     distinct.set(s.none ? 'none' : `${s.target}${s.usesInvuln ? 'i' : ''}`, s);
   }
   const arr = [...distinct.values()];

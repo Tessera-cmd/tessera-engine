@@ -143,3 +143,52 @@ describe('damage min-1 floor', () => {
     approx(halved.kills.mean, 100 * (4 / 6) * P_W_S4T4); // ~33.3, unchanged
   });
 });
+
+// ---- pinned engine positions (audit M-6) ------------------------------------
+// These two are deliberate rulings on points the rules leave arguable, pinned so the
+// choice reads as a decision, not an accident. The WHY lives in combat.js next to the
+// code; the tests here make a silent change to either position fail loudly.
+
+describe('pinned position: Devastating-Wounds mortals ignore DEFENDER damage mods (M-6)', () => {
+  it('halveDamage + -1 Damage reduce normal damage but not the mortal count', () => {
+    // 24.10 ends the attack sequence at the critical wound ("suffers a number of mortal
+    // wounds equal to the D characteristic"), so allocation-time defender abilities never
+    // trigger for that attack. Attacker-side D mods (Melta/damageBonus) still apply.
+    // 600 attacks, BS3+ (4/6), S4 vs T4 (4+): crit wounds 1/6, normal passes 2/6.
+    // Defender: one fat model, SV2 (fail 1/6), halveDamage + damageReduction 1, D=3.
+    //   normal damage per failed save: max(1, ceil(3/2 - 1)) = 1
+    //   mortals per crit: 3 (NOT halved/-1 -> the position under test)
+    const atk = attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 3, keywords: ['DEVASTATING WOUNDS'] }, 600);
+    const def = { ...target(), models: 1, W: 1000000, SV: 2, damageReduction: 1, halveDamage: true };
+    const res = run(atk, def);
+    approx(res.mortalWounds.mean, 600 * (4 / 6) * (1 / 6) * 3, 0.05, 4); // ~200
+    // If defender mods applied to mortals this would be ~66.7 (3 -> 1 per crit).
+    expect(res.mortalWounds.mean).toBeGreaterThan(150);
+    const normalDamage = res.woundsDealt.mean - res.mortalWounds.mean;
+    approx(normalDamage, 600 * (4 / 6) * (2 / 6) * (1 / 6) * 1, 0.08, 2.5); // ~22.2 (mods DID apply)
+  });
+});
+
+describe('pinned position: re-rolls never fish for crits (reroll "all" == "failed") (M-6)', () => {
+  it('is byte-identical between "all" and "failed" even when crits carry extra value', () => {
+    // Sustained + Devastating make an unmodified 6 strictly better than a plain success,
+    // so a fishing player might re-roll a successful 3-5. The engine deliberately never
+    // re-rolls a success; with the same seed the dice streams are identical.
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['SUSTAINED HITS 1', 'DEVASTATING WOUNDS'] };
+    const all = run(attacker(w), target({ SV: 4 }), { hitReroll: 'all', woundReroll: 'all' });
+    const failed = run(attacker(w), target({ SV: 4 }), { hitReroll: 'failed', woundReroll: 'failed' });
+    expect(all.kills.mean).toBe(failed.kills.mean);
+    expect(all.woundsDealt.mean).toBe(failed.woundsDealt.mean);
+    expect(all.mortalWounds.mean).toBe(failed.mortalWounds.mean);
+  });
+});
+
+describe('effective-save display honours rule-granted AP (audit L-3)', () => {
+  it('breakdown.save reflects options.apBonus, matching what the saves rolled against', () => {
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1 };
+    const plain = run(attacker(w), target({ SV: 4 }));
+    expect(plain.breakdown.save).toEqual({ target: 4, usesInvuln: false, none: false });
+    const ap1 = run(attacker(w), target({ SV: 4 }), { apBonus: 1 });
+    expect(ap1.breakdown.save).toEqual({ target: 5, usesInvuln: false, none: false }); // 4+ -> 5+
+  });
+});

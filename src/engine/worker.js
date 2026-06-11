@@ -5,7 +5,7 @@
 //
 // Protocol:
 //   main -> worker : { attacker, defender, options, variants?, impactIterations? }
-//                    { batch: [{ id, attacker, defender, options }] }   (premium compare)
+//                    { batch: [{ id, name, attacker, defender, options }] }   (premium compare)
 //   worker -> main : { type: 'progress', done, total }
 //                    { type: 'result', result }   (result.impacts added when variants given)
 //                    { type: 'batchProgress', done, total }

@@ -14,6 +14,9 @@
 //   - Excess damage from a single attack is LOST, each attack resolves on ONE model
 //     (05.04.3). Devastating-Wounds mortals cap at one model per critical wound (24.10).
 //   - FNP applies to mortal wounds too (24.12: "each time a model would lose a wound").
+//   - [HAZARDOUS] is deliberately not modelled: hazard rolls happen AFTER the unit's
+//     attacks resolve and harm the ATTACKER (24.15), so they never change the damage
+//     dealt to the defender, which is the only thing this engine measures.
 
 import { d6, evalValue } from './dice.js';
 
@@ -51,8 +54,10 @@ function defenderHasKeyword(defender, names) {
 // Effective save vs a weapon: the better of AP-modified armour and invuln (which
 // ignores AP). target > 6 means AP has stripped the save away entirely. Used for the
 // "Effective Save" line in the results breakdown (deterministic, display only).
-export function effectiveSave(weapon, defender) {
-  const ap = weapon.AP || 0;
+// `apBonus` carries rule-granted AP (options.apBonus) so the displayed target matches
+// what the saves were actually rolled against when an AP-improving rule is active.
+export function effectiveSave(weapon, defender, apBonus = 0) {
+  const ap = (weapon.AP || 0) - apBonus;
   const armour = defender.SV - ap;
   const inv = defender.INV != null ? defender.INV : 7;
   const target = Math.min(armour, inv);
@@ -134,6 +139,13 @@ function applyMortalWounds(state, defender, count, rng) {
 //   reroll    : 'none' | 'ones' | 'failed' | 'all'
 //   critOn    : a roll >= critOn is a critical (auto-pass). 7 = only an unmodified 6.
 // Returns { pass, crit }. Unmodified 1 always fails; unmodified 6 always passes/crits.
+//
+// Position (pinned by a golden test): a re-roll only ever re-rolls a FAILED roll, so
+// 'all' behaves exactly like 'failed'. A player chasing crits (Sustained/Lethal/
+// Devastating) could legally re-roll a successful non-crit to fish for a 6, so those
+// combos read slightly LOW here. Deliberate for v1: the optimal fishing decision depends
+// on the whole matchup, and modelling it badly would be worse than not modelling it.
+// If it ever matters, add it as an explicit effects-layer option rather than a default.
 function checkRoll(rng, { threshold, mod = 0, reroll = 'none', critOn = 7 }) {
   const evaluate = (r) => {
     if (r === 1) return { pass: false, crit: false }; // unmodified 1 always fails
@@ -304,7 +316,12 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
     applyDamage(state, defender, dmg, rng);
   }
 
-  // Devastating Wounds: mortals = weapon D per critical wound (MELTA can raise D).
+  // Devastating Wounds: mortals = the weapon's D per critical wound. Position (pinned by
+  // a golden test): attacker-side mods that raise the weapon's D (Melta, damageBonus)
+  // apply, but the defender's halveDamage / damageReduction deliberately do NOT. The
+  // 24.10 wording ends the attack sequence at the critical wound and the unit "suffers a
+  // number of mortal wounds equal to the D characteristic of that weapon", so the
+  // allocation step those defender abilities hook into never happens for this attack.
   for (let i = 0; i < devCritWounds; i++) {
     const mortals = evalValue(weapon.D, rng) + meltaAdd + (o.damageBonus || 0);
     applyMortalWounds(state, defender, mortals, rng);
