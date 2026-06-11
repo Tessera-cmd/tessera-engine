@@ -11,7 +11,7 @@
 
 import { makeRng } from './dice.js';
 import { simulateUnitAttack, effectiveSave, groupWeapons } from './combat.js';
-import { defenderModelTotal, defenderWoundTotal } from './allocation.js';
+import { defenderModelTotal, defenderWoundTotal, attachedChars } from './allocation.js';
 import { computeStats } from '../utils/stats.js';
 
 // Distinct effective-save targets across the weapons that actually fire. Returns the
@@ -25,8 +25,8 @@ function summariseSave(attacker, defender, options) {
     if (count) weapons.push(w);
   };
   for (const w of attacker.weapons || []) collect(w, attacker.models);
-  if (attacker.leader?.weapons) {
-    for (const w of attacker.leader.weapons) collect(w, attacker.leader.models ?? 1);
+  for (const ch of attachedChars(attacker)) {
+    for (const w of ch.weapons || []) collect(w, ch.models ?? 1);
   }
   const distinct = new Map();
   for (const w of weapons) {

@@ -12,6 +12,7 @@ import {
   resolveEffects,
   applyToSim,
   distributeDefensive,
+  effectiveKeywords,
   collectEffects,
   strongerReroll,
 } from './effects.js';
@@ -122,6 +123,34 @@ describe('distributeDefensive', () => {
     expect(out.FNP).toBe(6);
     expect(out.leader.FNP).toBeNull();
     expect(out.profiles[0].FNP).toBeNull();
+  });
+});
+
+describe('unit-keyword grants (detachment-modified keywords, 19.03)', () => {
+  it('resolves grant/remove into the side bucket and effectiveKeywords applies them', () => {
+    const resolved = resolveEffects(
+      [
+        { side: 'defender', mods: { grantUnitKeywords: ['MONSTER'] } },
+        { side: 'defender', mods: { removeUnitKeywords: ['INFANTRY'] } },
+      ],
+      { phase: 'shooting' },
+    );
+    expect(resolved.defender.grantUnitKeywords).toContain('MONSTER');
+    const eff = effectiveKeywords(['INFANTRY', 'CHARACTER'], resolved.defender);
+    expect(eff).toEqual(expect.arrayContaining(['CHARACTER', 'MONSTER']));
+    expect(eff).not.toContain('INFANTRY'); // removed
+  });
+
+  it('applyToSim folds a defender grant onto defender.keywords (feeds Anti-targeting)', () => {
+    const resolved = resolveEffects([{ side: 'defender', mods: { grantUnitKeywords: ['VEHICLE'] } }], { phase: 'shooting' });
+    const { defender } = applyToSim({}, { keywords: ['INFANTRY'] }, resolved);
+    expect(defender.keywords).toEqual(expect.arrayContaining(['INFANTRY', 'VEHICLE']));
+  });
+
+  it('leaves defender.keywords untouched when there are no keyword mods', () => {
+    const resolved = resolveEffects([{ side: 'defender', mods: { fnp: 5 } }], { phase: 'shooting' });
+    const { defender } = applyToSim({}, { keywords: ['INFANTRY'], FNP: null }, resolved);
+    expect(defender.keywords).toEqual(['INFANTRY']); // unchanged (no upper-case churn)
   });
 });
 

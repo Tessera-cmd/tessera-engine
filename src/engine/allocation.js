@@ -30,14 +30,24 @@
 
 import { d6, evalValue } from './dice.js';
 
+// The characters attached to a unit (11e allows a Leader AND a Support). Reads the
+// canonical `attached: []` array; falls back to the single `leader` field (the Session 8
+// model + the Muster embed) so existing data and tests keep working unchanged.
+export function attachedChars(unit) {
+  if (!unit) return [];
+  if (Array.isArray(unit.attached)) return unit.attached.filter(Boolean);
+  if (unit.leader) return [unit.leader];
+  return [];
+}
+
 // A defender is "mixed" (needs full allocation) if it has a multi-wound champion
-// sub-profile and/or an attached Leader. Everything else uses combat.js's fast path.
+// sub-profile and/or one or more attached characters. Everything else uses the fast path.
 export function isMixedDefender(defender) {
   if (!defender) return false;
   const champions = Array.isArray(defender.profiles) ? defender.profiles : [];
   const hasChampion = champions.some((p) => p && (p.count ?? 0) > 0);
-  const hasLeader = !!(defender.leader && (defender.leader.models ?? 1) > 0);
-  return hasChampion || hasLeader;
+  const hasCharacter = attachedChars(defender).some((ch) => ch && (ch.models ?? 1) > 0);
+  return hasChampion || hasCharacter;
 }
 
 function makeGroup({ name, isCharacter, count, W, SV, INV, T, FNP, halveDamage, damageReduction }) {
@@ -104,23 +114,23 @@ export function buildGroups(defender) {
     );
   }
 
-  // Attached Leader: a CHARACTER, always its own group, allocated to last (05.03). Its T
-  // (added to the leader schema in this session) falls back to the body's when absent —
-  // it only matters once every bodyguard model is dead (19.02).
-  const l = defender.leader;
-  if (l && (l.models ?? 1) > 0) {
+  // Attached characters (a Leader and/or a Support): each is a CHARACTER, its own group,
+  // allocated to last (05.03), in attach order. Their T (optional on the schema) falls back
+  // to the body's when absent — it only matters once every bodyguard model is dead (19.02).
+  for (const ch of attachedChars(defender)) {
+    if (!ch || (ch.models ?? 1) <= 0) continue;
     groups.push(
       makeGroup({
-        name: l.name || 'Leader',
+        name: ch.name || 'Character',
         isCharacter: true,
-        count: l.models ?? 1,
-        W: l.W,
-        SV: l.SV,
-        INV: l.INV,
-        T: l.T != null ? l.T : bodyT,
-        FNP: l.FNP,
-        halveDamage: l.halveDamage,
-        damageReduction: l.damageReduction,
+        count: ch.models ?? 1,
+        W: ch.W,
+        SV: ch.SV,
+        INV: ch.INV,
+        T: ch.T != null ? ch.T : bodyT,
+        FNP: ch.FNP,
+        halveDamage: ch.halveDamage,
+        damageReduction: ch.damageReduction,
       }),
     );
   }

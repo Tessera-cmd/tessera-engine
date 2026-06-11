@@ -21,6 +21,7 @@ import {
   defenderWoundTotal,
   resolveMixedSaves,
   resolveMixedMortals,
+  attachedChars,
 } from './allocation.js';
 import { runSimulation } from './monteCarlo.js';
 
@@ -117,6 +118,48 @@ describe('buildGroups', () => {
     const def = { models: 5, W: 2, SV: 3, T: 4 };
     expect(defenderModelTotal(def)).toBe(5);
     expect(defenderWoundTotal(def)).toBe(10);
+  });
+});
+
+describe('attachedChars (Leader + Support, 11e two-attachment)', () => {
+  it('reads the `attached` array, falls back to a single `leader`, else empty', () => {
+    expect(attachedChars({ attached: [{ name: 'A' }, { name: 'B' }] }).map((c) => c.name)).toEqual(['A', 'B']);
+    expect(attachedChars({ leader: { name: 'L' } }).map((c) => c.name)).toEqual(['L']); // back-compat shim
+    expect(attachedChars({})).toEqual([]);
+  });
+
+  it('buildGroups places body first, then each attached character (both last), in order', () => {
+    const g = buildGroups({
+      name: 'Squad',
+      models: 3,
+      W: 1,
+      SV: 5,
+      T: 4,
+      attached: [
+        { name: 'Leader', models: 1, W: 3, SV: 3 },
+        { name: 'Support', models: 1, W: 2, SV: 3 },
+      ],
+    });
+    expect(g.map((x) => [x.name, x.isCharacter])).toEqual([
+      ['Squad', false],
+      ['Leader', true],
+      ['Support', true],
+    ]);
+  });
+
+  it('currentGroup advances body -> Leader -> Support as each is wiped', () => {
+    const g = buildGroups({
+      models: 1,
+      W: 1,
+      SV: 5,
+      T: 4,
+      attached: [{ name: 'Leader', models: 1, W: 1 }, { name: 'Support', models: 1, W: 1 }],
+    });
+    expect(currentGroup(g).name).toBe('Unit'); // body first (no unit name -> 'Unit')
+    g[0].models = 0;
+    expect(currentGroup(g).name).toBe('Leader');
+    g[1].models = 0;
+    expect(currentGroup(g).name).toBe('Support'); // only after the Leader is gone
   });
 });
 
@@ -335,6 +378,37 @@ describe('runSimulation wiring', () => {
     const mixed = run(moderate, { ...base, profiles: [{ name: 'Boss', count: 1, W: 2 }] });
     // The W2 model soaks an extra wound, so fewer whole models die on average.
     expect(mixed.kills.mean).toBeLessThan(uniform.kills.mean);
+  });
+
+  it('pools weapons from BOTH a Leader and a Support when attacking', () => {
+    const unit = {
+      models: 2,
+      weapons: [{ name: 'gun', type: 'ranged', count: 2, A: 2, BS: 4, S: 4, AP: 0, D: 1, keywords: [] }],
+      attached: [
+        { name: 'Leader', models: 1, weapons: [{ name: 'L', type: 'ranged', count: 1, A: 3, BS: 4, S: 4, AP: 0, D: 1, keywords: [] }] },
+        { name: 'Support', models: 1, weapons: [{ name: 'S', type: 'ranged', count: 1, A: 2, BS: 4, S: 4, AP: 0, D: 1, keywords: [] }] },
+      ],
+    };
+    const res = run(unit, base, { phase: 'ranged' });
+    // attacks (all fixed): 2xA2=4 + Leader A3=3 + Support A2=2 = 9 (mean of a constant)
+    expect(res.breakdown.attacks).toBe(9);
+  });
+
+  it('a Leader and a Support each form their own defender group (allocated after the body)', () => {
+    const overkill = atk({ A: 1, BS: 2, S: 10, AP: 0, D: 1 }, 100);
+    const def = {
+      ...base,
+      models: 2,
+      attached: [
+        { name: 'Leader', models: 1, W: 3, SV: 7, INV: null, FNP: null, T: 4, keywords: ['CHARACTER'] },
+        { name: 'Support', models: 1, W: 2, SV: 7, INV: null, FNP: null, T: 4, keywords: ['CHARACTER'] },
+      ],
+    };
+    const res = run(overkill, def);
+    expect(res.kills.mean).toBe(4); // 2 body + Leader + Support
+    expect(res.woundsDealt.mean).toBe(7); // 2x1 + 3 + 2 wound pool
+    expect(res.breakdown.totalModels).toBe(4);
+    expect(res.breakdown.totalWounds).toBe(7);
   });
 
   it('Anti-[keyword] triggers off an attached leader’s keyword (19.03)', () => {

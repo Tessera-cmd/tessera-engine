@@ -62,6 +62,12 @@ function emptyAttacker() {
     hitReroll: 'none',
     woundReroll: 'none',
     grantKeywords: [],
+    // UNIT keywords a detachment adds/removes on this side (distinct from grantKeywords,
+    // which are WEAPON keywords). They change the effective keyword set used for Anti-
+    // targeting and leader compatibility. Most keywords are permanent datasheet ones; a
+    // few detachments grant a unique one (data: import or the army picker, never bundled).
+    grantUnitKeywords: [],
+    removeUnitKeywords: [],
   };
 }
 function emptyDefender() {
@@ -72,7 +78,17 @@ function emptyDefender() {
     invuln: null,
     hitPenalty: 0,
     saveReroll: 'none',
+    grantUnitKeywords: [],
+    removeUnitKeywords: [],
   };
+}
+
+// Apply a resolved patch's unit-keyword mods to a base keyword list: base + grants - removes
+// (deduped, upper-cased). The patch may be either side's resolved bucket.
+export function effectiveKeywords(baseKeywords, patch) {
+  const up = (a) => (a || []).map((k) => String(k).toUpperCase());
+  const remove = new Set(up(patch?.removeUnitKeywords));
+  return [...new Set([...up(baseKeywords), ...up(patch?.grantUnitKeywords)])].filter((k) => !remove.has(k));
 }
 
 /**
@@ -102,6 +118,9 @@ export function resolveEffects(effects, ctx = {}) {
     if (cond !== 'always' && !active.has(cond)) continue;
 
     const m = e.mods;
+    const bucket = (e.side || 'attacker') === 'defender' ? def : atk;
+    if (m.grantUnitKeywords) bucket.grantUnitKeywords.push(...m.grantUnitKeywords);
+    if (m.removeUnitKeywords) bucket.removeUnitKeywords.push(...m.removeUnitKeywords);
     if ((e.side || 'attacker') === 'defender') {
       if (m.fnp != null) def.fnp = def.fnp == null ? m.fnp : Math.min(def.fnp, m.fnp);
       if (m.invuln != null) def.invuln = def.invuln == null ? m.invuln : Math.min(def.invuln, m.invuln);
@@ -145,6 +164,7 @@ export function mergeDefensive(target, d) {
 export function distributeDefensive(defender, d) {
   let out = mergeDefensive(defender, d);
   if (out.leader) out = { ...out, leader: mergeDefensive(out.leader, d) };
+  if (Array.isArray(out.attached)) out = { ...out, attached: out.attached.map((c) => mergeDefensive(c, d)) };
   if (Array.isArray(out.profiles)) out = { ...out, profiles: out.profiles.map((p) => mergeDefensive(p, d)) };
   return out;
 }
@@ -173,6 +193,10 @@ export function applyToSim(baseOptions, baseDefender, resolved) {
 
   // Defensive auras apply unit-wide — to the body AND the attached leader/champions.
   const defender = distributeDefensive(baseDefender, d);
+  // Detachment-modified UNIT keywords on the defender feed Anti-[keyword] targeting (19.03).
+  if (d.grantUnitKeywords.length || d.removeUnitKeywords.length) {
+    defender.keywords = effectiveKeywords(baseDefender.keywords, d);
+  }
 
   return { options, defender };
 }

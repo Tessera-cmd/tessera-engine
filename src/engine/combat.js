@@ -25,6 +25,7 @@ import {
   currentWoundToughness,
   resolveMixedSaves,
   resolveMixedMortals,
+  attachedChars,
 } from './allocation.js';
 
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
@@ -289,12 +290,12 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   const wt = woundTarget(effS, T);
   const anti = antiKeyword(weapon);
   // 19.03: an attached unit has all its components' keywords, so Anti-[keyword] can trigger
-  // off the leader's keyword even for wounds not allocated to it. Union the leader's in when
-  // the defender is mixed (uniform defenders are unchanged — byte-identical).
-  const antiKeywords =
-    state.groups && defender.leader
-      ? { keywords: [...(defender.keywords || []), ...(defender.leader.keywords || [])] }
-      : defender;
+  // off an attached character's keyword even for wounds not allocated to it. Union every
+  // attached character's keywords when the defender is mixed (uniform = byte-identical).
+  const attached = state.groups ? attachedChars(defender) : [];
+  const antiKeywords = attached.length
+    ? { keywords: [...(defender.keywords || []), ...attached.flatMap((ch) => ch.keywords || [])] }
+    : defender;
   const critWoundOn =
     anti && defenderHasKeyword(antiKeywords, anti.keywords) ? anti.threshold : 7;
 
@@ -396,8 +397,9 @@ export function groupWeapons(attacker, options) {
     else groups.set(key, { weapon: w, count });
   };
   for (const w of attacker.weapons || []) add(w, attacker.models);
-  if (attacker.leader && attacker.leader.weapons) {
-    for (const w of attacker.leader.weapons) add(w, attacker.leader.models ?? 1);
+  // Each attached character (Leader and/or Support) fires alongside the unit.
+  for (const ch of attachedChars(attacker)) {
+    for (const w of ch.weapons || []) add(w, ch.models ?? 1);
   }
   return [...groups.values()];
 }
