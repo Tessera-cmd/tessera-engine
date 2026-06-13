@@ -10,7 +10,7 @@
 // against 1-wound models (its leave-one-out delta is ~0): it generalises to ANY rule
 // whose effect is wasted in the current matchup, not just hand-coded special cases.
 
-import { collectEffects, resolveEffects, applyToSim, CONDITIONS } from './effects.js';
+import { collectEffects, resolveEffects, applyToSim, filterEffectsForUnit, CONDITIONS } from './effects.js';
 import { ARMY_RULES_BY_ID, DETACHMENTS_BY_ID } from '../data/rules.js';
 
 // Absolute deltas below which a toggle is "low impact" (tunable). Matches the user's
@@ -28,20 +28,28 @@ const CONDITION_LABEL = Object.fromEntries(CONDITIONS.map((c) => [c.id, c.label]
 function resolveSelection(ctx, atkSel, defSel, conditions) {
   const offensive = (e) => (e.side || 'attacker') !== 'defender';
   const defensive = (e) => (e.side || 'attacker') === 'defender';
-  const atkEffects = collectEffects({
-    abilities: ctx.attackerAbilities,
-    armyRule: ARMY_RULES_BY_ID[atkSel.armyRuleId],
-    detachment: DETACHMENTS_BY_ID[atkSel.detachmentId],
-    stratagems: new Set(atkSel.stratagems),
-    enhancements: new Set(atkSel.enhancements),
-  }).filter(offensive);
-  const defEffects = collectEffects({
-    abilities: ctx.defenderAbilities,
-    armyRule: ARMY_RULES_BY_ID[defSel.armyRuleId],
-    detachment: DETACHMENTS_BY_ID[defSel.detachmentId],
-    stratagems: new Set(defSel.stratagems),
-    enhancements: new Set(defSel.enhancements),
-  }).filter(defensive);
+  // Scope-gate: a model-type-scoped army/detachment effect is dropped for a side whose unit lacks
+  // that keyword. ctx.attackerKeywords/defenderKeywords are optional; omitted == no gating.
+  const atkEffects = filterEffectsForUnit(
+    collectEffects({
+      abilities: ctx.attackerAbilities,
+      armyRule: ARMY_RULES_BY_ID[atkSel.armyRuleId],
+      detachment: DETACHMENTS_BY_ID[atkSel.detachmentId],
+      stratagems: new Set(atkSel.stratagems),
+      enhancements: new Set(atkSel.enhancements),
+    }).filter(offensive),
+    ctx.attackerKeywords,
+  );
+  const defEffects = filterEffectsForUnit(
+    collectEffects({
+      abilities: ctx.defenderAbilities,
+      armyRule: ARMY_RULES_BY_ID[defSel.armyRuleId],
+      detachment: DETACHMENTS_BY_ID[defSel.detachmentId],
+      stratagems: new Set(defSel.stratagems),
+      enhancements: new Set(defSel.enhancements),
+    }).filter(defensive),
+    ctx.defenderKeywords,
+  );
   const resolved = resolveEffects([...atkEffects, ...defEffects], {
     phase: ctx.phase,
     activeConditions: new Set(conditions),

@@ -41,7 +41,30 @@ export const CONDITIONS = [
   { id: 'targetMarked', label: 'Target marked' },
   { id: 'halfRange', label: 'Within half range' },
   { id: 'stationary', label: 'Remained stationary' },
+  // Situational conditions — board/game state the sim does not track, so a rule gated on one
+  // defaults OFF and the player turns it on for the round it applies. The user owns the assumption.
+  { id: 'objectiveControl', label: 'On an objective' },
+  { id: 'oncePerBattle', label: 'Once-per-battle effect' },
 ];
+
+// ---- model-type scope -------------------------------------------------------
+// An army/detachment effect may be SCOPED to certain model types ("VEHICLE and MOUNTED models
+// add 1 to Hit"), recorded as `effect.scope` (uppercase keywords). The unit-aware caller drops a
+// scoped effect for a unit that has none of those keywords, so an army-wide rule never lands on
+// the wrong units. An effect with no scope always applies. Pure.
+export function effectAppliesToUnit(effect, unitKeywords) {
+  if (!effect?.scope?.length) return true;
+  const have = new Set((unitKeywords || []).map((k) => String(k).toUpperCase()));
+  return effect.scope.some((k) => have.has(String(k).toUpperCase()));
+}
+
+// Filter effects to those that apply to a unit with the given keywords. When `unitKeywords` is
+// null/undefined, gating is skipped (effects returned unchanged) so callers that don't supply
+// keywords are unaffected.
+export function filterEffectsForUnit(effects, unitKeywords) {
+  if (unitKeywords == null) return effects || [];
+  return (effects || []).filter((e) => effectAppliesToUnit(e, unitKeywords));
+}
 
 const REROLL_RANK = { none: 0, ones: 1, failed: 2, all: 3 };
 // Re-rolls don't stack, keep the strongest of two (all > failed > ones > none).
