@@ -71,6 +71,40 @@ describe('buildImpactPlan structure', () => {
   });
 });
 
+describe('manual modifier variants (what each buff is worth)', () => {
+  const planWith = (baseOptions, W = 1) =>
+    buildImpactPlan({
+      attackerAbilities: [], defenderAbilities: [],
+      atkRules: emptyRules, defRules: emptyRules, conditions: [],
+      baseOptions: { phase: 'all', ...baseOptions },
+      baseDefender: defender(W), phase: 'shooting',
+    });
+
+  it('emits one leave-one-out variant per active manual modifier, each dropping only itself', () => {
+    const plan = planWith({ apBonus: 1, woundModifier: 1, grantKeywords: ['SUSTAINED HITS 1', 'LETHAL HITS'] });
+    const keys = plan.variants.map((v) => v.key);
+    expect(keys).toEqual(
+      expect.arrayContaining(['mod:apBonus', 'mod:woundMod', 'mod:kw:SUSTAINED HITS 1', 'mod:kw:LETHAL HITS']),
+    );
+    // The full run keeps every modifier; each variant removes exactly one.
+    expect(plan.full.options.apBonus).toBe(1);
+    expect(plan.full.options.grantKeywords).toEqual(expect.arrayContaining(['SUSTAINED HITS 1', 'LETHAL HITS']));
+    expect(plan.variants.find((v) => v.key === 'mod:apBonus').options.apBonus).toBe(0);
+    const sus = plan.variants.find((v) => v.key === 'mod:kw:SUSTAINED HITS 1');
+    expect(sus.options.grantKeywords).not.toContain('SUSTAINED HITS 1');
+    expect(sus.options.grantKeywords).toContain('LETHAL HITS'); // the other ability stays
+    expect(sus.label).toBe('Sustained Hits 1'); // title-cased for display
+    expect(sus.kind).toBe('modifier');
+  });
+
+  it('reads Sustained Hits as worth something when the extra hits convert (vs W2)', () => {
+    const plan = planWith({ grantKeywords: ['SUSTAINED HITS 2'] }, 2);
+    const imp = impactOf(plan, 'mod:kw:SUSTAINED HITS 2', 2);
+    expect(imp.damageDelta).toBeGreaterThan(LOW_IMPACT.damage); // earned its place
+    expect(classifyLowImpact(imp)).toBe(false);
+  });
+});
+
 describe('classifyLowImpact', () => {
   it('flags small deltas and clears large ones', () => {
     expect(classifyLowImpact({ killsDelta: 0, damageDelta: 0 })).toBe(true);
