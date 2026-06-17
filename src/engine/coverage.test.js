@@ -79,6 +79,45 @@ describe('Plunging Fire is a separate BS bucket (stacks past the ±1 cap)', () =
   });
 });
 
+describe('Conversion: +1 to hit when the target is over 12" away (gated on targetOver12)', () => {
+  it('adds +1 to hit only when the toggle is on', () => {
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['CONVERSION'] };
+    const on = run(attacker(w), target(), { targetOver12: true });
+    approx(on.kills.mean, 100 * (5 / 6) * P_W_S4T4); // BS3 -> 2+, 5/6
+    const off = run(attacker(w), target(), { targetOver12: false });
+    approx(off.kills.mean, 100 * (4 / 6) * P_W_S4T4); // BS3, no bonus
+  });
+  it('does nothing without the CONVERSION keyword', () => {
+    const res = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), { targetOver12: true });
+    approx(res.kills.mean, 100 * (4 / 6) * P_W_S4T4);
+  });
+});
+
+describe('Indirect Fire: -1 to hit + target gains cover (gated on indirectFire)', () => {
+  it('applies both halves when firing out of line of sight', () => {
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['INDIRECT FIRE'] };
+    const on = run(attacker(w), target(), { indirectFire: true });
+    approx(on.kills.mean, 100 * (2 / 6) * P_W_S4T4); // cover -> 4+, then -1 to hit -> 5,6 = 2/6
+    const off = run(attacker(w), target(), { indirectFire: false });
+    approx(off.kills.mean, 100 * (4 / 6) * P_W_S4T4); // unmodified BS3 = 4/6
+  });
+  it('Ignores Cover cancels only the cover half (the -1 to hit still applies)', () => {
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['INDIRECT FIRE', 'IGNORES COVER'] };
+    const res = run(attacker(w), target(), { indirectFire: true });
+    approx(res.kills.mean, 100 * (3 / 6) * P_W_S4T4); // no cover (stays 3+), -1 to hit -> 4,5,6 = 3/6
+  });
+});
+
+describe('hit-roll bucket A: modifiers sum, then the total is capped at ±1', () => {
+  it('+1 Heavy, +1 Conversion and -1 Indirect net +1 (not 0 from step-by-step clamping)', () => {
+    // BS3 weapon with all three keywords, all situational toggles on. Bucket A = +1+1-1 = +1
+    // -> hit on 3+ after the +1; Indirect also gives cover (effTarget 4). (4-1)=3 so 3,4,5,6 hit.
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['HEAVY', 'CONVERSION', 'INDIRECT FIRE'] };
+    const res = run(attacker(w), target(), { remainedStationary: true, targetOver12: true, indirectFire: true });
+    approx(res.kills.mean, 100 * (4 / 6) * P_W_S4T4); // 33.33 — would be 25.0 if the bucket clamped per step
+  });
+});
+
 describe('Blast: +1 attack per 5 models in the target unit', () => {
   it('adds floor(models/5) dice per carrier', () => {
     // 1 carrier, A1, vs 20 models -> blast 4 -> 5 attacks total (deterministic count).

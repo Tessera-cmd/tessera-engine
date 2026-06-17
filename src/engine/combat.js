@@ -238,15 +238,23 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   const sustained = hasKw(weapon, 'SUSTAINED HITS') ? kwValue(weapon, 'SUSTAINED HITS') : 0;
 
   // ===== STEP 1: HIT ROLLS ==================================================
-  // Bucket A, hit-roll modifiers, capped at +/-1 (Heavy's +1 belongs here).
-  let hitMod = clamp(o.hitModifier ?? 0, -1, 1);
-  if (ranged && hasKw(weapon, 'HEAVY') && o.remainedStationary) {
-    hitMod = clamp(hitMod + 1, -1, 1);
-  }
+  // Bucket A, hit-roll modifiers: SUM them, then cap the total at +/-1 (13.x). Summing before
+  // the clamp matters once three-plus mixed-sign modifiers stack — e.g. +1 user, +1 Heavy and
+  // -1 Indirect Fire net +1, whereas clamping after each step would wrongly land on 0.
+  // INDIRECT FIRE (fired out of line of sight) also grants the target Benefit of Cover, handled
+  // in bucket B below.
+  const indirect = ranged && hasKw(weapon, 'INDIRECT FIRE') && o.indirectFire;
+  let hitMod = o.hitModifier ?? 0;
+  if (ranged && hasKw(weapon, 'HEAVY') && o.remainedStationary) hitMod += 1; // stationary Heavy
+  if (ranged && hasKw(weapon, 'CONVERSION') && o.targetOver12) hitMod += 1; // target over 12" away
+  if (indirect) hitMod -= 1;
+  hitMod = clamp(hitMod, -1, 1);
   // Bucket B, BS/WS *characteristic* modifiers (separate; Cover stacks past -1).
   let effTarget = ranged ? weapon.BS : weapon.WS;
   if (ranged) {
-    if (o.targetInCover && !hasKw(weapon, 'IGNORES COVER')) effTarget += 1; // Cover: worsen BS by 1
+    // Cover worsens BS by 1; Indirect Fire also grants the target Benefit of Cover. Either
+    // source applies it once (cover doesn't stack), unless the weapon Ignores Cover.
+    if ((o.targetInCover || indirect) && !hasKw(weapon, 'IGNORES COVER')) effTarget += 1;
     if (o.plungingFire) effTarget -= 1; // Plunging Fire: improve BS by 1
   }
 
@@ -334,9 +342,12 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
     // Mixed defender: full 11th-edition allocation (allocation.js). Devastating-Wounds
     // mortals: attacker-side D mods (Melta, damageBonus) apply, the defender's halve /
     // -1 Damage do NOT (the M-6 pinned position — 24.10 ends the attack at the crit).
-    const ctx = { ap, meltaAdd, damageBonus, saveReroll: o.saveReroll, weaponD: weapon.D };
+    // [PRECISION] sends this weapon's wounds onto the attached CHARACTER first (the engine
+    // only resolves allocation here for a mixed defender, so it is a no-op without one).
+    const precision = hasKw(weapon, 'PRECISION');
+    const ctx = { ap, meltaAdd, damageBonus, saveReroll: o.saveReroll, weaponD: weapon.D, precision };
     resolveMixedSaves(state, woundsToSave, ctx, rng);
-    resolveMixedMortals(state, devCritWounds, { meltaAdd, damageBonus, weaponD: weapon.D }, rng);
+    resolveMixedMortals(state, devCritWounds, { meltaAdd, damageBonus, weaponD: weapon.D, precision }, rng);
     return;
   }
 

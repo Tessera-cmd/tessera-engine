@@ -166,13 +166,23 @@ const isWounded = (g) => g.currentWounds < g.W;
 
 // The current allocation group (05.04 / 06.02): non-CHARACTER before CHARACTER, and within
 // a class a group holding a wounded model first, else base (build) order. null = unit dead.
-export function currentGroup(groups) {
+//
+// `precision` (a [PRECISION] weapon): the ATTACKER may allocate the attack to a CHARACTER model
+// even with bodyguards alive, so an attached Leader/Support is targeted FIRST; once the
+// characters are dead the rest spill to the normal order. Champion sub-profiles (a Boss Nob)
+// are NOT characters, so Precision never redirects onto them.
+export function currentGroup(groups, precision = false) {
   const live = groups.filter((g) => g.models > 0);
   if (!live.length) return null;
   const front = (arr) => {
     const wounded = arr.filter(isWounded);
     return (wounded.length ? wounded : arr)[0]; // stable: build order preserved otherwise
   };
+  if (precision) {
+    const chars = live.filter((g) => g.isCharacter);
+    if (chars.length) return front(chars); // snipe the attached character first
+    // no character left — fall through to the normal allocation order
+  }
   const nonChar = live.filter((g) => !g.isCharacter);
   return nonChar.length ? front(nonChar) : front(live);
 }
@@ -220,22 +230,24 @@ function damageGroup(state, group, dmg, rng) {
  * (05.03 step 3 + 05.04). Each wound gets one save roll; the rolls are sorted low to high
  * and resolved against the current allocation group, which advances as a group is wiped.
  *
- * `ctx` = { ap, meltaAdd, damageBonus, saveReroll, weaponD }.
+ * `ctx` = { ap, meltaAdd, damageBonus, saveReroll, weaponD, precision }.
  *
  * Save re-rolls are resolved per die against the group it is allocated to (Step 4) rather
  * than Step 3 — for the front bodyguard group, where re-rolls almost always matter, that
  * is exactly the rules. A re-rolled die stays committed to its group (it is not re-sorted).
+ *
+ * `precision` (a [PRECISION] weapon) sends these wounds onto the attached CHARACTER first.
  */
 export function resolveMixedSaves(state, woundsToSave, ctx, rng) {
   if (woundsToSave <= 0) return;
-  const { ap, meltaAdd, damageBonus, saveReroll, weaponD } = ctx;
+  const { ap, meltaAdd, damageBonus, saveReroll, weaponD, precision } = ctx;
 
   const rolls = new Array(woundsToSave);
   for (let i = 0; i < woundsToSave; i++) rolls[i] = d6(rng);
   rolls.sort((a, b) => a - b); // resolve lowest first (05.04)
 
   for (let i = 0; i < woundsToSave; i++) {
-    const group = currentGroup(state.groups);
+    const group = currentGroup(state.groups, precision);
     if (!group) break; // unit destroyed; remaining attacks are lost (05.04)
 
     let roll = rolls[i];
@@ -269,14 +281,14 @@ export function resolveMixedSaves(state, woundsToSave, ctx, rng) {
  * capped at one model; the model is selected by the 06.02 order (== currentGroup). FNP
  * applies; the defender's halve / -1 Damage do NOT (the M-6 pinned position).
  *
- * `ctx` = { meltaAdd, damageBonus, weaponD }.
+ * `ctx` = { meltaAdd, damageBonus, weaponD, precision }.
  */
 export function resolveMixedMortals(state, devCritWounds, ctx, rng) {
   if (devCritWounds <= 0) return;
-  const { meltaAdd, damageBonus, weaponD } = ctx;
+  const { meltaAdd, damageBonus, weaponD, precision } = ctx;
 
   for (let i = 0; i < devCritWounds; i++) {
-    const group = currentGroup(state.groups);
+    const group = currentGroup(state.groups, precision);
     if (!group) break;
     const mortals = evalValue(weaponD, rng) + meltaAdd + damageBonus;
     for (let j = 0; j < mortals; j++) {

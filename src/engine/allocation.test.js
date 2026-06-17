@@ -451,3 +451,77 @@ describe('runSimulation wiring', () => {
     expect(without.breakdown.woundChance).toBeLessThan(0.25); // ~1/6, Anti inert (no CHARACTER)
   });
 });
+
+// ============================================================================
+// PRECISION — the attacker allocates onto the attached CHARACTER first
+// ============================================================================
+describe('PRECISION allocation', () => {
+  // A 5-model W1 Sv3+ body with a W3 Sv2+ attached character.
+  const ledDefender = {
+    name: 'Squad',
+    models: 5,
+    W: 1,
+    SV: 3,
+    T: 4,
+    attached: [{ name: 'Boss', models: 1, W: 3, SV: 2 }],
+  };
+
+  it('currentGroup(precision) targets the character first, then falls back when it is dead', () => {
+    const groups = buildGroups(ledDefender);
+    expect(currentGroup(groups, false).name).toBe('Squad'); // normal: bodyguard first
+    expect(currentGroup(groups, true).name).toBe('Boss'); // precision: snipe the character
+    groups.find((g) => g.name === 'Boss').models = 0; // character dead
+    expect(currentGroup(groups, true).name).toBe('Squad'); // no character left -> normal order
+  });
+
+  it('resolveMixedSaves with precision sends failed saves onto the character, sparing the body', () => {
+    const state = mkState(buildGroups(ledDefender));
+    // three saves, all rolled as 1 (always fail), weapon D1.
+    resolveMixedSaves(state, 3, { ap: 0, meltaAdd: 0, damageBonus: 0, weaponD: 1, precision: true }, scriptRng([1, 1, 1]));
+    expect(state.groups.find((g) => g.name === 'Boss').models).toBe(0); // W3 character killed by 3 wounds
+    expect(state.groups.find((g) => g.name === 'Squad').models).toBe(5); // bodyguard untouched
+    expect(state.kills).toBe(1);
+    expect(state.woundsDealt).toBe(3);
+  });
+
+  it('without precision the same wounds fall on the bodyguard (the character is safe)', () => {
+    const state = mkState(buildGroups(ledDefender));
+    resolveMixedSaves(state, 3, { ap: 0, meltaAdd: 0, damageBonus: 0, weaponD: 1, precision: false }, scriptRng([1, 1, 1]));
+    expect(state.groups.find((g) => g.name === 'Squad').models).toBe(2); // 3 of 5 W1 bodies die
+    expect(state.groups.find((g) => g.name === 'Boss').models).toBe(1); // character untouched
+    expect(state.kills).toBe(3);
+  });
+
+  it('Devastating-Wounds mortals also follow precision onto the character', () => {
+    const state = mkState(buildGroups(ledDefender));
+    resolveMixedMortals(state, 1, { meltaAdd: 0, damageBonus: 0, weaponD: 2, precision: true }, scriptRng([6, 6])); // FNP-free; 2 mortals
+    expect(state.groups.find((g) => g.name === 'Boss').currentWounds).toBe(1); // W3 - 2 mortals
+    expect(state.groups.find((g) => g.name === 'Squad').models).toBe(5); // body untouched
+    expect(state.mortalWounds).toBe(2);
+  });
+
+  it('precision targets the CHARACTER, never a champion sub-profile (a Boss Nob is not a Character)', () => {
+    // Body + a W2 champion (Boss Nob, non-CHARACTER) + a W3 attached character.
+    const withChampion = {
+      name: 'Mob',
+      models: 10,
+      W: 1,
+      SV: 5,
+      T: 5,
+      profiles: [{ name: 'Boss Nob', count: 1, W: 2 }],
+      attached: [{ name: 'Warboss', models: 1, W: 3, SV: 4 }],
+    };
+    const groups = buildGroups(withChampion);
+    expect(currentGroup(groups, true).name).toBe('Warboss'); // the Character, not the Boss Nob
+    expect(currentGroup(groups, true).isCharacter).toBe(true);
+  });
+
+  it('precision overflow: once the character dies the rest spill to the bodyguard', () => {
+    const state = mkState(buildGroups(ledDefender)); // body 5×W1, char W3
+    // 4 failed-save wounds, D1: 3 kill the W3 character, the 4th falls to the body.
+    resolveMixedSaves(state, 4, { ap: 0, meltaAdd: 0, damageBonus: 0, weaponD: 1, precision: true }, scriptRng([1, 1, 1, 1]));
+    expect(state.groups.find((g) => g.name === 'Boss').models).toBe(0); // character dead
+    expect(state.groups.find((g) => g.name === 'Squad').models).toBe(4); // one body model lost to overflow
+    expect(state.kills).toBe(2);
+  });
+});
