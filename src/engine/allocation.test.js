@@ -384,6 +384,31 @@ describe('runSimulation wiring', () => {
     expect(res.breakdown.totalWounds).toBe(6);
   });
 
+  it('mixed-path funnel matches the uniform path under overkill, and reports overkill', () => {
+    // Regression for the mixed-path under-count: resolveMixedSaves used to stop tallying the
+    // funnel once the unit died, so a led/championed defender showed fewer failed/saved wounds
+    // than the equivalent uniform unit on overkill. It now keeps counting (no extra RNG), so
+    // the two paths agree, and the wasted output is reported as `overkill`.
+    const big = atk({ A: 1, BS: 2, S: 10, AP: 0, D: 1 }, 100); // 100 hard shots into 5 models
+    const def = { ...base, SV: 4 }; // a real save so saved AND failed are both non-trivial
+    const uni = run(big, def, { iterations: 20000 });
+    // identical champion carved from the same total (5) -> outcomes equal, funnel must match
+    const mixed = run(big, { ...def, profiles: [{ name: 'Body', count: 1, W: 1 }] }, { iterations: 20000 });
+    expect(Math.abs(mixed.breakdown.failedSaves - uni.breakdown.failedSaves)).toBeLessThan(0.8);
+    expect(Math.abs(mixed.breakdown.savedWounds - uni.breakdown.savedWounds)).toBeLessThan(0.8);
+    expect(uni.kills.mean).toBe(5); // always wiped
+    expect(uni.breakdown.overkillChance).toBe(1); // wiped every iteration
+    expect(uni.breakdown.overkill).toBeGreaterThan(5); // lots of unsaved output wasted
+    expect(mixed.breakdown.overkill).toBeGreaterThan(5);
+  });
+
+  it('no overkill when the target is never wiped (huge pool)', () => {
+    const moderate = atk({ A: 2, BS: 3, S: 5, AP: -1, D: 1 }, 10);
+    const res = run(moderate, { ...base, models: 100000 }, { iterations: 5000 });
+    expect(res.breakdown.overkill).toBe(0);
+    expect(res.breakdown.overkillChance).toBe(0);
+  });
+
   it('a led defender adds the leader to the wound pool (allocated last)', () => {
     const overkill = atk({ A: 1, BS: 2, S: 10, AP: 0, D: 1 }, 100);
     const def = { ...base, models: 3, leader: { models: 1, W: 4, SV: 7, INV: null, FNP: null, T: 4, keywords: ['CHARACTER'] } };

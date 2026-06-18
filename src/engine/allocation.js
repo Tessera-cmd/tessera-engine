@@ -220,6 +220,7 @@ function damageGroup(state, group, dmg, rng) {
       state.kills++;
       group.models--;
       group.currentWounds = group.models > 0 ? group.W : 0;
+      state.overkillWounds += dmg - i - 1; // points past the kill spill over -> wasted
       return; // excess damage from this attack is lost
     }
   }
@@ -246,9 +247,26 @@ export function resolveMixedSaves(state, woundsToSave, ctx, rng) {
   for (let i = 0; i < woundsToSave; i++) rolls[i] = d6(rng);
   rolls.sort((a, b) => a - b); // resolve lowest first (05.04)
 
+  // Representative save profile for wounds that land after the unit is dead: the body group
+  // (state.groups[0]), matching the uniform path which keeps rolling against the defender's
+  // save. Reading SV/INV is valid even once that group has no models left.
+  const rep = state.groups[0];
+
   for (let i = 0; i < woundsToSave; i++) {
     const group = currentGroup(state.groups, precision);
-    if (!group) break; // unit destroyed; remaining attacks are lost (05.04)
+    if (!group) {
+      // Unit destroyed: the attack is wasted (05.04), but the funnel still reflects the whole
+      // unit's output (matching the uniform fast path), so classify the pre-rolled save and
+      // count the overkill. No reroll, no damage roll -> no extra RNG, so outcomes are
+      // bit-identical; only the display tallies and the overkill counter change.
+      if (rep && saveInflicts(rolls[i], rep, ap)) {
+        state.failedSaves++;
+        state.overkillWounds++;
+      } else {
+        state.savedWounds++;
+      }
+      continue;
+    }
 
     let roll = rolls[i];
     let inflicts = saveInflicts(roll, group, ap);
@@ -289,7 +307,10 @@ export function resolveMixedMortals(state, devCritWounds, ctx, rng) {
 
   for (let i = 0; i < devCritWounds; i++) {
     const group = currentGroup(state.groups, precision);
-    if (!group) break;
+    if (!group) {
+      state.overkillWounds++; // critical wound with nothing left to kill -> wasted (no roll)
+      continue;
+    }
     const mortals = evalValue(weaponD, rng) + meltaAdd + damageBonus;
     for (let j = 0; j < mortals; j++) {
       if (group.FNP && d6(rng) >= group.FNP) {

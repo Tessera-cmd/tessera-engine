@@ -63,6 +63,7 @@ export function runSimulation(attacker, defender, options = {}) {
   let sFailed = 0;
   let sMortalInst = 0;
   let sFnp = 0;
+  let sOverkill = 0;
   // Per-weapon-group damage sums, aligned to groupWeapons() order (static metadata
   // resolved once below).
   const groups = groupWeapons(attacker, options);
@@ -80,6 +81,7 @@ export function runSimulation(attacker, defender, options = {}) {
     sFailed += o.failedSaves;
     sMortalInst += o.mortalInstances;
     sFnp += o.fnpIgnored;
+    sOverkill += o.overkillWounds || 0;
     for (let g = 0; g < sProfile.length; g++) sProfile[g] += o.perProfile[g];
     if (onProgress && (i + 1) % reportEvery === 0) onProgress(i + 1, N);
   }
@@ -122,6 +124,10 @@ export function runSimulation(attacker, defender, options = {}) {
     unsaved: mean(sFailed + sMortalInst), // wounds that beat the save (pre-damage, pre-cap)
     mortalInstances: mean(sMortalInst),
     fnpIgnored: mean(sFnp),
+    // Overkill: wasted output (spillover past a kill + wounds on an already-dead unit).
+    // overkillChance is how often the unit is wiped outright.
+    overkill: mean(sOverkill),
+    overkillChance: totalModels > 0 ? kills.filter((k) => k >= totalModels).length / N : null,
     hitChance: rate(sHits, sAttacks),
     woundChance: rate(sWounds, sHits),
     failedSaveChance: rate(sFailed, sSaved + sFailed),

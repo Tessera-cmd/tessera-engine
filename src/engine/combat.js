@@ -100,6 +100,7 @@ function makeDefenderState(defender) {
     failedSaves: 0, // save-eligible wounds that failed (proceed to damage)
     mortalInstances: 0, // Devastating-Wounds crits that bypassed saves
     fnpIgnored: 0, // damage points (incl. mortal) ignored by Feel No Pain
+    overkillWounds: 0, // wasted damage: spillover past a kill + wounds on an already-dead unit
     totalModels: defender.models, // for Blast (floor(models / 5)); includes leader/champions when mixed
   };
   if (isMixedDefender(defender)) {
@@ -115,10 +116,13 @@ function makeDefenderState(defender) {
 // Resolve `dmg` damage from ONE attack against the current model. No spillover:
 // if the model dies, remaining points are lost (11th rules, 05.04.3).
 function applyDamage(state, defender, dmg, rng) {
-  if (state.modelsRemaining <= 0) return;
+  if (state.modelsRemaining <= 0) {
+    state.overkillWounds += dmg; // the whole attack landed on a dead unit -> all wasted
+    return;
+  }
   for (let i = 0; i < dmg; i++) {
     if (defender.FNP && d6(rng) >= defender.FNP) {
-      state.fnpIgnored++; // FNP ignores this wound
+      state.fnpIgnored++; // FNP ignores this wound (defender mitigation, not overkill)
       continue;
     }
     state.currentWounds--;
@@ -127,7 +131,8 @@ function applyDamage(state, defender, dmg, rng) {
       state.kills++;
       state.modelsRemaining--;
       state.currentWounds = state.modelsRemaining > 0 ? defender.W : 0;
-      return; // excess damage from this attack is lost
+      state.overkillWounds += dmg - i - 1; // points past the kill spill over -> wasted
+      return; // excess damage from this attack is lost (05.04.3)
     }
   }
 }
@@ -135,7 +140,10 @@ function applyDamage(state, defender, dmg, rng) {
 // Mortal wounds from ONE Devastating-Wounds critical wound (= weapon D).
 // Capped at one model per critical wound; excess lost (24.10). FNP still applies.
 function applyMortalWounds(state, defender, count, rng) {
-  if (state.modelsRemaining <= 0) return;
+  if (state.modelsRemaining <= 0) {
+    state.overkillWounds += count; // mortals with nothing left to kill -> all wasted
+    return;
+  }
   for (let i = 0; i < count; i++) {
     if (defender.FNP && d6(rng) >= defender.FNP) {
       state.fnpIgnored++;
@@ -148,6 +156,7 @@ function applyMortalWounds(state, defender, count, rng) {
       state.kills++;
       state.modelsRemaining--;
       state.currentWounds = state.modelsRemaining > 0 ? defender.W : 0;
+      state.overkillWounds += count - i - 1; // mortals past the kill are lost -> wasted (24.10)
       return; // one model max per critical wound; excess lost
     }
   }
@@ -443,6 +452,7 @@ export function simulateUnitAttack(attacker, defender, options = {}, rng) {
     failedSaves: state.failedSaves,
     mortalInstances: state.mortalInstances,
     fnpIgnored: state.fnpIgnored,
+    overkillWounds: state.overkillWounds,
     perProfile,
   };
 }
