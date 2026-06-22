@@ -110,3 +110,42 @@ export const DETACHMENTS = [
 // Lookups by id (used by the simulator's rules context).
 export const ARMY_RULES_BY_ID = Object.fromEntries(ARMY_RULES.map((r) => [r.id, r]));
 export const DETACHMENTS_BY_ID = Object.fromEntries(DETACHMENTS.map((d) => [d.id, d]));
+
+export function detachmentById(id) {
+  return DETACHMENTS_BY_ID[id] || null;
+}
+
+// Resolve one OR MORE detachment ids into a SINGLE detachment-shaped view the effects layer
+// (engine/effects.js collectEffects) consumes unchanged. An army may field more than one detachment,
+// and every chosen detachment's rule-set applies, so we merge them: the union of their rule effects,
+// stratagems and enhancements. stratagem / enhancement ids stay unique across detachments, so
+// collectEffects' id-set matching still toggles each one correctly. One id (or a single string)
+// returns the exact object unchanged, so single-detachment resolution is byte-identical. null when
+// nothing resolves.
+export function detachmentsByIds(ids) {
+  const list = (Array.isArray(ids) ? ids : ids ? [ids] : [])
+    .map(detachmentById)
+    .filter(Boolean);
+  if (!list.length) return null;
+  if (list.length === 1) return list[0];
+  return {
+    id: list.map((d) => d.id).join('+'),
+    name: list.map((d) => d.name).join(' + '),
+    isCustom: list.some((d) => d.isCustom),
+    rule: { effects: list.flatMap((d) => d.rule?.effects || []) },
+    stratagems: list.flatMap((d) => d.stratagems || []),
+    enhancements: list.flatMap((d) => d.enhancements || []),
+  };
+}
+
+// Resolve a sim-time SELECTION's detachment(s): a `detachmentIds` array (a multi-detachment army)
+// takes precedence over a single `detachmentId` (the manual pickers).
+export function detachmentForSelection(sel = {}) {
+  const ids =
+    Array.isArray(sel.detachmentIds) && sel.detachmentIds.length
+      ? sel.detachmentIds
+      : sel.detachmentId
+        ? [sel.detachmentId]
+        : [];
+  return detachmentsByIds(ids);
+}

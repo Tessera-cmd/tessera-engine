@@ -11,7 +11,7 @@
 // whose effect is wasted in the current matchup, not just hand-coded special cases.
 
 import { collectEffects, resolveEffects, applyToSim, filterEffectsForUnit, CONDITIONS } from './effects.js';
-import { ARMY_RULES_BY_ID, DETACHMENTS_BY_ID } from '../data/rules.js';
+import { ARMY_RULES_BY_ID, detachmentForSelection } from '../data/rules.js';
 
 // Absolute deltas below which a toggle is "low impact" (tunable). Matches the user's
 // "if the impact is less than x" framing: small change in BOTH kills and damage.
@@ -36,7 +36,7 @@ function resolveSelection(ctx, atkSel, defSel, conditions, baseOptions = ctx.bas
     collectEffects({
       abilities: ctx.attackerAbilities,
       armyRule: ARMY_RULES_BY_ID[atkSel.armyRuleId],
-      detachment: DETACHMENTS_BY_ID[atkSel.detachmentId],
+      detachment: detachmentForSelection(atkSel),
       stratagems: new Set(atkSel.stratagems),
       enhancements: new Set(atkSel.enhancements),
     }).filter(offensive),
@@ -46,7 +46,7 @@ function resolveSelection(ctx, atkSel, defSel, conditions, baseOptions = ctx.bas
     collectEffects({
       abilities: ctx.defenderAbilities,
       armyRule: ARMY_RULES_BY_ID[defSel.armyRuleId],
-      detachment: DETACHMENTS_BY_ID[defSel.detachmentId],
+      detachment: detachmentForSelection(defSel),
       stratagems: new Set(defSel.stratagems),
       enhancements: new Set(defSel.enhancements),
     }).filter(defensive),
@@ -108,7 +108,7 @@ export function buildImpactPlan(ctx) {
       const { a, d } = withSel({ ...sel, armyRuleId: '' });
       push(`${side}:army:${sel.armyRuleId}`, ar?.name || 'Army rule', 'armyRule', side, resolveSelection(ctx, a, d, conditions));
     }
-    const det = DETACHMENTS_BY_ID[sel.detachmentId];
+    const det = detachmentForSelection(sel);
     for (const sId of sel.stratagems || []) {
       const strat = det?.stratagems?.find((s) => s.id === sId);
       const { a, d } = withSel({ ...sel, stratagems: sel.stratagems.filter((x) => x !== sId) });
