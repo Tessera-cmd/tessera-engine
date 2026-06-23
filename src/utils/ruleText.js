@@ -466,11 +466,21 @@ export function captureUnitAbilities(items = []) {
     if (!text || !String(text).trim()) continue;
     const r = mapRuleText(text, { name: item.name });
     if (!r.effects.length) continue; // not-simulatable / no combat clause
-    const onlyStatline = r.effects.every((e) => {
+    // A pure statline-save note is already read onto the unit's INV/FNP, so capturing it as an ability
+    // would double-represent it. A model-specific invuln-save profile can ALSO carry a save RE-ROLL
+    // rider — the BSData "Invulnerable Save (2+*) [Makari]" shape (Makari's own 2+ invuln, NOT the
+    // whole Ghazghkull unit's) mapped to {invuln:2}+{saveReroll:all} and slipped through as a unit-wide
+    // defender buff (over-tanky). Drop it too: when EVERY effect is a no-condition defensive save key
+    // (invuln/fnp/saveReroll) AND at least one is an invuln/fnp, it is a save-characteristic note, not
+    // a combat aura. A STANDALONE save-reroll aura (no invuln/fnp) is NOT dropped — a genuine buff.
+    const defensiveSaveKeys = (e) => {
       const keys = Object.keys(e.mods || {});
-      return e.side === 'defender' && !e.condition && keys.length > 0 && keys.every((k) => k === 'invuln' || k === 'fnp');
-    });
-    if (onlyStatline) continue; // the INV/FNP is already on the statline
+      return e.side === 'defender' && !e.condition && keys.length > 0 && keys.every((k) => k === 'invuln' || k === 'fnp' || k === 'saveReroll');
+    };
+    const onlyStatline =
+      r.effects.every(defensiveSaveKeys) &&
+      r.effects.some((e) => Object.keys(e.mods || {}).some((k) => k === 'invuln' || k === 'fnp'));
+    if (onlyStatline) continue; // the INV/FNP (+ any save-reroll rider) is already on the statline
     // A "select/choose one of the following" ability is a per-phase CHOICE; the mapper grants EVERY
     // option, so none can be auto-applied (the player picks one) — route them all to review.
     const isChoice = /\b(?:select|choose|pick)\s+one\s+of\s+the\s+following\b/i.test(text);

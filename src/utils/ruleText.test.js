@@ -420,6 +420,22 @@ describe('captureUnitAbilities — the confidence split (P2)', () => {
     expect(captureUnitAbilities([{ name: 'Invulnerable Save', text: 'This model has a 5+ invulnerable save.' }])).toHaveLength(0);
     expect(captureUnitAbilities([{ name: 'X', text: '' }, {}])).toHaveLength(0);
   });
+
+  // A model-specific invuln-save profile with a save RE-ROLL rider — the BSData
+  // "Invulnerable Save (2+*) [Makari]" shape (Makari's OWN 2+ invuln, not the whole unit's) — mapped to
+  // {invuln:2}+{saveReroll:all} and slipped through onlyStatline as a unit-wide defender buff. Drop the
+  // save-note; do NOT over-correct (a standalone save-reroll aura is kept).
+  it('drops an invuln-save note with a save-reroll rider (Makari shape); keeps a standalone save-reroll aura', () => {
+    const makari = captureUnitAbilities([
+      { name: 'Invulnerable Save (2+*) [Makari]', text: 'This model has a 2+ invulnerable save. Re-roll invulnerable saving throws for this model.' },
+    ]);
+    expect(makari).toHaveLength(0); // dropped — not applied unit-wide
+    const aura = captureUnitAbilities([
+      { name: 'Storm of Shields', text: 'Models in this unit can re-roll saving throws.' },
+    ]);
+    expect(aura).toHaveLength(1); // a genuine save-reroll aura is NOT over-dropped
+    expect(aura[0].mods.saveReroll).toBeTruthy();
+  });
 });
 
 describe('condition-gap closes (so conditional buffs are gated, not always-on)', () => {
