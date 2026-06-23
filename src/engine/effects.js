@@ -54,6 +54,9 @@ export const CONDITIONS = [
   // attack that targets a unit that is Below Half-strength / cannot Fly / is within 9\""). Defaults
   // OFF so a target-conditional buff isn't applied to every attack (Session 37).
   { id: 'targetCondition', label: 'Target meets the condition' },
+  // The ATTACKING unit has taken casualties ("if this unit is below its Starting Strength / Below
+  // Half-strength") — the sim has no mid-game casualty state, so it is a toggle the player sets.
+  { id: 'belowStrength', label: 'Below Starting / Half strength' },
 ];
 
 // ---- model-type scope (Session 17) -----------------------------------------

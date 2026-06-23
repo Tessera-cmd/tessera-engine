@@ -25,7 +25,7 @@ const MODELLABLE_CONDITIONS = new Set(['onCharge', 'halfRange', 'stationary', 't
 // Conditions gated on board/game state the sim does NOT model — a rule using one of these is
 // 'situational' (the effect is emitted but its toggle defaults OFF). These ids are also added
 // to engine/effects.js CONDITIONS so they appear as toggles in the sim.
-const SITUATIONAL_CONDITIONS = new Set(['objectiveControl', 'oncePerBattle', 'armyAbilityActive', 'targetCondition']);
+const SITUATIONAL_CONDITIONS = new Set(['objectiveControl', 'oncePerBattle', 'armyAbilityActive', 'targetCondition', 'belowStrength']);
 
 // Clauses that gate a buff on state the sim genuinely CANNOT represent, so a modifier inside one is
 // DROPPED (never captured as always-on) — under-applying is safe, silently over-applying is not
@@ -121,15 +121,30 @@ function detectCondition(t) {
   if (/\bwaaa?gh!?\b[^.]{0,30}?\bactive\b|\bis active for your army\b|while your army'?s?\b[^.]{0,40}?\bis active\b/i.test(t)) return 'armyAbilityActive';
   if (/within range of .{0,30}?objective marker|controll?ing an objective|on an objective marker|while .{0,40}?controls? .{0,20}?objective/i.test(t)) return 'objectiveControl';
   if (/\bonce per (?:battle|turn|game)|for the rest of the battle|until the end of the battle\b/i.test(t)) return 'oncePerBattle';
-  if (/\b(?:made?|makes?|making) a charge move|on the charge|charged this turn|that charged\b/i.test(t)) return 'onCharge';
+  // On-charge: GW phrases the grant-on-charge form as "ends a Charge move" / "after it charges",
+  // not only "made/makes a charge move" — cover both (real datasheets: Vanguard Assault et al).
+  if (/\b(?:made?|makes?|making|ends?|ending) a charge move|after (?:it|this (?:unit|model)) (?:charges|made a charge)|on the charge|charged this turn|that charged\b/i.test(t)) return 'onCharge';
   if (/\bwithin half range\b/i.test(t)) return 'halfRange';
-  if (/\bremained stationary|did not move|has not moved\b/i.test(t)) return 'stationary';
+  if (/\bremain(?:ed|s)? stationary|did not move|has not moved\b/i.test(t)) return 'stationary';
   if (/\boath of moment|that is the target of|nominated .* target\b/i.test(t)) return 'targetMarked';
-  // A buff gated on the TARGET'S state ("attack that targets a unit that is Below Half-strength /
-  // cannot Fly / contains 10+ models") — NOT "targets THIS unit" (defensive), and checked LAST so a
-  // more specific gate above (objective range, marked target) wins. The "within N\"" / objective
-  // forms are already handled, so this catches the residual enemy-state conditions.
-  if (/\b(?:targets?|against)\s+(?:a|an|one|that|the\s+closest)\s+(?:enemy\s+)?(?:unit|model)\b[^.]{0,40}?\b(?:that|which|is|cannot|can't|containing|contains|below|with|has)\b/i.test(t)) return 'targetCondition';
+  // The ATTACKING unit is below strength ("if this unit is below its Starting Strength / Below
+  // Half-strength") — the SELF subject ("this/that unit is below…"), distinct from a TARGET being
+  // weak (that falls to targetCondition below).
+  if (/\b(?:this|that)\s+(?:unit|model)\b[^.]{0,30}?\bis\s+below\s+(?:its\s+|their\s+)?(?:starting\s+strength|half)/i.test(t)) return 'belowStrength';
+  // A buff gated on the TARGET'S state — NOT "targets THIS unit" (defensive). Checked LAST so a more
+  // specific gate above wins. Covers the real phrasings grounded across the live catalogues: "targets
+  // a MONSTER or VEHICLE unit", "the closest eligible target", "when targeting … units", "(excluding …
+  // that target MONSTERS…)", "is Battle-shocked", and Tau Observer/Spotted/Guided/markerlight gating.
+  if (
+    /\b(?:targets?|against)\s+(?:a|an|one|that|the\s+closest)\s+(?:enemy\s+)?(?:unit|model)\b[^.]{0,40}?\b(?:that|which|is|cannot|can't|containing|contains|below|with|has)\b/i.test(t) ||
+    /\b(?:targets?|against)\s+(?:a|an|one)\s+[A-Z][A-Za-z' -]{1,40}?\b(?:units?|models?)\b/.test(t) || // "targets a MONSTER or VEHICLE unit"
+    /\b(?:closest|nearest)\s+eligible\s+target\b/i.test(t) || // "targets the closest eligible target"
+    /\bwhen targeting\b|\bexcluding\b[^.]{0,40}?\btarget/i.test(t) || // "[X] when targeting … units" / "(excluding attacks that target …)"
+    /\bis\s+battle-?shocked\b/i.test(t) || // target is Battle-shocked
+    /\b(?:spotted|guided|observer)\s+unit\b|\bbenefit(?:ing|s)?\s+from\s+markerlight|\bmarkerlight token/i.test(t) || // Tau markerlight chain
+    /\b(?:does not have|has)\s+the\b[^.]{0,40}?\bkeywords?\b/i.test(t) // "if the target does not have the IMPERIUM keyword"
+  )
+    return 'targetCondition';
   return null;
 }
 
@@ -311,10 +326,26 @@ function mapClause(clause, { name, source, nameCondition }) {
   const phase = detectPhase(clause);
   const condition = detectCondition(clause) || nameCondition || null;
   const scope = detectScope(clause);
+  // A clause that is conditionally TRIGGERED but whose gate we couldn't resolve into a known
+  // condition: an always-on effect from it is probably a mis-read (the buff is really conditional),
+  // so it is flagged `_suspect` and the ability-capture routes it to review rather than auto-applying.
+  // The benign "while … leading a unit" (a leader aura, genuinely always-on) is excluded.
+  const suspect =
+    !condition &&
+    (/\bif\b/i.test(clause) ||
+      /\btargets?\s+(?:a|an|one|the\s+closest)\b/i.test(clause) ||
+      /\bagainst\s+(?:a|an|one|each|enemy)\b/i.test(clause) ||
+      (/\bwhile\b/i.test(clause) && !/\bleading\b/i.test(clause)) ||
+      // Activation / per-phase / random triggers that don't map to a sim toggle — a positive buff
+      // behind one of these is once-per-phase / one-target / chance-based, not always-on (grounded
+      // across the live catalogues: Storm Speeder "select one enemy unit", "after this model has
+      // shot", "in your Shooting phase", "roll one D6"). Route to review rather than auto-apply.
+      /\bselect\s+(?:one|a|an)\b|\bafter\s+(?:it|this\s+(?:unit|model))\s+(?:has|shoots|shot)\b|\bin\s+your\s+(?:command|movement|shooting|charge|fight)\s+phase\b|\broll\s+(?:one|a)\s+d(?:ice|6)\b/i.test(clause));
   const add = (side, mod, summary) => {
     const eff = { name, side, phase, condition, mods: mod };
     if (scope.length) eff.scope = scope;
     if (source) eff.source = source;
+    if (suspect) eff._suspect = true;
     effects.push(eff);
     matched.push({ phrase: summary, side, summary });
   };
@@ -360,6 +391,28 @@ export function mapRuleText(text, { name = 'Rule', source } = {}) {
     effects.push(...r.effects);
     matched.push(...r.matched);
   }
+
+  // Ability-LEVEL gates: a "once per battle" or "while the Waaagh! is active" marker ANYWHERE in the
+  // ability gates the WHOLE ability, even when the effect clause is a separate sentence that doesn't
+  // repeat the trigger (e.g. "Once per battle … If it does, … add 3 to the Attacks" — Finest Hour).
+  // Apply the gate to any conditionless effect, so a split conditional never reads as always-on.
+  const abilityGate = /\bonce per (?:battle|turn|game)\b/i.test(mapText)
+    ? 'oncePerBattle'
+    : /\bwaaa?gh!?\b[^.]{0,30}?\bactive\b|\bis active for your army\b/i.test(mapText)
+      ? 'armyAbilityActive'
+      : null;
+  if (abilityGate) for (const e of effects) if (!e.condition) e.condition = abilityGate;
+
+  // Ability-LEVEL suspicion: an activation / aura / heal / phase trigger ANYWHERE in the ability
+  // often sits in a DIFFERENT clause than the +effect it gates (Blessing of the Omnissiah: "In your
+  // Command phase … select one friendly VEHICLE within 3" … That model … adds 1 to the Hit roll" —
+  // the +Hit clause has no trigger of its own). A per-clause check can't see it, so flag a
+  // conditionless effect for review when the whole ability is an activation/aura/heal/phase ability.
+  const abilitySuspect =
+    /\bselect\s+(?:one|a|an)\b|\bwithin\s+\d+\s*"|\bregains?\b|\blost wounds?\b|\broll\s+(?:one|a)\s+d(?:ice|6)\b|\bafter\s+(?:it|this\s+(?:unit|model))\s+(?:has|shoots|shot)\b|\bin\s+your\s+(?:command|movement|shooting|charge|fight)\s+phase\b/i.test(
+      mapText,
+    );
+  if (abilitySuspect) for (const e of effects) if (!e.condition) e._suspect = true;
 
   const conditions = [...new Set(effects.map((e) => e.condition).filter(Boolean))];
   const hasSituational = effects.some((e) => e.condition && SITUATIONAL_CONDITIONS.has(e.condition));
@@ -418,11 +471,41 @@ export function captureUnitAbilities(items = []) {
       return e.side === 'defender' && !e.condition && keys.length > 0 && keys.every((k) => k === 'invuln' || k === 'fnp');
     });
     if (onlyStatline) continue; // the INV/FNP is already on the statline
-    // `captured: true` flags this as auto-extracted-but-unconfirmed: it is stored + shown + editable
-    // but NOT auto-applied (engine/effects.js collectEffects skips it) until the user confirms it in
-    // the abilities editor. The mapper can't reliably tell a safe always-on rule from a conditional
-    // one it mis-read, so we never silently apply a captured ability — the user owns that decision.
-    for (const e of r.effects) out.push({ ...e, source: 'ability', captured: true });
+    // A "select/choose one of the following" ability is a per-phase CHOICE; the mapper grants EVERY
+    // option, so none can be auto-applied (the player picks one) — route them all to review.
+    const isChoice = /\b(?:select|choose|pick)\s+one\s+of\s+the\s+following\b/i.test(text);
+    for (const e of r.effects) {
+      // CONFIDENCE SPLIT (the capture-safety design, grounded across 5 live catalogues). An effect is
+      // SAFE TO AUTO-APPLY (no `captured` flag) when EITHER:
+      //   - it carries a CONDITION (any) — the sim gates it OFF by its toggle until the player sets it,
+      //     so it can never silently over-apply (Waaagh!, on-charge, on-objective, target-state,
+      //     below-strength, once-per-battle); OR
+      //   - it is an always-on HIGH-CONFIDENCE shape: a positive +Hit/+Wound/+AP, a weapon-keyword
+      //     grant, a re-roll of 1s, or ANY defensive ability — the bread-and-butter datasheet buffs
+      //     that are reliably unconditional.
+      // It is HELD FOR REVIEW (`captured: true`, which collectEffects skips) otherwise — the mapper is
+      // likely wrong or the rule is conditional in a way it couldn't pin down:
+      //   - an always-on NEGATIVE attacker modifier (≈always a mis-read — a degrading "Damaged:"
+      //     profile, an enemy debuff the unit imposes, or a defensive -1 mis-sided; 106/106 suspect);
+      //   - a higher-risk shape that is often conditional (a blanket re-roll all/failed, +Attacks /
+      //     +Strength / +Damage characteristic adds);
+      //   - a clause with an unresolved conditional trigger (`_suspect`) or a "select one" choice.
+      // The user confirms a reviewed ability in the editor (Apply clears the flag).
+      const { _suspect, ...clean } = e; // _suspect is a capture-time signal, never stored on the effect
+      const m = clean.mods || {};
+      const conditioned = !!clean.condition;
+      const negAtk = clean.side === 'attacker' && (Number(m.hitModifier) < 0 || Number(m.woundModifier) < 0);
+      const safeAlwaysOn =
+        clean.side === 'defender' ||
+        Number(m.hitModifier) > 0 ||
+        Number(m.woundModifier) > 0 ||
+        Number(m.apBonus) > 0 ||
+        (Array.isArray(m.grantKeywords) && m.grantKeywords.length > 0) ||
+        m.reroll?.hit === 'ones' ||
+        m.reroll?.wound === 'ones';
+      const apply = conditioned || (safeAlwaysOn && !negAtk && !isChoice && !_suspect);
+      out.push(apply ? { ...clean, source: 'ability' } : { ...clean, source: 'ability', captured: true });
+    }
   }
   return out;
 }

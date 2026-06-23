@@ -333,30 +333,110 @@ describe('army-state condition (the over-apply fix)', () => {
   });
 });
 
-describe('captureUnitAbilities (P2 — datasheet ability capture)', () => {
-  it('keeps a mapped ability, tags it source:ability + captured (NOT auto-applied), drops not-simulatable', () => {
+describe('captureUnitAbilities — the confidence split (P2)', () => {
+  it('APPLIES a safe always-on buff (+1 Hit leader aura), drops a not-simulatable one', () => {
     const eff = captureUnitAbilities([
       { name: 'Might is Right', text: 'While this model is leading a unit, each time a model in that unit makes a melee attack, add 1 to the Hit roll.' },
       { name: 'Leader', text: 'This model can be attached to the following unit: Beast Snagga Boyz.' },
     ]);
     expect(eff).toHaveLength(1);
     expect(eff[0].source).toBe('ability');
-    expect(eff[0].captured).toBe(true); // flagged so the engine never auto-applies it
+    expect(eff[0].captured).toBeUndefined(); // safe always-on -> auto-applied
     expect(eff[0].mods.hitModifier).toBe(1);
   });
 
-  it('keeps a Waaagh!-active buff but as a condition-gated effect (so it never silently over-applies)', () => {
+  it('a Waaagh!-active buff is conditioned (applied but gated OFF), not captured', () => {
     const eff = captureUnitAbilities([
       { name: 'Krumpin’ Time', text: 'While the Waaagh! is active for your army, models in this unit have the Feel No Pain 5+ ability.' },
     ]);
     expect(eff).toHaveLength(1);
     expect(eff[0].condition).toBe('armyAbilityActive');
+    expect(eff[0].captured).toBeUndefined(); // its condition toggle is the safety; no review needed
     expect(eff[0].mods.fnp).toBe(5);
+  });
+
+  it('REVIEWS an always-on NEGATIVE attacker modifier (an enemy debuff / degrade / mis-sided -1)', () => {
+    const eff = captureUnitAbilities([
+      { name: 'Suppression', text: 'While a unit is suppressed, subtract 1 from the Hit rolls of attacks that unit makes.' },
+    ]);
+    expect(eff).toHaveLength(1);
+    expect(eff[0].captured).toBe(true); // held for review, never auto-applied
+    expect(eff[0].mods.hitModifier).toBe(-1);
+  });
+
+  it('REVIEWS a higher-risk always-on shape (a blanket re-roll all) and a "select one" choice', () => {
+    const rerollAll = captureUnitAbilities([{ name: 'X', text: 'Each time a model in this unit makes an attack, re-roll the Hit roll.' }]);
+    expect(rerollAll[0].captured).toBe(true);
+    const choice = captureUnitAbilities([
+      { name: 'Doctrines', text: 'Each time this unit is selected to fight, select one of the following to apply: weapons have [SUSTAINED HITS 1] or [LETHAL HITS].' },
+    ]);
+    expect(choice.every((e) => e.captured)).toBe(true);
+  });
+
+  it('REVIEWS a clause with an unresolved conditional trigger (always-on), but APPLIES the safe part', () => {
+    // Macro-extinction shape: the "vs MONSTER/VEHICLE" hit is gated; a 2nd-clause "if TITANIC" wound leaks
+    // always-on -> reviewed; a plain leader +1 hit stays applied.
+    const eff = captureUnitAbilities([
+      { name: 'Macro', text: 'Each time this model makes an attack that targets a MONSTER or VEHICLE unit, add 1 to the Hit roll. If that target is TITANIC, add 1 to the Wound roll.' },
+    ]);
+    const hit = eff.find((e) => e.mods.hitModifier);
+    const wound = eff.find((e) => e.mods.woundModifier);
+    expect(hit.condition).toBe('targetCondition'); // gated, applied
+    expect(hit.captured).toBeUndefined();
+    expect(wound.captured).toBe(true); // unresolved "if … TITANIC" -> reviewed
   });
 
   it('drops a pure-statline invuln/FNP ability (already read onto INV/FNP) and empty text', () => {
     expect(captureUnitAbilities([{ name: 'Invulnerable Save', text: 'This model has a 5+ invulnerable save.' }])).toHaveLength(0);
     expect(captureUnitAbilities([{ name: 'X', text: '' }, {}])).toHaveLength(0);
+  });
+});
+
+describe('condition-gap closes (so conditional buffs are gated, not always-on)', () => {
+  it('self below-strength -> belowStrength', () => {
+    expect(mapRuleText('Each time a model in this unit makes an attack, add 1 to the Hit roll if this unit is below its Starting Strength.').effects[0].condition).toBe('belowStrength');
+  });
+  it('target keyword ("targets a MONSTER or VEHICLE unit") -> targetCondition', () => {
+    expect(mapRuleText('Each time this model makes an attack that targets a MONSTER or VEHICLE unit, add 1 to the Hit roll.').effects[0].condition).toBe('targetCondition');
+  });
+  it('"remains stationary" -> stationary', () => {
+    expect(mapRuleText('Each time this unit Remains Stationary, its ranged weapons have the [IGNORES COVER] ability.').effects[0].condition).toBe('stationary');
+  });
+  it('ability-level "once per battle" gates a split effect clause', () => {
+    const r = mapRuleText('Once per battle, at the start of the Fight phase, this model can use this ability. If it does, add 3 to the Attacks characteristic of its melee weapons.');
+    expect(r.effects.find((e) => e.mods.attackBonus)?.condition).toBe('oncePerBattle');
+  });
+});
+
+// The real-data over-apply gates the S37b regression gate found (grounded across 6 catalogues).
+describe('real-data over-apply gates (S37b regression gate)', () => {
+  const cap = (text, name = 'A') => captureUnitAbilities([{ name, text }]);
+  it('"targets the closest eligible target" gates on targetCondition (not always-on)', () => {
+    const e = cap('Each time this model makes a ranged attack that targets the closest eligible target, add 1 to the Hit roll.')[0];
+    expect(e.condition).toBe('targetCondition');
+    expect(e.captured).toBeUndefined(); // gated, usable
+  });
+  it('"ends a Charge move" grant gates on onCharge', () => {
+    const e = cap('Each time this unit ends a Charge move, melee weapons equipped by models in this unit have the [LETHAL HITS] ability.')[0];
+    expect(e.condition).toBe('onCharge');
+  });
+  it('a "when targeting MONSTER/VEHICLE" grant gates on targetCondition', () => {
+    const e = cap('Models in this unit have [SUSTAINED HITS 2] when targeting Monster, Vehicle or Fortification units.')[0];
+    expect(e.condition).toBe('targetCondition');
+  });
+  it('a "select one enemy unit" phase-activated buff is REVIEWED (not auto-applied)', () => {
+    const e = cap('In your Shooting phase, after this model has shot, select one enemy MONSTER or VEHICLE unit hit by those attacks. Add 1 to the Wound roll against that unit.', 'Thunderstrike');
+    expect(e.find((x) => x.mods.woundModifier)?.captured).toBe(true);
+  });
+  it('a random-D6 defensive buff is REVIEWED (not auto-applied always-on)', () => {
+    const e = cap('At the start of the Fight phase, roll one D6: on a 2+, subtract 1 from the Damage characteristic of attacks made against this unit.')[0];
+    expect(e.captured).toBe(true);
+  });
+  it('a leader aura "while leading … +1 Hit" still APPLIES (not over-reviewed)', () => {
+    const e = cap('While this model is leading a unit, each time a model in that unit makes a melee attack, add 1 to the Hit roll.')[0];
+    expect(e.captured).toBeUndefined();
+    expect(e.condition).toBeFalsy();
+    expect(e.mods.hitModifier).toBe(1);
   });
 });
 
