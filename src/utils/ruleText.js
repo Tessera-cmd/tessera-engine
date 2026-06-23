@@ -576,6 +576,30 @@ export function planPackRules(raw = {}) {
   };
 }
 
+// Merge several per-item pack-rule extractions (the chunk-per-detachment path) into one raw
+// { faction, armyRule, detachments } before planPackRules maps it. Pure + exported for tests.
+// Takes the first non-empty faction + army rule; concatenates detachments, de-duplicating any with
+// the SAME real name (so the army-rule chunk bleeding a detachment in doesn't double-count it — a
+// generic/blank "Detachment" name is never deduped, to avoid dropping two genuinely unnamed ones).
+export function mergePackRules(results) {
+  const list = (results || []).filter((r) => r && typeof r === 'object');
+  const faction = list.map((r) => r.faction).find((f) => f) || null;
+  const armyRule = list.map((r) => r.armyRule).find((a) => a && (a.name || a.text)) || null;
+  const detachments = [];
+  const seen = new Set();
+  for (const r of list) {
+    for (const d of Array.isArray(r.detachments) ? r.detachments : []) {
+      if (!d) continue;
+      const name = String(d.name || '').trim().toLowerCase();
+      const key = name && name !== 'detachment' ? name : null;
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      detachments.push(d);
+    }
+  }
+  return { faction, armyRule, detachments };
+}
+
 // Did the pack plan find anything worth showing/saving? (an army rule, or any detachment with a
 // rule / stratagem / enhancement). Pure.
 export function packHasRules(plan) {

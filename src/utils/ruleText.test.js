@@ -10,6 +10,7 @@ import {
   planHasRules,
   planPackRules,
   packHasRules,
+  mergePackRules,
   captureUnitAbilities,
 } from './ruleText.js';
 
@@ -300,6 +301,35 @@ describe('planPackRules (faction-pack: army rule + many detachments)', () => {
     expect(packHasRules(planPackRules(raw))).toBe(true);
     expect(packHasRules(planPackRules({ detachments: [] }))).toBe(false);
     expect(packHasRules(planPackRules({}))).toBe(false);
+  });
+});
+
+describe('mergePackRules (chunk-per-detachment aggregation)', () => {
+  it('takes the first non-empty faction + army rule and concatenates detachments', () => {
+    const armyChunk = { faction: 'Orks', armyRule: { name: 'Waaagh!', text: '…' }, detachments: [] };
+    const detA = { faction: null, armyRule: null, detachments: [{ name: 'War Horde', rule: { name: 'War Horde', text: 'a' }, stratagems: [], enhancements: [] }] };
+    const detB = { faction: 'Orks', armyRule: null, detachments: [{ name: 'Bully Boyz', rule: { name: 'Bully Boyz', text: 'b' }, stratagems: [], enhancements: [] }] };
+    const merged = mergePackRules([armyChunk, detA, detB]);
+    expect(merged.faction).toBe('Orks');
+    expect(merged.armyRule.name).toBe('Waaagh!');
+    expect(merged.detachments.map((d) => d.name)).toEqual(['War Horde', 'Bully Boyz']);
+  });
+
+  it('de-duplicates a real-named detachment that two chunks both returned (army-rule bleed)', () => {
+    const a = { detachments: [{ name: 'War Horde', rule: { name: 'War Horde', text: 'a' } }] };
+    const b = { detachments: [{ name: 'War Horde', rule: { name: 'War Horde', text: 'a' } }] };
+    expect(mergePackRules([a, b]).detachments).toHaveLength(1);
+  });
+
+  it('does NOT drop two genuinely unnamed (generic) detachments', () => {
+    const a = { detachments: [{ name: 'Detachment', rule: { name: 'Rule', text: 'a' } }] };
+    const b = { detachments: [{ name: 'Detachment', rule: { name: 'Rule', text: 'b' } }] };
+    expect(mergePackRules([a, b]).detachments).toHaveLength(2);
+  });
+
+  it('ignores nulls and returns an empty shape for no chunks', () => {
+    expect(mergePackRules([null, undefined])).toEqual({ faction: null, armyRule: null, detachments: [] });
+    expect(mergePackRules([])).toEqual({ faction: null, armyRule: null, detachments: [] });
   });
 });
 
