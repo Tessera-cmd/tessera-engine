@@ -41,26 +41,36 @@ export const CONDITIONS = [
   { id: 'targetMarked', label: 'Target marked' },
   { id: 'halfRange', label: 'Within half range' },
   { id: 'stationary', label: 'Remained stationary' },
-  // Situational conditions — board/game state the sim does not track, so a rule gated on one
-  // defaults OFF and the player turns it on for the round it applies. The user owns the assumption.
+  // Situational conditions (Session 17) — board/game state the sim does not track, so an
+  // auto-imported rule gated on one defaults OFF and the player turns it on for the round it
+  // applies. The user owns the assumption.
   { id: 'objectiveControl', label: 'On an objective' },
   { id: 'oncePerBattle', label: 'Once-per-battle effect' },
+  // An army-wide ability turn the player declares (Waaagh!, an Oath bonus, etc.) — a datasheet
+  // buff gated on "while the Waaagh! is active for your army" (Session 37). Defaults OFF so a
+  // captured ability never silently applies a Waaagh!-only bonus every round.
+  { id: 'armyAbilityActive', label: 'Army ability active (e.g. Waaagh!)' },
+  // The defending unit meets a target-state condition the sim can't track ("each time you make an
+  // attack that targets a unit that is Below Half-strength / cannot Fly / is within 9\""). Defaults
+  // OFF so a target-conditional buff isn't applied to every attack (Session 37).
+  { id: 'targetCondition', label: 'Target meets the condition' },
 ];
 
-// ---- model-type scope -------------------------------------------------------
-// An army/detachment effect may be SCOPED to certain model types ("VEHICLE and MOUNTED models
-// add 1 to Hit"), recorded as `effect.scope` (uppercase keywords). The unit-aware caller drops a
-// scoped effect for a unit that has none of those keywords, so an army-wide rule never lands on
-// the wrong units. An effect with no scope always applies. Pure.
+// ---- model-type scope (Session 17) -----------------------------------------
+// An auto-imported army/detachment effect may be SCOPED to certain model types ("VEHICLE and
+// MOUNTED models add 1 to Hit"). The mapper records that as `effect.scope` (uppercase keywords);
+// the unit-aware caller (the matrix per cell, the single sim per side) drops a scoped effect for
+// a unit that has none of those keywords, so an army-wide rule never lands on the wrong units.
+// An effect with no scope always applies. Pure.
 export function effectAppliesToUnit(effect, unitKeywords) {
   if (!effect?.scope?.length) return true;
   const have = new Set((unitKeywords || []).map((k) => String(k).toUpperCase()));
   return effect.scope.some((k) => have.has(String(k).toUpperCase()));
 }
 
-// Filter effects to those that apply to a unit with the given keywords. When `unitKeywords` is
-// null/undefined, gating is skipped (effects returned unchanged) so callers that don't supply
-// keywords are unaffected.
+// Filter a list of effects to those that apply to a unit with the given keywords. When
+// `unitKeywords` is null/undefined, gating is skipped (effects returned unchanged) so existing
+// callers that don't supply keywords are unaffected.
 export function filterEffectsForUnit(effects, unitKeywords) {
   if (unitKeywords == null) return effects || [];
   return (effects || []).filter((e) => effectAppliesToUnit(e, unitKeywords));
@@ -234,7 +244,13 @@ export function collectEffects({ abilities = [], armyRule = null, detachment = n
   const out = [];
   const tag = (effs, source) => (effs || []).forEach((e) => out.push({ ...e, source: e.source || source }));
 
-  tag(abilities, 'ability');
+  // Skip an ability still flagged `captured` — one auto-extracted from an import but NOT yet
+  // confirmed by the user. A captured datasheet ability is stored, shown and editable, but is NEVER
+  // auto-applied, because the free-text mapper cannot reliably tell a safe always-on rule (e.g.
+  // "this unit's weapons have +1 to hit") from a conditional one it mis-read as always-on (a
+  // once-per-battle buff, a degrading-statline penalty, an enemy debuff). The user confirms it in
+  // the unit's abilities editor, which clears the flag (Session 37 capture-safety review).
+  tag((abilities || []).filter((a) => a && !a.captured), 'ability');
   if (armyRule) tag(armyRule.effects, 'army');
   if (detachment) {
     tag(detachment.rule?.effects, 'detachment');

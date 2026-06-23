@@ -18,6 +18,22 @@ import {
 } from './effects.js';
 
 // ---- 1. pure resolver ------------------------------------------------------
+describe('collectEffects — captured abilities are not applied (Session 37 capture-safety)', () => {
+  it('skips an ability flagged `captured` (import-extracted, unconfirmed) but keeps a confirmed one', () => {
+    const abilities = [
+      { name: 'Confirmed', side: 'attacker', phase: 'fight', mods: { hitModifier: 1 } }, // no flag -> applied
+      { name: 'Captured', side: 'attacker', phase: 'fight', mods: { attackBonus: 4 }, captured: true }, // skipped
+    ];
+    const effs = collectEffects({ abilities });
+    expect(effs).toHaveLength(1);
+    expect(effs[0].name).toBe('Confirmed');
+    // End to end: the captured +4 Attacks contributes nothing.
+    const a = resolveEffects(effs, { phase: 'fight' }).attacker;
+    expect(a.hitModifier).toBe(1);
+    expect(a.attackBonus).toBe(0);
+  });
+});
+
 describe('resolveEffects', () => {
   it('filters by phase and by active condition', () => {
     const effects = [

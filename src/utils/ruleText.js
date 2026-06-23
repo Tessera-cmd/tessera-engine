@@ -25,7 +25,17 @@ const MODELLABLE_CONDITIONS = new Set(['onCharge', 'halfRange', 'stationary', 't
 // Conditions gated on board/game state the sim does NOT model — a rule using one of these is
 // 'situational' (the effect is emitted but its toggle defaults OFF). These ids are also added
 // to engine/effects.js CONDITIONS so they appear as toggles in the sim.
-const SITUATIONAL_CONDITIONS = new Set(['objectiveControl', 'oncePerBattle']);
+const SITUATIONAL_CONDITIONS = new Set(['objectiveControl', 'oncePerBattle', 'armyAbilityActive', 'targetCondition']);
+
+// Clauses that gate a buff on state the sim genuinely CANNOT represent, so a modifier inside one is
+// DROPPED (never captured as always-on) — under-applying is safe, silently over-applying is not
+// (Session 37, the capture-safety review):
+//   - a DEGRADING ("Damaged:" / "while this model has N-M wounds remaining …") bracket: the sim has
+//     no live wound tracking, so a healthy unit must NOT inherit its last-bracket penalty;
+//   - an AURA / range gate ("while a friendly … within N\"" / "within N\" of this model"): the sim
+//     has no board geometry, and the buff is usually to OTHER units, not the bearer.
+const DEGRADING_RE = /\b\d+\s*-\s*\d+\s+wounds?\s+remaining\b|\bdamaged\s*:\s*\d|\bwounds?\s+remaining\b|\bis\s+damaged\b/i;
+const AURA_RE = /\bwithin\s+\d+\s*"|\bwithin\s+\d+\s*inches\b/i;
 
 // Weapon keywords a rule may GRANT (engine grantKeywords). Restricted to a recognised set so a
 // stray bracketed UNIT keyword (e.g. [CHARACTER]) is never mistaken for a weapon grant. The
@@ -105,12 +115,21 @@ function detectPhase(t) {
 
 // Detect a single condition id for a clause (the most specific wins). Returns null for none.
 function detectCondition(t) {
+  // Army-wide ability turn (Waaagh!, an Oath bonus): "while the Waaagh! is active", "while the
+  // <X> is active for your army", "while your army's <X> is active". Checked FIRST so a buff
+  // gated on it is situational (default OFF) rather than read as an always-on modifier.
+  if (/\bwaaa?gh!?\b[^.]{0,30}?\bactive\b|\bis active for your army\b|while your army'?s?\b[^.]{0,40}?\bis active\b/i.test(t)) return 'armyAbilityActive';
   if (/within range of .{0,30}?objective marker|controll?ing an objective|on an objective marker|while .{0,40}?controls? .{0,20}?objective/i.test(t)) return 'objectiveControl';
   if (/\bonce per (?:battle|turn|game)|for the rest of the battle|until the end of the battle\b/i.test(t)) return 'oncePerBattle';
-  if (/\bmade? a charge move|on the charge|charged this turn|that charged\b/i.test(t)) return 'onCharge';
+  if (/\b(?:made?|makes?|making) a charge move|on the charge|charged this turn|that charged\b/i.test(t)) return 'onCharge';
   if (/\bwithin half range\b/i.test(t)) return 'halfRange';
   if (/\bremained stationary|did not move|has not moved\b/i.test(t)) return 'stationary';
   if (/\boath of moment|that is the target of|nominated .* target\b/i.test(t)) return 'targetMarked';
+  // A buff gated on the TARGET'S state ("attack that targets a unit that is Below Half-strength /
+  // cannot Fly / contains 10+ models") — NOT "targets THIS unit" (defensive), and checked LAST so a
+  // more specific gate above (objective range, marked target) wins. The "within N\"" / objective
+  // forms are already handled, so this catches the residual enemy-state conditions.
+  if (/\b(?:targets?|against)\s+(?:a|an|one|that|the\s+closest)\s+(?:enemy\s+)?(?:unit|model)\b[^.]{0,40}?\b(?:that|which|is|cannot|can't|containing|contains|below|with|has)\b/i.test(t)) return 'targetCondition';
   return null;
 }
 
@@ -184,12 +203,14 @@ const MOD_PATTERNS = [
     re: new RegExp(`adds? ${NUM} to (?:the )?hit rolls?`, 'i'),
     build: (m) => ({ side: 'attacker', mod: { hitModifier: numFrom(m[1]) }, summary: `+${numFrom(m[1])} to Hit` }),
   },
-  // -N to Hit rolls. Defender if it's "made against this unit", else attacker self-penalty.
+  // -N to Hit rolls. Defender when the penalty is to attacks made AGAINST / TARGETING this unit —
+  // the qualifier often PRECEDES "hit rolls" ("each time a melee attack targets this unit, subtract
+  // 1 from the Hit roll"), so test the WHOLE clause, not just the tail. Else an attacker self-penalty.
   {
-    re: new RegExp(`subtracts? ${NUM} from (?:the )?hit rolls?([^.]*)`, 'i'),
-    build: (m) => {
+    re: new RegExp(`subtracts? ${NUM} from (?:the )?hit rolls?`, 'i'),
+    build: (m, clause = '') => {
       const n = numFrom(m[1]);
-      const against = /against (?:this|that|the bearer'?s?) unit|targeting this unit|attacks? (?:that target|made against)/i.test(m[2] || '');
+      const against = /\b(?:attack|attacks)\b[^.]*?\btargets?\s+this\s+unit\b|\bmade\s+against\s+this\s+unit\b|\bagainst\s+this\s+unit\b|\btargeting\s+this\s+unit\b/i.test(clause);
       return against
         ? { side: 'defender', mod: { hitPenalty: n }, summary: `−${n} to be Hit` }
         : { side: 'attacker', mod: { hitModifier: -n }, summary: `−${n} to Hit` };
@@ -234,10 +255,16 @@ const MOD_PATTERNS = [
 function rerollMods(raw) {
   const out = [];
   const seen = new Set();
-  const re = /re-?roll[^.]*/gi;
+  // Split per re-roll span (up to the NEXT "re-roll" or the period) so a single-die re-roll on one
+  // roll doesn't swallow a legitimate blanket re-roll on another in the same sentence.
+  const re = /re-?roll(?:(?!re-?roll)[^.])*/gi;
   let m;
   while ((m = re.exec(raw))) {
     const clause = m[0];
+    // "re-roll ONE / a single Hit roll" is a single specified die per activation — the engine can
+    // only model a blanket re-roll, so promoting it to 'all' over-applies. Skip it — but NOT
+    // "re-roll one OR MORE" (that IS a blanket re-roll). (#capture-safety)
+    if (/\bre-?roll\s+(?:one(?!\s+or\s+more)|a\s+single)\b/i.test(clause)) continue;
     const kind = rerollKind(clause);
     if (/\bhit\b/i.test(clause) && !seen.has('hit')) {
       out.push({ side: 'attacker', mod: { reroll: { hit: kind } }, summary: 'Re-roll Hits' });
@@ -274,6 +301,11 @@ function grantKeywordMods(t) {
 // never bleed across a rule's clauses (the lesson from the real files: a rule's second sentence
 // has a different phase/scope than its first). Returns the effects this clause produced.
 function mapClause(clause, { name, source, nameCondition }) {
+  // Drop a clause gated on state the sim can't represent (a degrading "Damaged:" bracket / a range
+  // aura) BEFORE matching a modifier, so a healthy unit never inherits its last-bracket penalty and
+  // a bearer never self-applies a within-N" aura meant for friends. Under-apply, never over-apply.
+  if (DEGRADING_RE.test(clause) || AURA_RE.test(clause)) return { effects: [], matched: [] };
+
   const effects = [];
   const matched = [];
   const phase = detectPhase(clause);
@@ -289,7 +321,7 @@ function mapClause(clause, { name, source, nameCondition }) {
   for (const p of MOD_PATTERNS) {
     const m = clause.match(p.re);
     if (m) {
-      const r = p.build(m);
+      const r = p.build(m, clause);
       if (r && r.mod) add(r.side, r.mod, r.summary);
     }
   }
@@ -362,6 +394,39 @@ export function mapRuleText(text, { name = 'Rule', source } = {}) {
   return { effects, classification, matched, unmapped: [], notes, conditions };
 }
 
+// ---- capture a unit's DATASHEET abilities (Session 37, P2) ------------------
+// Turn a unit's datasheet ability profiles (each { name, text }) into the intrinsic Effect[] the
+// sim consumes (engine/effects.js, applied via CombatSim.gatherAll). The same clause-aware mapper
+// + classifier the roster-rules import uses, so a Waaagh!-active buff lands as a `situational`
+// effect (its condition defaults OFF — never silently over-applied) and an on-charge buff stays
+// gated on the charge toggle. We DROP:
+//   - not-simulatable abilities (no combat effect) — not needed by the damage sim;
+//   - a pure statline ability (only an invuln/feel-no-pain, no condition) — already read onto the
+//     unit's INV/FNP, so capturing it again would just double-represent it.
+// Each kept effect is tagged source:'ability'. Pure (no engine/import dependency); the result is
+// stored on unit.abilities and is editable/removable in the unit editor (it carries the unit's
+// own UNVERIFIED edition provenance). Input order is preserved.
+export function captureUnitAbilities(items = []) {
+  const out = [];
+  for (const item of items || []) {
+    const text = item?.text;
+    if (!text || !String(text).trim()) continue;
+    const r = mapRuleText(text, { name: item.name });
+    if (!r.effects.length) continue; // not-simulatable / no combat clause
+    const onlyStatline = r.effects.every((e) => {
+      const keys = Object.keys(e.mods || {});
+      return e.side === 'defender' && !e.condition && keys.length > 0 && keys.every((k) => k === 'invuln' || k === 'fnp');
+    });
+    if (onlyStatline) continue; // the INV/FNP is already on the statline
+    // `captured: true` flags this as auto-extracted-but-unconfirmed: it is stored + shown + editable
+    // but NOT auto-applied (engine/effects.js collectEffects skips it) until the user confirms it in
+    // the abilities editor. The mapper can't reliably tell a safe always-on rule from a conditional
+    // one it mis-read, so we never silently apply a captured ability — the user owns that decision.
+    for (const e of r.effects) out.push({ ...e, source: 'ability', captured: true });
+  }
+  return out;
+}
+
 // ---- plan a whole roster's extracted rules ---------------------------------
 // Takes Stage-1 extraction output and runs each rule's text through mapRuleText, producing a
 // review-ready plan: every detected rule with its mapped effects + classification, ready to be
@@ -398,4 +463,42 @@ export function planRosterRules(raw = {}) {
 export function planHasRules(plan) {
   if (!plan) return false;
   return !!(plan.armyRule || plan.detachment?.rule || (plan.enhancements && plan.enhancements.length));
+}
+
+// ---- plan a faction PACK's extracted rules (MFM loader P3) ------------------
+// A whole faction pack carries an army rule plus MANY detachments, each with its own rule,
+// stratagems and enhancements (unlike a single roster, which has one chosen detachment and no
+// stratagems). Takes the transcribed {faction, armyRule, detachments} (api/claude.js
+// extractPackRules) and runs every rule's text through mapRuleText, so the model never decides
+// what a rule does — it only supplied the wording. Pure. Returns a review-ready plan:
+//   { faction, armyRule:Plan|null, detachments:[{ name, rule:Plan|null, stratagems:[Plan],
+//     enhancements:[Plan] }] }, where Plan = { name, text, effects, classification, notes, ... }.
+export function planPackRules(raw = {}) {
+  const planOne = (entry, source) =>
+    entry && (entry.text || entry.name)
+      ? { name: entry.name || 'Rule', text: cleanRuleText(entry.text), ...mapRuleText(entry.text, { name: entry.name, source }) }
+      : null;
+
+  const detachments = (Array.isArray(raw.detachments) ? raw.detachments : []).map((d) => ({
+    name: d?.name || 'Detachment',
+    rule: planOne(d?.rule, 'detachment'),
+    stratagems: (Array.isArray(d?.stratagems) ? d.stratagems : []).map((s) => planOne(s, 'stratagem')).filter(Boolean),
+    enhancements: (Array.isArray(d?.enhancements) ? d.enhancements : []).map((e) => planOne(e, 'enhancement')).filter(Boolean),
+  }));
+
+  return {
+    faction: raw.faction || '',
+    armyRule: planOne(raw.armyRule, 'army'),
+    detachments,
+  };
+}
+
+// Did the pack plan find anything worth showing/saving? (an army rule, or any detachment with a
+// rule / stratagem / enhancement). Pure.
+export function packHasRules(plan) {
+  if (!plan) return false;
+  if (plan.armyRule) return true;
+  return (plan.detachments || []).some(
+    (d) => d.rule || (d.stratagems && d.stratagems.length) || (d.enhancements && d.enhancements.length),
+  );
 }

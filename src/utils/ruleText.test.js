@@ -3,7 +3,15 @@
 // are GENERICISED formulaic phrasings (the patterns the mapper keys on), not verbatim GW data.
 
 import { describe, it, expect } from 'vitest';
-import { mapRuleText, planRosterRules, cleanRuleText, planHasRules } from './ruleText.js';
+import {
+  mapRuleText,
+  planRosterRules,
+  cleanRuleText,
+  planHasRules,
+  planPackRules,
+  packHasRules,
+  captureUnitAbilities,
+} from './ruleText.js';
 
 const modsOf = (r, pred) => r.effects.filter(pred).map((e) => e.mods);
 
@@ -245,5 +253,151 @@ describe('planRosterRules', () => {
 
   it('planHasRules is false for an empty plan', () => {
     expect(planHasRules(planRosterRules({}))).toBe(false);
+  });
+});
+
+describe('planPackRules (faction-pack: army rule + many detachments)', () => {
+  const raw = {
+    faction: 'Space Marines',
+    armyRule: { name: 'Oath', text: 're-roll Hit rolls' },
+    detachments: [
+      {
+        name: 'Gladius',
+        rule: { name: 'Doctrines', text: 'add 1 to the Strength characteristic' },
+        stratagems: [{ name: 'Honour', text: 'add 1 to the Attacks characteristic' }],
+        enhancements: [{ name: 'Armour', text: '4+ invulnerable save' }],
+      },
+      {
+        name: 'Anvil',
+        rule: { name: 'Hold', text: 'this unit cannot Advance' }, // non-combat -> not-simulatable
+        stratagems: [],
+        enhancements: [],
+      },
+    ],
+  };
+
+  it('maps the army rule and each detachment rule / stratagem / enhancement', () => {
+    const plan = planPackRules(raw);
+    expect(plan.faction).toBe('Space Marines');
+    expect(plan.armyRule.effects[0].mods.reroll.hit).toBeTruthy();
+    expect(plan.detachments).toHaveLength(2);
+
+    const gladius = plan.detachments[0];
+    expect(gladius.rule.effects[0].mods.strengthBonus).toBe(1);
+    expect(gladius.stratagems[0].effects[0].mods.attackBonus).toBe(1);
+    expect(gladius.enhancements[0].effects[0].mods.invuln).toBe(4);
+    expect(gladius.enhancements[0].side ?? gladius.enhancements[0].effects[0].side).toBe('defender');
+  });
+
+  it('classifies a non-combat detachment rule as not-simulatable (no effects)', () => {
+    const plan = planPackRules(raw);
+    const anvil = plan.detachments[1];
+    expect(anvil.rule.classification).toBe('not-simulatable');
+    expect(anvil.rule.effects).toHaveLength(0);
+  });
+
+  it('packHasRules is true when there are rules, false for an empty pack', () => {
+    expect(packHasRules(planPackRules(raw))).toBe(true);
+    expect(packHasRules(planPackRules({ detachments: [] }))).toBe(false);
+    expect(packHasRules(planPackRules({}))).toBe(false);
+  });
+});
+
+// ---- Session 37: army-state condition + on-charge gate (the mapper safety fixes) ----
+describe('army-state condition (the over-apply fix)', () => {
+  it('classifies a "while the Waaagh! is active" buff as situational (default-OFF), not always-on', () => {
+    const r = mapRuleText('While the Waaagh! is active for your army, add 4 to the Attacks characteristic of this model’s melee weapons.', {
+      name: 'Da Biggest and da Best',
+    });
+    expect(r.classification).toBe('situational');
+    const eff = r.effects.find((e) => e.mods.attackBonus === 4);
+    expect(eff.condition).toBe('armyAbilityActive');
+  });
+
+  it('still classifies an unconditional while-leading +1 to Hit as mapped (applies)', () => {
+    const r = mapRuleText('While this model is leading a unit, each time a model in that unit makes a melee attack, add 1 to the Hit roll.', {
+      name: 'Might is Right',
+    });
+    expect(r.classification).toBe('mapped');
+    const eff = r.effects.find((e) => e.mods.hitModifier === 1);
+    expect(eff.condition).toBeNull();
+    expect(eff.phase).toBe('fight');
+  });
+
+  it('gates "makes a Charge move" on onCharge (the regex that previously only matched "made")', () => {
+    const r = mapRuleText('Each time this model makes a Charge move, melee weapons it is equipped with have the [DEVASTATING WOUNDS] ability.', {
+      name: 'Ferocious Rage',
+    });
+    const eff = r.effects.find((e) => e.mods.grantKeywords);
+    expect(eff.condition).toBe('onCharge');
+  });
+});
+
+describe('captureUnitAbilities (P2 — datasheet ability capture)', () => {
+  it('keeps a mapped ability, tags it source:ability + captured (NOT auto-applied), drops not-simulatable', () => {
+    const eff = captureUnitAbilities([
+      { name: 'Might is Right', text: 'While this model is leading a unit, each time a model in that unit makes a melee attack, add 1 to the Hit roll.' },
+      { name: 'Leader', text: 'This model can be attached to the following unit: Beast Snagga Boyz.' },
+    ]);
+    expect(eff).toHaveLength(1);
+    expect(eff[0].source).toBe('ability');
+    expect(eff[0].captured).toBe(true); // flagged so the engine never auto-applies it
+    expect(eff[0].mods.hitModifier).toBe(1);
+  });
+
+  it('keeps a Waaagh!-active buff but as a condition-gated effect (so it never silently over-applies)', () => {
+    const eff = captureUnitAbilities([
+      { name: 'Krumpin’ Time', text: 'While the Waaagh! is active for your army, models in this unit have the Feel No Pain 5+ ability.' },
+    ]);
+    expect(eff).toHaveLength(1);
+    expect(eff[0].condition).toBe('armyAbilityActive');
+    expect(eff[0].mods.fnp).toBe(5);
+  });
+
+  it('drops a pure-statline invuln/FNP ability (already read onto INV/FNP) and empty text', () => {
+    expect(captureUnitAbilities([{ name: 'Invulnerable Save', text: 'This model has a 5+ invulnerable save.' }])).toHaveLength(0);
+    expect(captureUnitAbilities([{ name: 'X', text: '' }, {}])).toHaveLength(0);
+  });
+});
+
+// ---- Session 37 capture-safety review: the over-apply classes the mapper must NOT mis-handle ----
+describe('capture-safety mapper fixes', () => {
+  it('DROPS a degrading "Damaged:" / "N-M wounds remaining" penalty (no live wound tracking)', () => {
+    // A healthy unit must not inherit its last-bracket -1 to hit (the Redemptor/Repulsor bug).
+    expect(mapRuleText('While this model has 1-4 wounds remaining, subtract 1 from the Hit roll.').effects).toHaveLength(0);
+  });
+
+  it('DROPS a within-N" aura (no board geometry; the buff is for OTHER units, not the bearer)', () => {
+    expect(mapRuleText('While a friendly ADEPTUS ASTARTES unit is within 6" of this model, add 1 to the Hit roll.').effects).toHaveLength(0);
+  });
+
+  it('makes a TARGET-state buff situational (off by default), not applied to every attack', () => {
+    const r = mapRuleText('Each time this model makes a ranged attack that targets a unit that cannot Fly, add 1 to the Hit roll.');
+    expect(r.classification).toBe('situational');
+    expect(r.effects[0].condition).toBe('targetCondition');
+  });
+
+  it('maps a defensive "-1 to be hit" to the DEFENDER even when the qualifier precedes "Hit roll"', () => {
+    const r = mapRuleText('Each time a melee attack targets this unit, subtract 1 from the Hit roll.');
+    const eff = r.effects.find((e) => e.mods.hitPenalty || e.mods.hitModifier);
+    expect(eff.side).toBe('defender');
+    expect(eff.mods.hitPenalty).toBe(1);
+  });
+
+  it('does NOT promote "re-roll one Hit roll" to re-roll all', () => {
+    const r = mapRuleText('In your Shooting phase, you can re-roll one Hit roll for this model.');
+    expect(r.effects.some((e) => e.mods.reroll)).toBe(false);
+  });
+
+  it('DROPS a standalone "while this model is Damaged" penalty (split from its bracket header)', () => {
+    expect(mapRuleText('While this model is Damaged, subtract 1 from the Hit rolls of this model\'s attacks.').effects).toHaveLength(0);
+  });
+
+  it('KEEPS "re-roll one or more" (a blanket re-roll), and a single-die re-roll does not swallow a later blanket one', () => {
+    expect(mapRuleText('Re-roll one or more Hit rolls when this unit shoots.').effects.some((e) => e.mods.reroll?.hit)).toBe(true);
+    // "re-roll one X" is dropped, but the blanket "re-roll all failed Wound rolls" in the same sentence survives.
+    const r = mapRuleText('You can re-roll one Hit roll, and re-roll all failed Wound rolls.');
+    expect(r.effects.some((e) => e.mods.reroll?.hit)).toBe(false);
+    expect(r.effects.find((e) => e.mods.reroll?.wound)?.mods.reroll.wound).toBe('failed');
   });
 });
