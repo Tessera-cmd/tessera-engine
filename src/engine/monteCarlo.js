@@ -11,11 +11,41 @@
 
 import { makeRng } from './dice.js';
 import { simulateUnitAttack, effectiveSave, groupWeapons } from './combat.js';
-import { defenderModelTotal, defenderWoundTotal, defenderModelWounds, attachedChars } from './allocation.js';
+import {
+  defenderModelTotal,
+  defenderWoundTotal,
+  defenderModelWounds,
+  attachedChars,
+  isMixedDefender,
+  buildGroups,
+} from './allocation.js';
 import { computeStats } from '../utils/stats.js';
 
-// Distinct effective-save targets across the weapons that actually fire. Returns the
-// single save when uniform, or { varies: true } when AP differs across weapons.
+// A stable key so two profiles with the same effective save collapse. Handles the three
+// shapes summariseSave produces: a single save object, { varies: true }, or null.
+const saveKeyOf = (s) =>
+  !s ? 'x' : s.varies ? 'varies' : s.none ? 'none' : `${s.target}${s.usesInvuln ? 'i' : ''}`;
+
+// The distinct effective save across the firing weapons against ONE profile (the defender body,
+// or an allocation group). Returns the single save, { varies: true } when AP differs across the
+// weapons, or null when nothing fires. `apBonus` is rule-granted AP — it changes the save the
+// engine actually rolls against, so the displayed target has to include it too.
+function saveAgainst(weapons, profile, apBonus) {
+  const distinct = new Map();
+  for (const w of weapons) {
+    const s = effectiveSave(w, profile, apBonus);
+    distinct.set(saveKeyOf(s), s);
+  }
+  const arr = [...distinct.values()];
+  if (arr.length === 0) return null;
+  if (arr.length === 1) return arr[0];
+  return { varies: true };
+}
+
+// The effective save shown under the funnel. For a uniform defender this is one value (or
+// "Varies"). For a led/championed defender the leader/champion save differs from the body's, so
+// the headline stays the body save and the DISTINCT differing groups are attached as `groups`
+// (a same-save champion adds nothing, so it's dropped) — the display lists them alongside.
 function summariseSave(attacker, defender, options) {
   const phase = options.phase || 'ranged';
   const weapons = [];
@@ -28,17 +58,20 @@ function summariseSave(attacker, defender, options) {
   for (const ch of attachedChars(attacker)) {
     for (const w of ch.weapons || []) collect(w, ch.models ?? 1);
   }
-  const distinct = new Map();
-  for (const w of weapons) {
-    // Rule-granted AP (options.apBonus) changes the save the engine actually rolls
-    // against, so the displayed target has to include it too.
-    const s = effectiveSave(w, defender, options.apBonus || 0);
-    distinct.set(s.none ? 'none' : `${s.target}${s.usesInvuln ? 'i' : ''}`, s);
+  const apBonus = options.apBonus || 0;
+  const body = saveAgainst(weapons, defender, apBonus);
+  if (!body || !isMixedDefender(defender)) return body;
+
+  const seen = new Set([saveKeyOf(body)]);
+  const groups = [];
+  for (const g of buildGroups(defender)) {
+    const s = saveAgainst(weapons, g, apBonus);
+    const k = saveKeyOf(s);
+    if (!s || seen.has(k)) continue; // skip nothing-fires and any group that matches the body
+    seen.add(k);
+    groups.push({ name: g.name, isCharacter: g.isCharacter, save: s });
   }
-  const arr = [...distinct.values()];
-  if (arr.length === 0) return null;
-  if (arr.length === 1) return arr[0];
-  return { varies: true };
+  return groups.length ? { ...body, groups } : body;
 }
 
 export function runSimulation(attacker, defender, options = {}) {

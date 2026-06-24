@@ -418,6 +418,28 @@ describe('runSimulation wiring', () => {
     expect(res.breakdown.totalWounds).toBe(7);
   });
 
+  it('reports the leader effective save alongside the body when they differ (S43 item 1)', () => {
+    // An AP-3 weapon strips the body's 4+ armour (no save), but the leader keeps a 4+ invuln —
+    // so the funnel must show both, not just the body's "None".
+    const ap3 = atk({ A: 1, BS: 3, S: 5, AP: -3, D: 1 }, 5);
+    const def = { ...base, SV: 4, models: 3, leader: { models: 1, W: 4, SV: 2, INV: 4, FNP: null, T: 4, keywords: ['CHARACTER'] } };
+    const res = run(ap3, def);
+    expect(res.breakdown.save.none).toBe(true); // body armour stripped
+    expect(res.breakdown.save.groups).toHaveLength(1); // the leader's save differs, so it's listed
+    const lead = res.breakdown.save.groups[0];
+    expect(lead.isCharacter).toBe(true);
+    expect(lead.save).toEqual({ target: 4, usesInvuln: true, none: false }); // 4+ invuln
+  });
+
+  it('does NOT split the save when a champion shares the body save (S43 item 1)', () => {
+    // A Boss Nob inherits the body's 4+ — no distinct save, so no redundant split is attached.
+    const ap0 = atk({ A: 1, BS: 3, S: 5, AP: 0, D: 1 }, 5);
+    const def = { ...base, SV: 4, profiles: [{ name: 'Boss Nob', count: 1, W: 2 }] };
+    const res = run(ap0, def);
+    expect(res.breakdown.save).toEqual({ target: 4, usesInvuln: false, none: false });
+    expect(res.breakdown.save.groups).toBeUndefined();
+  });
+
   it('a champion mob is strictly tougher than the same unit without it', () => {
     const moderate = atk({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }, 20);
     const uniform = run(moderate, base);
