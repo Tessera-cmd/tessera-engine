@@ -572,11 +572,17 @@ export function planPackRules(raw = {}) {
       ? { name: entry.name || 'Rule', text: cleanRuleText(entry.text), ...mapRuleText(entry.text, { name: entry.name, source }) }
       : null;
 
+  // An enhancement may carry a points cost (from a catalogue parse); preserve it on the planned entry
+  // (planOne maps only the text), additive + display-only downstream.
+  const planEnh = (e) => {
+    const p = planOne(e, 'enhancement');
+    return p ? { ...p, ...(e?.points != null ? { points: e.points } : {}) } : null;
+  };
   const detachments = (Array.isArray(raw.detachments) ? raw.detachments : []).map((d) => ({
     name: d?.name || 'Detachment',
     rule: planOne(d?.rule, 'detachment'),
     stratagems: (Array.isArray(d?.stratagems) ? d.stratagems : []).map((s) => planOne(s, 'stratagem')).filter(Boolean),
-    enhancements: (Array.isArray(d?.enhancements) ? d.enhancements : []).map((e) => planOne(e, 'enhancement')).filter(Boolean),
+    enhancements: (Array.isArray(d?.enhancements) ? d.enhancements : []).map(planEnh).filter(Boolean),
   }));
 
   return {
