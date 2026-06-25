@@ -12,6 +12,7 @@ import {
   packHasRules,
   mergePackRules,
   captureUnitAbilities,
+  modsToEffects,
 } from './ruleText.js';
 
 const modsOf = (r, pred) => r.effects.filter(pred).map((e) => e.mods);
@@ -301,6 +302,99 @@ describe('planPackRules (faction-pack: army rule + many detachments)', () => {
     expect(packHasRules(planPackRules(raw))).toBe(true);
     expect(packHasRules(planPackRules({ detachments: [] }))).toBe(false);
     expect(packHasRules(planPackRules({}))).toBe(false);
+  });
+});
+
+describe('structured wargear modifiers — modsToEffects (Session 45)', () => {
+  it('weapon buffs → attacker mods, phase by class; AP improves (apBonus = -delta)', () => {
+    const out = modsToEffects([
+      { target: 'melee', op: 'add', stat: 'S', delta: 1 },
+      { target: 'melee', op: 'add', stat: 'A', delta: 1 },
+      { target: 'melee', op: 'add', stat: 'AP', delta: -1 }, // decrement AP = improve
+      { target: 'ranged', op: 'addKw', keywords: ['IGNORES COVER'] },
+    ]);
+    expect(out).toEqual([
+      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { strengthBonus: 1 }, source: 'enhancement' },
+      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { attackBonus: 1 }, source: 'enhancement' },
+      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { apBonus: 1 }, source: 'enhancement' }, // improve AP by 1
+      { name: 'Enhancement', side: 'attacker', phase: 'shooting', condition: null, mods: { grantKeywords: ['IGNORES COVER'] }, source: 'enhancement' },
+    ]);
+  });
+  it('unit buffs → defender saveSet / woundBonus / toughBonus', () => {
+    const out = modsToEffects([
+      { target: 'unit', op: 'set', stat: 'SV', value: 2 },
+      { target: 'unit', op: 'add', stat: 'W', delta: 1 },
+      { target: 'unit', op: 'add', stat: 'T', delta: 1 },
+    ], 'Artificer Armour');
+    expect(out).toEqual([
+      { name: 'Artificer Armour', side: 'defender', phase: 'any', condition: null, mods: { saveSet: 2 }, source: 'enhancement' },
+      { name: 'Artificer Armour', side: 'defender', phase: 'any', condition: null, mods: { woundBonus: 1 }, source: 'enhancement' },
+      { name: 'Artificer Armour', side: 'defender', phase: 'any', condition: null, mods: { toughBonus: 1 }, source: 'enhancement' },
+    ]);
+  });
+  it('a `set` weapon stat and BS/WS have no bonus equivalent → skipped (rare)', () => {
+    expect(modsToEffects([{ target: 'melee', op: 'set', stat: 'S', value: 8 }, { target: 'ranged', op: 'add', stat: 'BS', delta: -1 }])).toEqual([]);
+  });
+});
+
+describe('structured wargear modifiers — planEnh de-dup (Session 45)', () => {
+  const rawDet = (enh) => ({ faction: 'SM', armyRule: null, detachments: [{ name: 'D', rule: null, stratagems: [], enhancements: [enh] }] });
+
+  it('strips the overlapping unconditioned prose mod and adds the complete structured buff (no double)', () => {
+    const plan = planPackRules(rawDet({
+      name: 'The Honour Vehement',
+      text: 'Add 1 to the Attacks and Strength characteristics of the melee weapons.',
+      wargearMods: [{ target: 'melee', op: 'add', stat: 'S', delta: 1 }, { target: 'melee', op: 'add', stat: 'A', delta: 1 }],
+    }));
+    const eff = plan.detachments[0].enhancements[0].effects;
+    const uncondAttack = eff.filter((e) => !e.condition && e.mods.attackBonus);
+    expect(uncondAttack).toHaveLength(1);
+    expect(uncondAttack[0].mods.attackBonus).toBe(1);
+    expect(eff.some((e) => !e.condition && e.mods.strengthBonus === 1)).toBe(true);
+  });
+
+  it('keeps a non-overlapping prose mod (Artificer: fnp prose + saveSet structured)', () => {
+    const plan = planPackRules(rawDet({
+      name: 'Artificer Armour',
+      text: 'The bearer has a Save characteristic of 2+ and the Feel No Pain 5+ ability.',
+      wargearMods: [{ target: 'unit', op: 'set', stat: 'SV', value: 2 }],
+    }));
+    const eff = plan.detachments[0].enhancements[0].effects;
+    expect(eff.some((e) => e.mods.fnp === 5)).toBe(true);
+    expect(eff.some((e) => e.mods.saveSet === 2)).toBe(true);
+  });
+
+  it('keeps a CONDITIONED prose effect (a situational buff the structured modifier does not carry)', () => {
+    const plan = planPackRules(rawDet({
+      name: 'Feral Rage',
+      text: "Add 1 to the Strength characteristic of the bearer's melee weapons. If that unit made a Charge move this turn, add 1 to the Attacks characteristic of melee weapons.",
+      wargearMods: [{ target: 'melee', op: 'add', stat: 'S', delta: 1 }],
+    }));
+    const eff = plan.detachments[0].enhancements[0].effects;
+    expect(eff.some((e) => !e.condition && e.mods.strengthBonus === 1)).toBe(true);
+    expect(eff.some((e) => e.condition === 'onCharge' && e.mods.attackBonus === 1)).toBe(true);
+  });
+
+  it('PHASE-AWARE: a structured MELEE buff does NOT strip a prose RANGED same-key buff', () => {
+    const plan = planPackRules(rawDet({
+      name: 'Cross-phase Relic',
+      text: "Add 1 to the Strength characteristic of the bearer's melee weapons. Add 1 to the Strength characteristic of the bearer's ranged weapons.",
+      wargearMods: [{ target: 'melee', op: 'add', stat: 'S', delta: 1 }],
+    }));
+    const eff = plan.detachments[0].enhancements[0].effects;
+    expect(eff.some((e) => e.phase === 'fight' && e.mods.strengthBonus === 1)).toBe(true);
+    expect(eff.some((e) => e.phase === 'shooting' && e.mods.strengthBonus === 1)).toBe(true);
+  });
+
+  it('reclassifies a not-simulatable enhancement to mapped when a structured buff is added', () => {
+    const plan = planPackRules(rawDet({
+      name: 'Odd Relic',
+      text: 'The bearer is annoying.',
+      wargearMods: [{ target: 'melee', op: 'add', stat: 'S', delta: 1 }],
+    }));
+    const e = plan.detachments[0].enhancements[0];
+    expect(e.classification).toBe('mapped');
+    expect(e.effects.some((x) => x.mods.strengthBonus === 1)).toBe(true);
   });
 });
 

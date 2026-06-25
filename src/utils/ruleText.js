@@ -558,6 +558,102 @@ export function planHasRules(plan) {
   return !!(plan.armyRule || plan.detachment?.rule || (plan.enhancements && plan.enhancements.length));
 }
 
+// ---- structured wargear modifiers (Session 45) -----------------------------
+// Convert an enhancement's STRUCTURED profile modifiers (parseEntryMods descriptors from a BSData
+// catalogue) into effects-layer Effect[]. The structured modifier is a more reliable source than the
+// free-text mapper, which under-reads multi-stat phrases ("Add 1 to the Attacks AND Strength" → only
+// Attacks, missing Strength) and cannot express a unit Save/Wounds/Toughness change at all. Weapon
+// buffs map to the attacker mods (phase by weapon class — melee→fight, ranged→shooting); unit buffs
+// to the defender's saveSet / woundBonus / toughBonus (engine/effects.js, applied to the bearer). A
+// `set` on a weapon stat, and BS/WS, have no effects-layer bonus equivalent and are skipped (rare).
+// Pure. Exported for tests.
+export function modsToEffects(mods, name = 'Enhancement') {
+  const out = [];
+  for (const m of mods || []) {
+    if (m.target === 'melee' || m.target === 'ranged') {
+      const mod = {};
+      if (m.op === 'addKw') mod.grantKeywords = (m.keywords || []).map((k) => String(k).toUpperCase());
+      else if (m.op === 'add') {
+        if (m.stat === 'S') mod.strengthBonus = m.delta;
+        else if (m.stat === 'A') mod.attackBonus = m.delta;
+        else if (m.stat === 'D') mod.damageBonus = m.delta;
+        else if (m.stat === 'AP') mod.apBonus = -m.delta; // apBonus IMPROVES AP; a structured decrement (delta<0) is an improvement
+      }
+      if (Object.keys(mod).length) {
+        out.push({ name, side: 'attacker', phase: m.target === 'melee' ? 'fight' : 'shooting', condition: null, mods: mod, source: 'enhancement' });
+      }
+    } else if (m.target === 'unit') {
+      const mod = {};
+      if (m.op === 'set' && m.stat === 'SV') mod.saveSet = m.value;
+      else if (m.op === 'add' && m.stat === 'W') mod.woundBonus = m.delta;
+      else if (m.op === 'add' && m.stat === 'T') mod.toughBonus = m.delta;
+      if (Object.keys(mod).length) out.push({ name, side: 'defender', phase: 'any', condition: null, mods: mod, source: 'enhancement' });
+    }
+  }
+  return out;
+}
+
+// The effects-layer mod keys an enhancement's structured WEAPON STAT buffs cover, PER PHASE — so the
+// prose effect's matching mods can be stripped (the structured modifier is the authoritative source
+// for a stat, where DOUBLE-counting would be wrong). The phase matters: a structured MELEE +S
+// (phase 'fight') must NOT strip a prose RANGED +S (phase 'shooting') and mis-apply it as melee — so
+// the covered set records {key → phases}. grantKeywords is deliberately NOT stripped: granting a
+// weapon keyword is idempotent (resolveEffects unions/dedupes them), so keeping the prose grant is
+// harmless AND avoids losing a prose-only keyword that differs from the structured one. Unit-stat
+// buffs (saveSet/woundBonus/toughBonus) have no prose-effect equivalent, so they never strip anything.
+function structuredCoveredKeys(mods) {
+  const map = new Map();
+  const add = (key, phase) => {
+    if (!map.has(key)) map.set(key, new Set());
+    map.get(key).add(phase);
+  };
+  for (const m of mods || []) {
+    if (m.target !== 'melee' && m.target !== 'ranged') continue;
+    // Only an 'add' produces a structured-derived effect (modsToEffects skips a `set` weapon stat — no
+    // effects-layer bonus equivalent). A `set` must NOT cover a key, or it would strip a same-phase
+    // prose mod with no replacement (an over-strip / lost buff). No real enhancement hits this, but the
+    // gate keeps the de-dup correct by construction.
+    if (m.op !== 'add') continue;
+    const phase = m.target === 'melee' ? 'fight' : 'shooting';
+    if (m.stat === 'S') add('strengthBonus', phase);
+    else if (m.stat === 'A') add('attackBonus', phase);
+    else if (m.stat === 'D') add('damageBonus', phase);
+    else if (m.stat === 'AP') add('apBonus', phase);
+  }
+  return map;
+}
+
+// Fold structured modifiers into a planned enhancement: append the structured-derived effects (the
+// authoritative buffs) and STRIP the matching mods from the prose-mapped UNCONDITIONED effects of the
+// SAME phase, so a buff captured by both isn't double-counted. CONDITIONED prose effects (the
+// situational "+2 while…" parts the structured modifier doesn't carry) and non-overlapping prose mods
+// (fnp, invuln) are kept. A 'not-simulatable' enhancement that now has structured effects is
+// reclassified 'mapped'. Pure.
+function applyStructuredMods(plan, rawMods) {
+  const structured = modsToEffects(rawMods, plan.name);
+  if (!structured.length) return plan;
+  const covered = structuredCoveredKeys(rawMods);
+  const prose = (plan.effects || [])
+    .map((e) => {
+      if (e.condition || !covered.size) return e; // keep conditioned prose; nothing to strip if no weapon overlap
+      const mods = { ...(e.mods || {}) };
+      let changed = false;
+      for (const [k, phases] of covered) {
+        // strip only when the prose effect's phase matches the structured buff's phase (a phase-'any'
+        // prose, or a structured 'any', overlaps either side).
+        if (k in mods && (e.phase === 'any' || phases.has(e.phase) || phases.has('any'))) {
+          delete mods[k];
+          changed = true;
+        }
+      }
+      return changed ? { ...e, mods } : e;
+    })
+    .filter((e) => e.condition || Object.keys(e.mods || {}).length); // drop a now-empty unconditioned effect
+  const effects = [...prose, ...structured];
+  const classification = plan.classification === 'not-simulatable' ? 'mapped' : plan.classification;
+  return { ...plan, effects, classification };
+}
+
 // ---- plan a faction PACK's extracted rules (MFM loader P3) ------------------
 // A whole faction pack carries an army rule plus MANY detachments, each with its own rule,
 // stratagems and enhancements (unlike a single roster, which has one chosen detachment and no
@@ -573,10 +669,15 @@ export function planPackRules(raw = {}) {
       : null;
 
   // An enhancement may carry a points cost (from a catalogue parse); preserve it on the planned entry
-  // (planOne maps only the text), additive + display-only downstream.
+  // (planOne maps only the text), additive + display-only downstream. It may ALSO carry STRUCTURED
+  // profile modifiers (Session 45) — a reliable source for the buffs the free-text mapper under-reads;
+  // fold them into the effects, de-duplicating the prose.
   const planEnh = (e) => {
-    const p = planOne(e, 'enhancement');
-    return p ? { ...p, ...(e?.points != null ? { points: e.points } : {}) } : null;
+    let p = planOne(e, 'enhancement');
+    if (!p) return null;
+    if (e?.points != null) p = { ...p, points: e.points };
+    if (Array.isArray(e?.wargearMods) && e.wargearMods.length) p = applyStructuredMods(p, e.wargearMods);
+    return p;
   };
   const detachments = (Array.isArray(raw.detachments) ? raw.detachments : []).map((d) => ({
     name: d?.name || 'Detachment',

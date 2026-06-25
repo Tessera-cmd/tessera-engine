@@ -132,6 +132,61 @@ describe('applyToSim', () => {
   });
 });
 
+describe('unit-statline buffs (Session 45 — saveSet / woundBonus / toughBonus, on the BEARER)', () => {
+  it('resolveEffects keeps the best (lowest) saveSet and sums woundBonus / toughBonus', () => {
+    const { defender } = resolveEffects(
+      [
+        { side: 'defender', mods: { saveSet: 3, woundBonus: 1, toughBonus: 1 } },
+        { side: 'defender', mods: { saveSet: 2, woundBonus: 1 } },
+      ],
+      { phase: 'shooting' },
+    );
+    expect(defender.saveSet).toBe(2); // better save kept
+    expect(defender.woundBonus).toBe(2);
+    expect(defender.toughBonus).toBe(1);
+  });
+
+  it('applyToSim sets the BEARER profile, NOT the whole unit (a standalone character → its own profile)', () => {
+    const resolved = resolveEffects([{ side: 'defender', mods: { saveSet: 2, woundBonus: 1, toughBonus: 1 } }], { phase: 'shooting' });
+    const { defender } = applyToSim({}, { SV: 3, W: 5, T: 4 }, resolved);
+    expect(defender).toMatchObject({ SV: 2, W: 6, T: 5 });
+  });
+
+  it('applyToSim patches the attached LEADER (the bearer), not the bodyguard body — no whole-squad over-buff', () => {
+    const resolved = resolveEffects([{ side: 'defender', mods: { saveSet: 2 } }], { phase: 'shooting' });
+    const base = { SV: 4, W: 2, leader: { name: 'Captain', SV: 3, W: 5 } };
+    const { defender } = applyToSim({}, base, resolved);
+    expect(defender.leader.SV).toBe(2); // Artificer Armour 2+ on the Captain
+    expect(defender.SV).toBe(4); // the 10-strong bodyguard's save is UNTOUCHED (no over-buff)
+  });
+
+  it('a saveSet never WORSENS an already-better save (keeps the min)', () => {
+    const resolved = resolveEffects([{ side: 'defender', mods: { saveSet: 3 } }], { phase: 'shooting' });
+    const { defender } = applyToSim({}, { SV: 2 }, resolved); // already 2+
+    expect(defender.SV).toBe(2);
+  });
+
+  it('BREAKING VARIANT: a MULTI-MODEL unit with no attached character is NOT over-buffed', () => {
+    // An enhancement is on ONE model. With no character attached and a 10-model body, patching the body
+    // headline would give the whole squad a 2+ save — so the buff is dropped (under-apply, safe).
+    const resolved = resolveEffects([{ side: 'defender', mods: { saveSet: 2, woundBonus: 1 } }], { phase: 'shooting' });
+    const { defender } = applyToSim({}, { models: 10, SV: 5, W: 1 }, resolved);
+    expect(defender.SV).toBe(5); // NOT 2 — the squad keeps its save
+    expect(defender.W).toBe(1);
+  });
+
+  it('engine: a 2+ saveSet on the body reduces failed saves vs a 4+ (closed form)', () => {
+    const attacker = { models: 200, weapons: [{ name: 'gun', type: 'ranged', count: 200, A: 1, BS: 2, S: 4, AP: 0, D: 1, keywords: [] }] };
+    const base4 = { models: 1, T: 4, SV: 4, W: 1e9 };
+    const svSet = applyToSim({}, { ...base4 }, resolveEffects([{ side: 'defender', mods: { saveSet: 2 } }], { phase: 'shooting' }));
+    const seed = 13371;
+    const r4 = runSimulation(attacker, base4, { phase: 'ranged', iterations: 4000, seed });
+    const r2 = runSimulation(attacker, svSet.defender, { phase: 'ranged', iterations: 4000, seed });
+    expect(r4.woundsDealt.mean).toBeGreaterThan(30);
+    expect(r2.woundsDealt.mean).toBeLessThan(r4.woundsDealt.mean * 0.5);
+  });
+});
+
 describe('distributeDefensive', () => {
   it('null / 0 / false mods are no-ops (a unit with no aura is untouched)', () => {
     const d = { FNP: 6, leader: { FNP: null }, profiles: [{ FNP: null }] };

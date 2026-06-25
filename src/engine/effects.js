@@ -31,6 +31,12 @@
 //       invuln?,                              // grant/improve invuln save (e.g. 4)
 //       hitPenalty?,                          // attacker subtracts N to hit this unit
 //       saveReroll?,                          // defender re-rolls its saves
+//       // unit-statline buffs (Session 45 — a relic/enhancement that SETS the Save or ADDS
+//       // Wounds/Toughness; the effects layer can't express these via the above, so they patch the
+//       // BEARER's profile, not the whole unit — Artificer Armour's "Save 2+" is on one model):
+//       saveSet?,                             // set the armour Save to N (keeps the better)
+//       woundBonus?,                          // +N to the Wounds characteristic
+//       toughBonus?,                          // +N to the Toughness characteristic
 //     }
 //   }
 
@@ -114,6 +120,10 @@ function emptyDefender() {
     invuln: null,
     hitPenalty: 0,
     saveReroll: 'none',
+    // unit-statline buffs (Session 45) — applied to the BEARER, not distributed unit-wide.
+    saveSet: null,
+    woundBonus: 0,
+    toughBonus: 0,
     grantUnitKeywords: [],
     removeUnitKeywords: [],
   };
@@ -164,6 +174,9 @@ export function resolveEffects(effects, ctx = {}) {
       if (m.halveDamage) def.halveDamage = true;
       if (m.hitPenalty) def.hitPenalty += m.hitPenalty;
       if (m.saveReroll) def.saveReroll = strongerReroll(def.saveReroll, m.saveReroll);
+      if (m.saveSet != null) def.saveSet = def.saveSet == null ? m.saveSet : Math.min(def.saveSet, m.saveSet);
+      if (m.woundBonus) def.woundBonus += m.woundBonus;
+      if (m.toughBonus) def.toughBonus += m.toughBonus;
     } else {
       if (m.hitModifier) atk.hitModifier += m.hitModifier;
       if (m.woundModifier) atk.woundModifier += m.woundModifier;
@@ -228,13 +241,41 @@ export function applyToSim(baseOptions, baseDefender, resolved) {
   options.grantKeywords = [...(baseOptions.grantKeywords || []), ...a.grantKeywords];
 
   // Defensive auras apply unit-wide — to the body AND the attached leader/champions.
-  const defender = distributeDefensive(baseDefender, d);
+  let defender = distributeDefensive(baseDefender, d);
   // Detachment-modified UNIT keywords on the defender feed Anti-[keyword] targeting (19.03).
   if (d.grantUnitKeywords.length || d.removeUnitKeywords.length) {
     defender.keywords = effectiveKeywords(baseDefender.keywords, d);
   }
+  // Unit-statline enhancement buffs (Save 2+, +W, +T) are on ONE model (the bearer), so they are NOT
+  // distributed — applying a 2+ save to a whole led squad would be a glaring over-buff. Target the
+  // attached leader if the defending unit has one (an enhancement is on a character, usually the
+  // leader), else the first attached character, else the unit's own profile (a standalone character).
+  if (d.saveSet != null || d.woundBonus || d.toughBonus) {
+    if (defender.leader) defender = { ...defender, leader: mergeUnitStats(defender.leader, d) };
+    else if (Array.isArray(defender.attached) && defender.attached.length) {
+      defender = { ...defender, attached: defender.attached.map((c, i) => (i === 0 ? mergeUnitStats(c, d) : c)) };
+    } else if ((defender.models ?? 1) <= 1) {
+      // a standalone single-model character IS the bearer (a Captain with Artificer Armour, defending).
+      defender = mergeUnitStats(defender, d);
+    }
+    // else: a MULTI-MODEL unit with no attached character. A unit-stat enhancement is on ONE model (a
+    // character); with none attached there is no single bearer, and patching the body headline would
+    // give EVERY model the buff (a 2+ save on a whole squad) — a glaring over-buff. Drop it (under-
+    // apply, the safe direction), rather than over-buff the squad.
+  }
 
   return { options, defender };
+}
+
+// Apply unit-statline buffs (Save set / +Wounds / +Toughness) to ONE profile (the bearer). Keeps the
+// better Save (lower target), sums W/T. The fields match the unit/leader schema (SV/W/T).
+function mergeUnitStats(target, d) {
+  if (!target || typeof target !== 'object' || !d) return target;
+  const out = { ...target };
+  if (d.saveSet != null) out.SV = out.SV == null ? d.saveSet : Math.min(out.SV, d.saveSet);
+  if (d.woundBonus) out.W = (out.W || 0) + d.woundBonus;
+  if (d.toughBonus) out.T = (out.T || 0) + d.toughBonus;
+  return out;
 }
 
 // ---- gathering effects from a rules selection ------------------------------
@@ -274,5 +315,8 @@ export function isAttackerActive(a) {
   );
 }
 export function isDefenderActive(d) {
-  return d.fnp != null || d.invuln != null || d.damageReduction || d.halveDamage || d.hitPenalty || d.saveReroll !== 'none';
+  return (
+    d.fnp != null || d.invuln != null || d.damageReduction || d.halveDamage || d.hitPenalty ||
+    d.saveReroll !== 'none' || d.saveSet != null || d.woundBonus || d.toughBonus
+  );
 }
