@@ -565,7 +565,8 @@ export function planHasRules(plan) {
 // Attacks, missing Strength) and cannot express a unit Save/Wounds/Toughness change at all. Weapon
 // buffs map to the attacker mods (phase by weapon class — melee→fight, ranged→shooting); unit buffs
 // to the defender's saveSet / woundBonus / toughBonus (engine/effects.js, applied to the bearer). A
-// `set` on a weapon stat, and BS/WS, have no effects-layer bonus equivalent and are skipped (rare).
+// weapon BS/WS increment maps to hitModifier (a better skill = +1 to hit); a `set` on a weapon stat
+// has no effects-layer bonus equivalent and is skipped (no real 10e enhancement uses one).
 // Pure. Exported for tests.
 export function modsToEffects(mods, name = 'Enhancement') {
   const out = [];
@@ -578,6 +579,10 @@ export function modsToEffects(mods, name = 'Enhancement') {
         else if (m.stat === 'A') mod.attackBonus = m.delta;
         else if (m.stat === 'D') mod.damageBonus = m.delta;
         else if (m.stat === 'AP') mod.apBonus = -m.delta; // apBonus IMPROVES AP; a structured decrement (delta<0) is an improvement
+        // BS/WS → hitModifier: a better skill is a LOWER BS/WS number, so a decrement (delta<0) is a
+        // to-hit IMPROVEMENT → hitModifier = -delta (e.g. Orks "Master Meknologist" ranged BS -1 →
+        // +1 to hit). A weapon-stat `set` has no effects-layer equivalent, so it stays unmapped.
+        else if (m.stat === 'BS' || m.stat === 'WS') mod.hitModifier = -m.delta;
       }
       if (Object.keys(mod).length) {
         out.push({ name, side: 'attacker', phase: m.target === 'melee' ? 'fight' : 'shooting', condition: null, mods: mod, source: 'enhancement' });
@@ -619,6 +624,7 @@ function structuredCoveredKeys(mods) {
     else if (m.stat === 'A') add('attackBonus', phase);
     else if (m.stat === 'D') add('damageBonus', phase);
     else if (m.stat === 'AP') add('apBonus', phase);
+    else if (m.stat === 'BS' || m.stat === 'WS') add('hitModifier', phase); // structured BS/WS → hitModifier
   }
   return map;
 }

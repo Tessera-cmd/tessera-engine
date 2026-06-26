@@ -332,8 +332,17 @@ describe('structured wargear modifiers — modsToEffects (Session 45)', () => {
       { name: 'Artificer Armour', side: 'defender', phase: 'any', condition: null, mods: { toughBonus: 1 }, source: 'enhancement' },
     ]);
   });
-  it('a `set` weapon stat and BS/WS have no bonus equivalent → skipped (rare)', () => {
-    expect(modsToEffects([{ target: 'melee', op: 'set', stat: 'S', value: 8 }, { target: 'ranged', op: 'add', stat: 'BS', delta: -1 }])).toEqual([]);
+  it('a `set` weapon stat has no bonus equivalent → skipped (no real 10e enhancement uses one)', () => {
+    expect(modsToEffects([{ target: 'melee', op: 'set', stat: 'S', value: 8 }])).toEqual([]);
+  });
+  it('a weapon BS/WS increment → hitModifier: a better skill is +1 to hit', () => {
+    // Orks "Master Meknologist": ranged BS -1 → +1 to hit (shooting). delta signed (decrement = improve).
+    expect(modsToEffects([{ target: 'ranged', op: 'add', stat: 'BS', delta: -1 }], 'Master Meknologist')).toEqual([
+      { name: 'Master Meknologist', side: 'attacker', phase: 'shooting', condition: null, mods: { hitModifier: 1 }, source: 'enhancement' },
+    ]);
+    expect(modsToEffects([{ target: 'melee', op: 'add', stat: 'WS', delta: -1 }])).toEqual([
+      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { hitModifier: 1 }, source: 'enhancement' },
+    ]);
   });
 });
 
@@ -384,6 +393,18 @@ describe('structured wargear modifiers — planEnh de-dup (Session 45)', () => {
     const eff = plan.detachments[0].enhancements[0].effects;
     expect(eff.some((e) => e.phase === 'fight' && e.mods.strengthBonus === 1)).toBe(true);
     expect(eff.some((e) => e.phase === 'shooting' && e.mods.strengthBonus === 1)).toBe(true);
+  });
+
+  it('de-dups a prose +to-hit covered by a structured BS modifier of the same phase (no double)', () => {
+    const plan = planPackRules(rawDet({
+      name: 'Master Meknologist',
+      text: "Add 1 to the Hit rolls of the bearer's ranged weapons.",
+      wargearMods: [{ target: 'ranged', op: 'add', stat: 'BS', delta: -1 }],
+    }));
+    const eff = plan.detachments[0].enhancements[0].effects;
+    const hits = eff.filter((e) => !e.condition && e.mods.hitModifier);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].mods.hitModifier).toBe(1);
   });
 
   it('reclassifies a not-simulatable enhancement to mapped when a structured buff is added', () => {
