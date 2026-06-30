@@ -79,42 +79,76 @@ describe('Plunging Fire is a separate BS bucket (stacks past the ±1 cap)', () =
   });
 });
 
-describe('Conversion: +1 to hit when the target is over 12" away (gated on targetOver12)', () => {
-  it('adds +1 to hit only when the toggle is on', () => {
+describe('Conversion (11e): at half range, unmodified 4+ hit rolls are Critical Hits (NOT +1 to hit)', () => {
+  it('BREAKING VARIANT: Conversion ALONE is a no-op (a crit hit does nothing without Lethal/Sustained)', () => {
     const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['CONVERSION'] };
-    const on = run(attacker(w), target(), { targetOver12: true });
-    approx(on.kills.mean, 100 * (5 / 6) * P_W_S4T4); // BS3 -> 2+, 5/6
-    const off = run(attacker(w), target(), { targetOver12: false });
-    approx(off.kills.mean, 100 * (4 / 6) * P_W_S4T4); // BS3, no bonus
+    const on = run(attacker(w), target(), { atHalfRange: true });
+    const off = run(attacker(w), target(), { atHalfRange: false });
+    approx(on.kills.mean, 100 * (4 / 6) * P_W_S4T4); // BS3 = 4/6, UNCHANGED by Conversion (old model gave 5/6)
+    expect(on.kills.mean).toBe(off.kills.mean); // toggling Conversion changes nothing on its own
+  });
+  it('Conversion + LETHAL HITS at half range = more auto-wounds (4+/5+/6 crits auto-wound, not just 6)', () => {
+    // SV3 target so the save matters: a Lethal auto-wound (on a crit hit) bypasses the wound roll.
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['CONVERSION', 'LETHAL HITS'] };
+    const on = run(attacker(w), target({ SV: 3 }), { atHalfRange: true });
+    const off = run(attacker(w), target({ SV: 3 }), { atHalfRange: false });
+    // ON: P(crit)=3/6 auto-wound + P(normalHit)=1/6 ×P_W; ×(2/6 failed save) ≈ 19.4
+    approx(on.kills.mean, 100 * (3 / 6 + (1 / 6) * P_W_S4T4) * (2 / 6));
+    // OFF: only the 6 (1/6) is a crit ≈ 13.9
+    approx(off.kills.mean, 100 * (1 / 6 + (3 / 6) * P_W_S4T4) * (2 / 6));
+    expect(on.kills.mean).toBeGreaterThan(off.kills.mean);
+  });
+  it('Conversion + SUSTAINED HITS 1 at half range = more hits (an extra hit per 4+/5+/6 crit)', () => {
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['CONVERSION', 'SUSTAINED HITS 1'] };
+    const on = run(attacker(w), target(), { atHalfRange: true });
+    const off = run(attacker(w), target(), { atHalfRange: false });
+    approx(on.kills.mean, 100 * (3 / 6 * 2 + 1 / 6) * P_W_S4T4); // crit→2 hits (×3/6) + normal (×1/6) ≈ 58.3
+    approx(off.kills.mean, 100 * (1 / 6 * 2 + 3 / 6) * P_W_S4T4); // only 6 crits ≈ 41.7
+    expect(on.kills.mean).toBeGreaterThan(off.kills.mean);
   });
   it('does nothing without the CONVERSION keyword', () => {
-    const res = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), { targetOver12: true });
+    const res = run(attacker({ A: 1, BS: 3, S: 4, AP: 0, D: 1 }), target(), { atHalfRange: true });
     approx(res.kills.mean, 100 * (4 / 6) * P_W_S4T4);
   });
 });
 
-describe('Indirect Fire: -1 to hit + target gains cover (gated on indirectFire)', () => {
-  it('applies both halves when firing out of line of sight', () => {
-    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['INDIRECT FIRE'] };
+describe('Indirect Fire (11e): hit on 4+ at best + Benefit of Cover + no re-rolls (the with-spotter case)', () => {
+  it('a good-BS weapon is CAPPED at 4+ (then cover -> 5+), not its actual BS', () => {
+    const w = { A: 1, BS: 2, S: 4, AP: 0, D: 1, keywords: ['INDIRECT FIRE'] };
     const on = run(attacker(w), target(), { indirectFire: true });
-    approx(on.kills.mean, 100 * (2 / 6) * P_W_S4T4); // cover -> 4+, then -1 to hit -> 5,6 = 2/6
+    approx(on.kills.mean, 100 * (2 / 6) * P_W_S4T4); // BS2 capped to 4+, +cover -> 5+ = 2/6
     const off = run(attacker(w), target(), { indirectFire: false });
-    approx(off.kills.mean, 100 * (4 / 6) * P_W_S4T4); // unmodified BS3 = 4/6
+    approx(off.kills.mean, 100 * (5 / 6) * P_W_S4T4); // fires normally at its BS2 = 5/6
   });
-  it('Ignores Cover cancels only the cover half (the -1 to hit still applies)', () => {
+  it('BREAKING VARIANT: a bad-BS weapon hits BETTER under Indirect (4+ cap), the 11e change', () => {
+    // BS5 artillery: 11e Indirect = 4+ capped, +cover -> 5+ (2/6). The old 10e -1-to-hit gave 6-only (1/6).
+    const w = { A: 1, BS: 5, S: 4, AP: 0, D: 1, keywords: ['INDIRECT FIRE'] };
+    const res = run(attacker(w), target(), { indirectFire: true });
+    approx(res.kills.mean, 100 * (2 / 6) * P_W_S4T4); // ~16.7, not the 10e ~8.3
+  });
+  it('Ignores Cover removes the cover half (hit on the bare 4+)', () => {
     const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['INDIRECT FIRE', 'IGNORES COVER'] };
     const res = run(attacker(w), target(), { indirectFire: true });
-    approx(res.kills.mean, 100 * (3 / 6) * P_W_S4T4); // no cover (stays 3+), -1 to hit -> 4,5,6 = 3/6
+    approx(res.kills.mean, 100 * (3 / 6) * P_W_S4T4); // 4+ no cover = 3/6
+  });
+  it('Indirect attacks cannot be re-rolled (a hit re-roll has no effect)', () => {
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['INDIRECT FIRE'] };
+    const noReroll = run(attacker(w), target(), { indirectFire: true });
+    const withReroll = run(attacker(w), target(), { indirectFire: true, hitReroll: 'failed' });
+    expect(withReroll.kills.mean).toBe(noReroll.kills.mean); // re-roll disabled under Indirect
   });
 });
 
-describe('hit-roll bucket A: modifiers sum, then the total is capped at ±1', () => {
-  it('+1 Heavy, +1 Conversion and -1 Indirect net +1 (not 0 from step-by-step clamping)', () => {
-    // BS3 weapon with all three keywords, all situational toggles on. Bucket A = +1+1-1 = +1
-    // -> hit on 3+ after the +1; Indirect also gives cover (effTarget 4). (4-1)=3 so 3,4,5,6 hit.
-    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['HEAVY', 'CONVERSION', 'INDIRECT FIRE'] };
-    const res = run(attacker(w), target(), { remainedStationary: true, targetOver12: true, indirectFire: true });
-    approx(res.kills.mean, 100 * (4 / 6) * P_W_S4T4); // 33.33 — would be 25.0 if the bucket clamped per step
+describe('hit-roll bucket A: modifiers SUM, then the total is clamped to ±1', () => {
+  it('Heavy (+1) and a manual +1 SUM to +2, clamped to +1 (BS3 -> 2+, 5/6)', () => {
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['HEAVY'] };
+    const res = run(attacker(w), target(), { remainedStationary: true, hitModifier: 1 });
+    approx(res.kills.mean, 100 * (5 / 6) * P_W_S4T4); // +2 summed, clamped to +1
+  });
+  it('Heavy (+1) and a manual -1 SUM to 0 (not a max-of which would land on +1)', () => {
+    const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['HEAVY'] };
+    const res = run(attacker(w), target(), { remainedStationary: true, hitModifier: -1 });
+    approx(res.kills.mean, 100 * (4 / 6) * P_W_S4T4); // net 0 -> base BS3 = 4/6
   });
 });
 

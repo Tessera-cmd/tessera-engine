@@ -253,19 +253,29 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   // INDIRECT FIRE (fired out of line of sight) also grants the target Benefit of Cover, handled
   // in bucket B below.
   const indirect = ranged && hasKw(weapon, 'INDIRECT FIRE') && o.indirectFire;
+  // CONVERSION (11e): when the target is at least HALF the weapon's range away, unmodified hit rolls of
+  // 4+ count as CRITICAL HITS (which only matter via Lethal/Sustained — a Conversion weapon with neither
+  // gains nothing). It is NOT a +1-to-hit modifier (the old 10e mis-model). Implemented by lowering the
+  // hit-roll crit threshold to 4 (the loop's critOn), so it feeds the existing crit→Lethal/Sustained path.
+  const conversion = ranged && hasKw(weapon, 'CONVERSION') && o.atHalfRange;
+  const hitCritOn = conversion ? 4 : 7;
   let hitMod = o.hitModifier ?? 0;
-  if (ranged && hasKw(weapon, 'HEAVY') && o.remainedStationary) hitMod += 1; // stationary Heavy
-  if (ranged && hasKw(weapon, 'CONVERSION') && o.targetOver12) hitMod += 1; // target over 12" away
-  if (indirect) hitMod -= 1;
+  if (ranged && hasKw(weapon, 'HEAVY') && o.remainedStationary) hitMod += 1; // Heavy: +1 to hit
+  // INDIRECT FIRE (11e): firing at a target out of line of sight (modelled as the common WITH-A-SPOTTER
+  // case) — the hit roll is capped at 4+ (you can't use your BS), the target gains Benefit of Cover,
+  // positive hit modifiers don't apply, and the attacks can't be re-rolled. (The no-spotter worst case —
+  // Snap Shooting / unmodified-6 only — is a deliberate simplification not separately modelled.)
+  if (indirect) hitMod = Math.min(0, hitMod); // only negative modifiers apply under Indirect
   hitMod = clamp(hitMod, -1, 1);
   // Bucket B, BS/WS *characteristic* modifiers (separate; Cover stacks past -1).
-  let effTarget = ranged ? weapon.BS : weapon.WS;
+  let effTarget = indirect ? 4 : ranged ? weapon.BS : weapon.WS; // Indirect: fire blind, hit on 4+ at best
   if (ranged) {
     // Cover worsens BS by 1; Indirect Fire also grants the target Benefit of Cover. Either
     // source applies it once (cover doesn't stack), unless the weapon Ignores Cover.
     if ((o.targetInCover || indirect) && !hasKw(weapon, 'IGNORES COVER')) effTarget += 1;
     if (o.plungingFire) effTarget -= 1; // Plunging Fire: improve BS by 1
   }
+  const hitReroll = indirect ? 'none' : o.hitReroll; // Indirect attacks can't be re-rolled
 
   let autoWounds = 0; // hits that auto-wound (Lethal Hits on a critical hit)
   let normalHits = 0; // hits that proceed to the wound roll
@@ -283,8 +293,8 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
       ({ pass, crit } = checkRoll(rng, {
         threshold: effTarget,
         mod: hitMod,
-        reroll: o.hitReroll,
-        critOn: 7,
+        reroll: hitReroll,
+        critOn: hitCritOn,
       }));
     }
     if (!pass) continue;

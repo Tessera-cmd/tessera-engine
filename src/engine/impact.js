@@ -77,7 +77,7 @@ const MANUAL_MODIFIERS = [
   { key: 'attackBonus', on: (o) => o.attackBonus, label: (o) => `+${o.attackBonus} Attacks`, without: (o) => ({ ...o, attackBonus: 0 }) },
   { key: 'hitReroll', on: (o) => o.hitReroll && o.hitReroll !== 'none', label: (o) => `re-roll hits (${o.hitReroll})`, without: (o) => ({ ...o, hitReroll: 'none' }) },
   { key: 'woundReroll', on: (o) => o.woundReroll && o.woundReroll !== 'none', label: (o) => `re-roll wounds (${o.woundReroll})`, without: (o) => ({ ...o, woundReroll: 'none' }) },
-  { key: 'stationary', on: (o) => o.remainedStationary, label: () => 'Remained stationary (Heavy)', without: (o) => ({ ...o, remainedStationary: false }) },
+  { key: 'stationary', on: (o) => o.remainedStationary, label: () => 'Heavy condition met', without: (o) => ({ ...o, remainedStationary: false }) },
   { key: 'rapidfire', on: (o) => o.withinRapidFireRange, label: () => 'Rapid Fire range', without: (o) => ({ ...o, withinRapidFireRange: false }) },
   { key: 'melta', on: (o) => o.withinMeltaRange, label: () => 'Melta range', without: (o) => ({ ...o, withinMeltaRange: false }) },
   { key: 'charging', on: (o) => o.charging, label: () => 'Charging', without: (o) => ({ ...o, charging: false }) },
