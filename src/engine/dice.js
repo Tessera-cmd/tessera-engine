@@ -22,15 +22,18 @@ export const d6 = (rng) => ((rng() * 6) | 0) + 1;
 export const d3 = (rng) => ((rng() * 3) | 0) + 1;
 
 // Evaluate a value that may be a plain number or a dice string like
-// "D3", "D6", "2D6", "D3+1". Rolls are taken from the threaded rng.
+// "D3", "D6", "2D6", "D3+1", "D6-1". Rolls are taken from the threaded rng.
+// A subtractive string ("D6-1" — legacy/community notation) floors at 0 rather than
+// going negative; before the 2026-07-06 audit it failed the regex entirely and
+// silently evaluated to 0 ALWAYS (a zero-damage weapon with no warning).
 export function evalValue(v, rng) {
   if (typeof v === 'number') return v;
-  const m = String(v).match(/^(\d*)D(\d+)(?:\+(\d+))?$/i);
+  const m = String(v).match(/^(\d*)D(\d+)(?:([+-])(\d+))?$/i);
   if (!m) return parseInt(v, 10) || 0;
   const count = m[1] ? +m[1] : 1;
   const sides = +m[2];
-  const bonus = m[3] ? +m[3] : 0;
+  const bonus = m[4] ? (m[3] === '-' ? -m[4] : +m[4]) : 0;
   let total = bonus;
   for (let i = 0; i < count; i++) total += ((rng() * sides) | 0) + 1;
-  return total;
+  return Math.max(0, total);
 }

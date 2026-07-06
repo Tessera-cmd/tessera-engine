@@ -167,10 +167,12 @@ const isWounded = (g) => g.currentWounds < g.W;
 // The current allocation group (05.04 / 06.02): non-CHARACTER before CHARACTER, and within
 // a class a group holding a wounded model first, else base (build) order. null = unit dead.
 //
-// `precision` (a [PRECISION] weapon): the ATTACKER may allocate the attack to a CHARACTER model
-// even with bodyguards alive, so an attached Leader/Support is targeted FIRST; once the
-// characters are dead the rest spill to the normal order. Champion sub-profiles (a Boss Nob)
-// are NOT characters, so Precision never redirects onto them.
+// `precision` (a [PRECISION] weapon, 24.28): the ATTACKER may make a CHARACTER group the
+// current allocation group, so the front character group is returned first. Used by
+// resolveMixedSaves for the ONE-OFF selection at the start of a weapon group's resolution
+// (the redirect binds to that single chosen group — once it dies the remaining wounds use
+// the normal order, handled there). Champion sub-profiles (a Boss Nob) are NOT characters,
+// so Precision never redirects onto them.
 export function currentGroup(groups, precision = false) {
   const live = groups.filter((g) => g.models > 0);
   if (!live.length) return null;
@@ -237,23 +239,39 @@ function damageGroup(state, group, dmg, rng) {
  * than Step 3 — for the front bodyguard group, where re-rolls almost always matter, that
  * is exactly the rules. A re-rolled die stays committed to its group (it is not re-sorted).
  *
- * `precision` (a [PRECISION] weapon) sends these wounds onto the attached CHARACTER first.
+ * `precision` (a [PRECISION] weapon, 24.28): the attacker selects ONE character group at
+ * the start of the Allocation Order step; it stays the current group "until those attacks
+ * are resolved, or until that CHARACTER group is destroyed (whichever happens first)".
+ * The selection is made ONCE per weapon group (this call) and, when the chosen character
+ * dies mid-resolution, the REMAINING wounds fall back to the normal allocation order —
+ * they do NOT roll over onto a second attached character (Leader + Support both attached).
  */
 export function resolveMixedSaves(state, woundsToSave, ctx, rng) {
   if (woundsToSave <= 0) return;
   const { ap, meltaAdd, damageBonus, saveReroll, weaponD, precision } = ctx;
 
+  // The one character group Precision redirects onto (wounded-first, else attach order —
+  // the same front() choice currentGroup makes). null when no character is alive.
+  let precisionGroup = precision ? currentGroup(state.groups, true) : null;
+  if (precisionGroup && !precisionGroup.isCharacter) precisionGroup = null;
+
   const rolls = new Array(woundsToSave);
   for (let i = 0; i < woundsToSave; i++) rolls[i] = d6(rng);
   rolls.sort((a, b) => a - b); // resolve lowest first (05.04)
 
-  // Representative save profile for wounds that land after the unit is dead: the body group
-  // (state.groups[0]), matching the uniform path which keeps rolling against the defender's
-  // save. Reading SV/INV is valid even once that group has no models left.
+  // Representative save profile for wounds that land after the unit is dead: the FIRST
+  // group (the primary body when one exists; a champion/character group only when the
+  // defender has no plain body at all), matching the uniform path which keeps rolling
+  // against the defender's save. This choice only shapes the DISPLAY funnel tallies for
+  // post-wipe wounds (kills/woundsDealt are already capped by the null-group branch) —
+  // any single representative is somewhat arbitrary for a mixed unit, and index 0 is the
+  // closest analogue of "the unit's own save". Reading SV/INV is valid even once that
+  // group has no models left.
   const rep = state.groups[0];
 
   for (let i = 0; i < woundsToSave; i++) {
-    const group = currentGroup(state.groups, precision);
+    const group =
+      precisionGroup && precisionGroup.models > 0 ? precisionGroup : currentGroup(state.groups, false);
     if (!group) {
       // Unit destroyed: the attack is wasted (05.04), but the funnel still reflects the whole
       // unit's output (matching the uniform fast path), so classify the pre-rolled save and
@@ -296,17 +314,21 @@ export function resolveMixedSaves(state, woundsToSave, ctx, rng) {
 /**
  * Resolve a weapon group's [DEVASTATING WOUNDS] mortal wounds against a mixed defender
  * (24.10 + 06.02). Each critical wound inflicts `weaponD (+ attacker mods)` mortal wounds,
- * capped at one model; the model is selected by the 06.02 order (== currentGroup). FNP
- * applies; the defender's halve / -1 Damage do NOT (the M-6 pinned position).
+ * capped at one model; the model is selected by the 06.02 order (== currentGroup without
+ * precision). [PRECISION] deliberately does NOT redirect these: 24.28 scopes the redirect
+ * to the 05.03 Allocation Order step, and mortal wounds resolve through 06.02's own
+ * selection order (living non-CHARACTERS first) — a Precision+Dev weapon cannot snipe an
+ * attached character with its mortals. FNP applies; the defender's halve / -1 Damage do
+ * NOT (the M-6 pinned position).
  *
- * `ctx` = { meltaAdd, damageBonus, weaponD, precision }.
+ * `ctx` = { meltaAdd, damageBonus, weaponD }.
  */
 export function resolveMixedMortals(state, devCritWounds, ctx, rng) {
   if (devCritWounds <= 0) return;
-  const { meltaAdd, damageBonus, weaponD, precision } = ctx;
+  const { meltaAdd, damageBonus, weaponD } = ctx;
 
   for (let i = 0; i < devCritWounds; i++) {
-    const group = currentGroup(state.groups, precision);
+    const group = currentGroup(state.groups, false);
     if (!group) {
       state.overkillWounds++; // critical wound with nothing left to kill -> wasted (no roll)
       continue;
@@ -324,6 +346,7 @@ export function resolveMixedMortals(state, devCritWounds, ctx, rng) {
         state.kills++;
         group.models--;
         group.currentWounds = group.models > 0 ? group.W : 0;
+        state.overkillWounds += mortals - j - 1; // mortals past the kill are lost -> wasted (24.10), same tally as the uniform path
         break; // one model max per critical wound; excess mortals lost (24.10)
       }
     }

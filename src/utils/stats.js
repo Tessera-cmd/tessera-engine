@@ -16,6 +16,29 @@ export function buildHistogram(sorted) {
     }));
 }
 
+// Cumulative survivability: P(at least N models survive) from a kills distribution.
+// totalModels is the total model count of the defending unit (including leader/champion groups).
+// Returns [{ survivors: N, pct }] for N = 1..totalModels, where pct = P(kills <= totalModels-N).
+// Models are never over-killed, so the kills distribution runs 0..totalModels.
+export function cumulativeSurvive(distribution, totalModels) {
+  if (!Array.isArray(distribution) || !distribution.length || !totalModels) return [];
+  const total = distribution.reduce((s, d) => s + (d.count || 0), 0) || 1;
+  // Build cumulative count P(kills <= k) for k = 0..totalModels.
+  const cumByKills = new Array(totalModels + 1).fill(0);
+  for (const d of distribution) {
+    const k = Math.round(d.value);
+    if (k >= 0 && k <= totalModels) cumByKills[k] = (cumByKills[k] || 0) + (d.count || 0);
+  }
+  for (let k = 1; k <= totalModels; k++) cumByKills[k] += cumByKills[k - 1];
+  const out = [];
+  for (let survivors = 1; survivors <= totalModels; survivors++) {
+    const killsLimit = totalModels - survivors; // P(kills <= this) = P(>= survivors alive)
+    const cum = killsLimit >= 0 ? cumByKills[killsLimit] : 0;
+    out.push({ survivors, pct: +((100 * cum) / total).toFixed(1) });
+  }
+  return out;
+}
+
 // Cumulative "at least N" probabilities from a histogram (premium results view).
 // Input is the [{ value, count, pct }] distribution from buildHistogram (ascending).
 // Returns [{ value, pct }] where pct = P(outcome >= value) as a percentage, the
@@ -33,7 +56,24 @@ export function cumulativeAtLeast(distribution) {
   return out;
 }
 
+// P(outcome >= threshold) from a histogram distribution ([{ value, count, pct }]).
+// Returns a probability in [0, 1]. Used by the army-vs-army matrix (Session 11) to key a
+// cell off, e.g., P(>= half the unit wiped in one round) = pAtLeast(dist, ceil(models/2)).
+// Empty/invalid in -> 0.
+export function pAtLeast(distribution, threshold) {
+  if (!Array.isArray(distribution) || distribution.length === 0) return 0;
+  const total = distribution.reduce((s, d) => s + (d.count || 0), 0) || 1;
+  let hit = 0;
+  for (const d of distribution) if (d.value >= threshold) hit += d.count || 0;
+  return +(hit / total).toFixed(4);
+}
+
 export function computeStats(arr) {
+  // Defensive guard: every current caller clamps iterations >= 1, but an empty array
+  // would otherwise yield NaN/undefined stats silently (2026-07-06 audit hardening).
+  if (!Array.isArray(arr) || arr.length === 0) {
+    return { mean: null, stdDev: null, p5: null, p95: null, min: null, max: null, distribution: [] };
+  }
   const sorted = [...arr].sort((a, b) => a - b);
   const n = sorted.length;
   const mean = arr.reduce((s, v) => s + v, 0) / n;

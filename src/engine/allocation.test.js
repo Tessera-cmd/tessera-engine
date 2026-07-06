@@ -46,6 +46,7 @@ const mkState = (groups) => ({
   failedSaves: 0,
   mortalInstances: 0,
   fnpIgnored: 0,
+  overkillWounds: 0,
   totalModels: groups.reduce((s, g) => s + g.models, 0),
   groups,
 });
@@ -539,12 +540,42 @@ describe('PRECISION allocation', () => {
     expect(state.kills).toBe(3);
   });
 
-  it('Devastating-Wounds mortals also follow precision onto the character', () => {
+  it('BREAKING VARIANT: Devastating-Wounds mortals do NOT follow precision — 06.02 selects living non-CHARACTERS first', () => {
+    // 24.28 scopes the Precision redirect to the 05.03 Allocation Order step; a Dev crit's
+    // mortal wounds resolve through 06.02's own selection order, which takes a living
+    // non-CHARACTER model first. So a Precision+Dev weapon can never snipe the character
+    // with its mortals (the pre-audit engine let it — the 10e instinct, pinned wrong).
     const state = mkState(buildGroups(ledDefender));
-    resolveMixedMortals(state, 1, { meltaAdd: 0, damageBonus: 0, weaponD: 2, precision: true }, scriptRng([6, 6])); // FNP-free; 2 mortals
-    expect(state.groups.find((g) => g.name === 'Boss').currentWounds).toBe(1); // W3 - 2 mortals
-    expect(state.groups.find((g) => g.name === 'Squad').models).toBe(5); // body untouched
-    expect(state.mortalWounds).toBe(2);
+    resolveMixedMortals(state, 1, { meltaAdd: 0, damageBonus: 0, weaponD: 2 }, scriptRng([])); // D2 numeric, no FNP -> no dice
+    expect(state.groups.find((g) => g.name === 'Boss').currentWounds).toBe(3); // character untouched
+    expect(state.groups.find((g) => g.name === 'Squad').models).toBe(4); // a W1 body dies to the 1st mortal
+    expect(state.mortalWounds).toBe(1); // the 2nd mortal is LOST (24.10 one-model cap)
+    expect(state.overkillWounds).toBe(1); // and tallied as wasted output (parity with the uniform path)
+  });
+
+  it('BREAKING VARIANT: when the chosen character dies mid-group, remaining precision wounds fall to the NORMAL order, never a second character', () => {
+    // 24.28: "until those attacks are resolved, or until that CHARACTER group is destroyed
+    // (whichever happens first)" — one chosen group per weapon group. With a Leader AND a
+    // Support attached, the old per-wound re-target sniped the second character too.
+    const twoChars = {
+      name: 'Squad',
+      models: 5,
+      W: 1,
+      SV: 6,
+      T: 4,
+      attached: [
+        { name: 'Boss', models: 1, W: 2, SV: 6 },
+        { name: 'Painboy', models: 1, W: 2, SV: 6 },
+      ],
+    };
+    const state = mkState(buildGroups(twoChars));
+    // 4 failed-save wounds (all rolled 1), D1: 2 kill the W2 Boss; the other 2 must fall
+    // back to the bodyguard Squad — the Painboy stays untouched.
+    resolveMixedSaves(state, 4, { ap: 0, meltaAdd: 0, damageBonus: 0, weaponD: 1, precision: true }, scriptRng([1, 1, 1, 1]));
+    expect(state.groups.find((g) => g.name === 'Boss').models).toBe(0); // the chosen character dies
+    expect(state.groups.find((g) => g.name === 'Painboy').models).toBe(1); // the second character is NOT sniped
+    expect(state.groups.find((g) => g.name === 'Squad').models).toBe(3); // overflow lands on the body
+    expect(state.kills).toBe(3);
   });
 
   it('precision targets the CHARACTER, never a champion sub-profile (a Boss Nob is not a Character)', () => {

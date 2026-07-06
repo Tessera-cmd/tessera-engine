@@ -37,26 +37,38 @@ function hasKw(weapon, name) {
   return kwList(weapon).some((k) => k === name || k.startsWith(name + ' '));
 }
 
-// Numeric suffix of a parameterised keyword, e.g. "SUSTAINED HITS 2" -> 2.
+// Numeric suffix of a parameterised keyword, e.g. "SUSTAINED HITS 2" -> 2. When the
+// merged list carries SEVERAL instances of the same ability (the weapon's own plus a
+// rule-granted one), 24.02 says they don't stack and the controlling player SELECTS
+// which applies — modelled as the optimal pick, the highest X (was: first-in-array,
+// which silently used the weaker instance when the better one sat later).
 function kwValue(weapon, name, dflt = 0) {
-  const k = kwList(weapon).find((x) => x === name || x.startsWith(name + ' '));
-  if (!k) return dflt;
-  const m = k.match(/(\d+)/);
-  return m ? +m[1] : dflt;
+  let best = null;
+  for (const k of kwList(weapon)) {
+    if (k !== name && !k.startsWith(name + ' ')) continue;
+    const m = k.match(/(\d+)/);
+    const v = m ? +m[1] : dflt;
+    if (best == null || v > best) best = v;
+  }
+  return best == null ? dflt : best;
 }
 
-// Parse "ANTI-INFANTRY 4+" -> { keywords:['INFANTRY'], threshold:4 } (supports A/B).
-function antiKeyword(weapon) {
-  const k = kwList(weapon).find((x) => x.startsWith('ANTI-') || x.startsWith('ANTI '));
-  if (!k) return null;
-  const m = k.match(/^ANTI[- ]([A-Z/ ]+?)\s+(\d)\+?$/);
-  if (!m) return null;
-  return { keywords: m[1].split('/').map((s) => s.trim()), threshold: +m[2] };
-}
-
-function defenderHasKeyword(defender, names) {
-  const dkw = (defender.keywords || []).map((k) => String(k).toUpperCase());
-  return names.some((n) => dkw.includes(n.toUpperCase()));
+// The [ANTI-X Y+] critical-wound threshold vs THIS defender, or null when none applies.
+// A weapon can carry SEVERAL Anti clauses (real data: the Ork tankbusta family is
+// "Anti-Monster 4+, Anti-Vehicle 4+" on one profile); 24.02 makes them duplicated
+// abilities the player selects between per activation — modelled as the optimal pick:
+// the LOWEST threshold whose keyword the target actually has (was: first-in-array only,
+// which silently dropped an applicable Anti when a non-matching one sat earlier).
+function antiThreshold(weapon, defenderLike) {
+  const dkw = (defenderLike.keywords || []).map((k) => String(k).toUpperCase());
+  let best = null;
+  for (const k of kwList(weapon)) {
+    const m = k.match(/^ANTI[- ](.+?)\s+(\d)\+?$/);
+    if (!m) continue;
+    if (!m[1].split('/').some((n) => dkw.includes(n.trim()))) continue;
+    if (best == null || +m[2] < best) best = +m[2];
+  }
+  return best;
 }
 
 // Effective save vs a weapon: the better of AP-modified armour and invuln (which
@@ -65,7 +77,7 @@ function defenderHasKeyword(defender, names) {
 // `apBonus` carries rule-granted AP (options.apBonus) so the displayed target matches
 // what the saves were actually rolled against when an AP-improving rule is active.
 export function effectiveSave(weapon, defender, apBonus = 0) {
-  const ap = (weapon.AP || 0) - apBonus;
+  const ap = Math.min(0, (weapon.AP || 0) - apBonus); // same 02.02 clamp as the real roll maths
   const armour = defender.SV - ap;
   const inv = defender.INV != null ? defender.INV : 7;
   const target = Math.min(armour, inv);
@@ -100,7 +112,8 @@ function makeDefenderState(defender) {
     failedSaves: 0, // save-eligible wounds that failed (proceed to damage)
     mortalInstances: 0, // Devastating-Wounds crits that bypassed saves
     fnpIgnored: 0, // damage points (incl. mortal) ignored by Feel No Pain
-    overkillWounds: 0, // wasted damage: spillover past a kill + wounds on an already-dead unit
+    overkillWounds: 0, // unsaved wounds (failed saves + Dev crits) that landed on an
+    // already-destroyed unit -> wasted output. Surfaced as the "overkill" hint.
     totalModels: defender.models, // for Blast (floor(models / 5)); includes leader/champions when mixed
   };
   if (isMixedDefender(defender)) {
@@ -167,6 +180,10 @@ function applyMortalWounds(state, defender, count, rng) {
 //   mod       : roll modifier (already clamped to +/-1 by the caller)
 //   reroll    : 'none' | 'ones' | 'failed' | 'all'
 //   critOn    : a roll >= critOn is a critical (auto-pass). 7 = only an unmodified 6.
+//   minUnmod  : an UNMODIFIED roll below this always fails (Indirect Fire's 10.07 gate;
+//               a critical still passes — crits are checked first, and 10.07's gate of 4
+//               can't collide with them: unmodified 4-5 only crit under Conversion,
+//               whose rolls already clear the gate).
 // Returns { pass, crit }. Unmodified 1 always fails; unmodified 6 always passes/crits.
 //
 // Position (pinned by a golden test): a re-roll only ever re-rolls a FAILED roll, so
@@ -175,10 +192,11 @@ function applyMortalWounds(state, defender, count, rng) {
 // combos read slightly LOW here. Deliberate for v1: the optimal fishing decision depends
 // on the whole matchup, and modelling it badly would be worse than not modelling it.
 // If it ever matters, add it as an explicit effects-layer option rather than a default.
-function checkRoll(rng, { threshold, mod = 0, reroll = 'none', critOn = 7 }) {
+function checkRoll(rng, { threshold, mod = 0, reroll = 'none', critOn = 7, minUnmod = 0 }) {
   const evaluate = (r) => {
     if (r === 1) return { pass: false, crit: false }; // unmodified 1 always fails
     if (r === 6 || r >= critOn) return { pass: true, crit: true }; // crit auto-passes
+    if (r < minUnmod) return { pass: false, crit: false }; // Indirect: unmodified 1-3 always fails
     return { pass: (r + mod) >= threshold, crit: false };
   };
   let r = d6(rng);
@@ -224,18 +242,27 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   // --- gather attack dice (per carrier) -------------------------------------
   const rapidFire =
     ranged && hasKw(weapon, 'RAPID FIRE') && o.withinRapidFireRange
-      ? kwValue(weapon, 'RAPID FIRE')
+      ? kwValue(weapon, 'RAPID FIRE', 1) // dflt 1: a bare keyword is never a silent no-op
       : 0;
-  // BLAST: +1 die per 5 models in the *original* target unit (never in melee). Counts
-  // the whole unit, including an attached leader/champions when the defender is mixed.
-  const blast =
-    ranged && hasKw(weapon, 'BLAST') ? Math.floor(state.totalModels / 5) : 0;
+  // BLAST / BLAST X (24.05): +X dice per 5 models in the *original* target unit (X
+  // defaults to 1; never in melee). CLEAVE X (24.06): the melee analogue, same +X per 5,
+  // conditional on all the weapon's attacks having ONE target — structurally always true
+  // here (the sim resolves a single defender). Both count the whole unit, including an
+  // attached leader/champions when the defender is mixed.
+  const blastX = ranged && hasKw(weapon, 'BLAST') ? Math.max(1, kwValue(weapon, 'BLAST', 1)) : 0;
+  const cleaveX = hasKw(weapon, 'CLEAVE') ? kwValue(weapon, 'CLEAVE', 1) : 0;
+  const blast = (blastX + cleaveX) * Math.floor(state.totalModels / 5);
   // attackBonus: +N to the Attacks characteristic per carrier (army/detachment rules).
-  // Not clamped; floored at 0 so a debuff can't make a weapon's base attacks negative.
+  // Not clamped upward; the modified A characteristic floors at 1 (02.02 characteristic
+  // bounds) — a debuff can't take a real weapon below one attack. A degenerate base of
+  // 0/negative (malformed data) skips the floor: it contributes nothing on its own,
+  // though an active +Attacks rule can still grant it attacks (max(0, base + bonus)).
   const attackBonus = o.attackBonus || 0;
   let attacks = 0;
   for (let i = 0; i < count; i++) {
-    attacks += Math.max(0, evalValue(weapon.A, rng) + attackBonus) + rapidFire + blast;
+    const baseA = evalValue(weapon.A, rng);
+    const a = baseA > 0 ? Math.max(1, baseA + attackBonus) : Math.max(0, baseA + attackBonus);
+    attacks += a + rapidFire + blast;
   }
   if (attacks <= 0) return;
   state.attacks += attacks;
@@ -244,14 +271,15 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   const torrent = hasKw(weapon, 'TORRENT');
   const hasLethal = hasKw(weapon, 'LETHAL HITS');
   const hasDev = hasKw(weapon, 'DEVASTATING WOUNDS');
-  const sustained = hasKw(weapon, 'SUSTAINED HITS') ? kwValue(weapon, 'SUSTAINED HITS') : 0;
+  // dflt 1: these abilities "always take the form [X]" (24.30/24.36), so a bare keyword
+  // (free-text custom rule / OCR import) most plausibly means 1 — never a silent no-op.
+  const sustained = hasKw(weapon, 'SUSTAINED HITS') ? kwValue(weapon, 'SUSTAINED HITS', 1) : 0;
 
   // ===== STEP 1: HIT ROLLS ==================================================
-  // Bucket A, hit-roll modifiers: SUM them, then cap the total at +/-1 (13.x). Summing before
-  // the clamp matters once three-plus mixed-sign modifiers stack — e.g. +1 user, +1 Heavy and
-  // -1 Indirect Fire net +1, whereas clamping after each step would wrongly land on 0.
-  // INDIRECT FIRE (fired out of line of sight) also grants the target Benefit of Cover, handled
-  // in bucket B below.
+  // Bucket A, hit-roll modifiers: SUM them, then cap the total at +/-1 (the app rules
+  // appendix: hit and wound rolls can never be modified by more than +/-1). Summing
+  // before the clamp matters once mixed-sign modifiers stack — e.g. +1 user and +1 Heavy
+  // against a -1 debuff net +1, whereas clamping after each step would land on 0.
   const indirect = ranged && hasKw(weapon, 'INDIRECT FIRE') && o.indirectFire;
   // CONVERSION (11e): when the target is at least HALF the weapon's range away, unmodified hit rolls of
   // 4+ count as CRITICAL HITS (which only matter via Lethal/Sustained — a Conversion weapon with neither
@@ -261,20 +289,30 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   const hitCritOn = conversion ? 4 : 7;
   let hitMod = o.hitModifier ?? 0;
   if (ranged && hasKw(weapon, 'HEAVY') && o.remainedStationary) hitMod += 1; // Heavy: +1 to hit
-  // INDIRECT FIRE (11e): firing at a target out of line of sight (modelled as the common WITH-A-SPOTTER
-  // case) — the hit roll is capped at 4+ (you can't use your BS), the target gains Benefit of Cover,
-  // positive hit modifiers don't apply, and the attacks can't be re-rolled. (The no-spotter worst case —
-  // Snap Shooting / unmodified-6 only — is a deliberate simplification not separately modelled.)
-  if (indirect) hitMod = Math.min(0, hitMod); // only negative modifiers apply under Indirect
   hitMod = clamp(hitMod, -1, 1);
   // Bucket B, BS/WS *characteristic* modifiers (separate; Cover stacks past -1).
-  let effTarget = indirect ? 4 : ranged ? weapon.BS : weapon.WS; // Indirect: fire blind, hit on 4+ at best
+  let effTarget = ranged ? weapon.BS : weapon.WS;
   if (ranged) {
-    // Cover worsens BS by 1; Indirect Fire also grants the target Benefit of Cover. Either
+    // Cover worsens BS by 1; Indirect Fire also grants the target Benefit of Cover (10.07). Either
     // source applies it once (cover doesn't stack), unless the weapon Ignores Cover.
     if ((o.targetInCover || indirect) && !hasKw(weapon, 'IGNORES COVER')) effTarget += 1;
     if (o.plungingFire) effTarget -= 1; // Plunging Fire: improve BS by 1
   }
+  // 02.02 characteristic bounds: a modified BS/WS "cannot be 1+ (or better) or 7+ (or
+  // worse)" — clamp to 2+..6+ AFTER the bucket-B modifiers, so e.g. a BS 6+ shooter in
+  // cover still hits on a modified 6 (not never), and Plunging can't create a 1+.
+  effTarget = clamp(effTarget, 2, 6);
+  // INDIRECT FIRE (11e, 10.07), modelled as the common stationary-WITH-A-SPOTTER case: an
+  // unmodified hit roll of 1-3 ALWAYS fails (the gate below), the target has the Benefit
+  // of Cover (folded into effTarget above), and hit rolls cannot be re-rolled. The
+  // weapon's own BS still applies — 10.07 adds a fail condition, it does NOT replace BS
+  // (contrast Snap Shooting 15.09, which explicitly says "irrespective of the attacking
+  // weapon's BS characteristic"). So blind fire is never MORE accurate than aimed fire —
+  // the old "hit on 4+ at best" reading improved BS 5+/6+ artillery and is gone. Hit-roll
+  // modifiers (both signs) apply to the BS comparison as normal; they cannot rescue an
+  // unmodified 1-3. (The no-spotter worst case — unmodified 6s only — is a deliberate
+  // simplification not separately modelled.)
+  const hitGate = indirect ? 4 : 0; // minimum UNMODIFIED roll that can hit
   const hitReroll = indirect ? 'none' : o.hitReroll; // Indirect attacks can't be re-rolled
 
   let autoWounds = 0; // hits that auto-wound (Lethal Hits on a critical hit)
@@ -295,6 +333,7 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
         mod: hitMod,
         reroll: hitReroll,
         critOn: hitCritOn,
+        minUnmod: hitGate,
       }));
     }
     if (!pass) continue;
@@ -315,7 +354,6 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   // (the Leader's only once they are gone). A uniform defender just uses its single T.
   const T = state.groups ? currentWoundToughness(state.groups) ?? defender.T : defender.T;
   const wt = woundTarget(effS, T);
-  const anti = antiKeyword(weapon);
   // 19.03: an attached unit has all its components' keywords, so Anti-[keyword] can trigger
   // off an attached character's keyword even for wounds not allocated to it. Union every
   // attached character's keywords when the defender is mixed (uniform = byte-identical).
@@ -323,8 +361,7 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   const antiKeywords = attached.length
     ? { keywords: [...(defender.keywords || []), ...attached.flatMap((ch) => ch.keywords || [])] }
     : defender;
-  const critWoundOn =
-    anti && defenderHasKeyword(antiKeywords, anti.keywords) ? anti.threshold : 7;
+  const critWoundOn = antiThreshold(weapon, antiKeywords) ?? 7;
 
   let woundMod = clamp(o.woundModifier ?? 0, -1, 1); // wound-roll modifiers cap at +/-1
   if (hasKw(weapon, 'LANCE') && o.charging) woundMod = clamp(woundMod + 1, -1, 1);
@@ -350,10 +387,13 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   state.mortalInstances += devCritWounds; // Dev crits bypass saves -> mortal wounds
 
   // ===== STEP 3 & 4: SAVES + DAMAGE (normal damage first, then mortals) =====
-  const ap = (weapon.AP || 0) - (o.apBonus || 0); // AP (negative); apBonus improves it
+  // AP is negative; apBonus improves it (more negative). Clamped at 0: the modified AP
+  // characteristic "cannot be worse than 0" (02.02 bounds), so a mis-authored negative
+  // apBonus in a custom rule can never turn a weapon into a save IMPROVER.
+  const ap = Math.min(0, (weapon.AP || 0) - (o.apBonus || 0));
   const meltaAdd =
     hasKw(weapon, 'MELTA') && o.withinMeltaRange
-      ? (weapon.meltaBonus ?? kwValue(weapon, 'MELTA'))
+      ? (weapon.meltaBonus ?? kwValue(weapon, 'MELTA', 1)) // dflt 1: bare keyword ≠ no-op
       : 0;
   const damageBonus = o.damageBonus || 0;
 
@@ -361,12 +401,16 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
     // Mixed defender: full 11th-edition allocation (allocation.js). Devastating-Wounds
     // mortals: attacker-side D mods (Melta, damageBonus) apply, the defender's halve /
     // -1 Damage do NOT (the M-6 pinned position — 24.10 ends the attack at the crit).
-    // [PRECISION] sends this weapon's wounds onto the attached CHARACTER first (the engine
-    // only resolves allocation here for a mixed defender, so it is a no-op without one).
+    // [PRECISION] (24.28) redirects this weapon's SAVE-allocated wounds onto the attached
+    // CHARACTER (the engine only resolves allocation here for a mixed defender, so it is
+    // a no-op without one). Its mortal wounds deliberately do NOT follow: 24.28 scopes
+    // the redirect to the Allocation Order step (05.03), while Devastating-Wounds mortals
+    // resolve through 06.02's own model-selection order (living non-CHARACTERS first) —
+    // so a Precision+Dev weapon cannot snipe a character via its mortals.
     const precision = hasKw(weapon, 'PRECISION');
     const ctx = { ap, meltaAdd, damageBonus, saveReroll: o.saveReroll, weaponD: weapon.D, precision };
     resolveMixedSaves(state, woundsToSave, ctx, rng);
-    resolveMixedMortals(state, devCritWounds, { meltaAdd, damageBonus, weaponD: weapon.D, precision }, rng);
+    resolveMixedMortals(state, devCritWounds, { meltaAdd, damageBonus, weaponD: weapon.D }, rng);
     return;
   }
 
@@ -412,14 +456,18 @@ export function groupWeapons(attacker, options) {
     // Merge granted keywords (deduped) so they resolve and grouping stays consistent.
     const mergedKw = granted.length ? [...new Set([...kwList(weapon), ...granted])] : kwList(weapon);
     const w = granted.length ? { ...weapon, keywords: mergedKw } : weapon;
+    // Canonicalise the dice-able fields so a numeric 2 and a string '2' (or 'd6'/'D6')
+    // merge into one group — they fire identically, and a type-split only fragments the
+    // per-weapon breakdown display.
+    const canon = (v) => (v == null || v === '' ? null : Number.isFinite(+v) ? +v : String(v).toUpperCase());
     const key = JSON.stringify([
       w.type,
-      w.A,
+      canon(w.A),
       w.BS,
       w.WS,
       w.S,
       w.AP,
-      w.D,
+      canon(w.D),
       w.meltaBonus ?? null,
       mergedKw.slice().sort(),
     ]);
