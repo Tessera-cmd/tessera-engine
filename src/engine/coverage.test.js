@@ -80,6 +80,72 @@ describe('Plunging Fire is a separate BS bucket (stacks past the ±1 cap)', () =
   });
 });
 
+describe('Stealth (24.33): a defender whose whole unit has STEALTH always has Benefit of Cover vs ranged', () => {
+  // Ground truth (11e Core Rules 24.33): "If every model in a unit has this ability, each time a
+  // RANGED attack targets that unit, that unit has the benefit of cover against that attack (13.08)."
+  // 13.08 = the shooter's BS is worsened by 1 (the same effect the targetInCover toggle applies),
+  // in the separate BS-characteristic bucket, cancelled by Ignores Cover.
+  const W_BS3 = { A: 1, BS: 3, S: 4, AP: 0, D: 1 };
+  const stealthTarget = (over = {}) => target({ keywords: ['INFANTRY', 'STEALTH'], ...over });
+
+  it('a STEALTH defender is hit exactly as if it were in cover (BS3 -> 4+, 3/6)', () => {
+    const res = run(attacker(W_BS3), stealthTarget());
+    approx(res.kills.mean, 100 * (3 / 6) * P_W_S4T4); // BS3 worsened to 4+ = 3/6 (base 4/6 without cover)
+  });
+  it('STEALTH is identical to the manual targetInCover toggle (same seed -> same result)', () => {
+    const viaKeyword = run(attacker(W_BS3), stealthTarget());
+    const viaToggle = run(attacker(W_BS3), target(), { targetInCover: true });
+    expect(viaKeyword.kills.mean).toBe(viaToggle.kills.mean);
+  });
+  it('STEALTH stacks with a -1 hitModifier to -2 (proves it is the BS bucket, not the ±1-clamped one)', () => {
+    // BS3 -> STEALTH cover makes effTarget 4; hitMod -1 -> only 5,6 hit = 2/6. Worse than either alone.
+    const res = run(attacker(W_BS3), stealthTarget(), { hitModifier: -1 });
+    approx(res.kills.mean, 100 * (2 / 6) * P_W_S4T4); // 16.67
+    const stealthOnly = run(attacker(W_BS3), stealthTarget());
+    expect(res.kills.mean).toBeLessThan(stealthOnly.kills.mean);
+  });
+  it('Ignores Cover cancels STEALTH (hit rate back to base BS3 = 4/6)', () => {
+    const w = { ...W_BS3, keywords: ['IGNORES COVER'] };
+    const res = run(attacker(w), stealthTarget());
+    approx(res.kills.mean, 100 * (4 / 6) * P_W_S4T4); // 33.33 — cover removed
+  });
+  it('cover does not stack: STEALTH + targetInCover is a single -1, same as STEALTH alone', () => {
+    const both = run(attacker(W_BS3), stealthTarget(), { targetInCover: true });
+    const one = run(attacker(W_BS3), stealthTarget());
+    expect(both.kills.mean).toBe(one.kills.mean); // one +1 to effTarget, not two
+    approx(both.kills.mean, 100 * (3 / 6) * P_W_S4T4);
+  });
+  it('STEALTH has NO effect in melee (24.33 is ranged-only)', () => {
+    // A WS3 melee attacker vs a STEALTH defender hits at full WS3 (4/6), unaffected by cover.
+    const meleeAtk = { models: 100, weapons: [{ type: 'melee', count: 100, A: 1, WS: 3, S: 4, AP: 0, D: 1 }] };
+    const withStealth = run(meleeAtk, stealthTarget(), { phase: 'melee' });
+    const without = run(meleeAtk, target(), { phase: 'melee' });
+    approx(withStealth.kills.mean, 100 * (4 / 6) * P_W_S4T4); // WS3 unmodified = 4/6
+    expect(withStealth.kills.mean).toBe(without.kills.mean); // STEALTH changes nothing in melee
+  });
+  it('REGRESSION: a non-STEALTH defender still fires at base BS (closed form, no worsening)', () => {
+    // Pins that STEALTH's ABSENCE leaves the closed-form base rate intact (the pre-existing
+    // goldens pin the rest of the old behaviour).
+    const plain = run(attacker(W_BS3), target()); // keywords: ['INFANTRY'], no STEALTH
+    approx(plain.kills.mean, 100 * (4 / 6) * P_W_S4T4); // base BS3 = 4/6
+  });
+  it('STEALTH on a mixed defender (a champion in the unit) still worsens the ranged hit roll', () => {
+    // The hit roll (Step 1) resolves on the whole unit before allocation, so the -1 applies to
+    // the mixed-defender path too. A W2 champion makes the defender mixed (allocation.js).
+    const def = target({
+      models: 10,
+      W: 1,
+      SV: 4,
+      keywords: ['INFANTRY', 'STEALTH'],
+      profiles: [{ name: 'Champion', count: 1, W: 2, SV: 4 }], // count>0 => mixed (allocation.js)
+    });
+    const stealth = run(attacker(W_BS3), def);
+    const plain = run(attacker(W_BS3), { ...def, keywords: ['INFANTRY'] });
+    // Fewer hits land -> fewer wounds dealt when the mixed defender has Stealth.
+    expect(stealth.woundsDealt.mean).toBeLessThan(plain.woundsDealt.mean);
+  });
+});
+
 describe('Conversion (11e): at half range, unmodified 4+ hit rolls are Critical Hits (NOT +1 to hit)', () => {
   it('BREAKING VARIANT: Conversion ALONE is a no-op (a crit hit does nothing without Lethal/Sustained)', () => {
     const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['CONVERSION'] };

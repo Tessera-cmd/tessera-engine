@@ -37,6 +37,15 @@ function hasKw(weapon, name) {
   return kwList(weapon).some((k) => k === name || k.startsWith(name + ' '));
 }
 
+// Does the DEFENDING UNIT carry a datasheet keyword (defender.keywords)? Used for
+// STEALTH (24.33): when every model in the unit has Stealth, a ranged attack targeting
+// it always has the Benefit of Cover. The engine represents the unit's keyword set on
+// defender.keywords, so a STEALTH entry there means the whole unit qualifies. Reuses
+// hasKw's exact/prefix match so a parameterised variant would still be recognised.
+function defenderHasKw(defender, name) {
+  return hasKw({ keywords: defender && defender.keywords }, name);
+}
+
 // Numeric suffix of a parameterised keyword, e.g. "SUSTAINED HITS 2" -> 2. When the
 // merged list carries SEVERAL instances of the same ability (the weapon's own plus a
 // rule-granted one), 24.02 says they don't stack and the controlling player SELECTS
@@ -290,12 +299,19 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   let hitMod = o.hitModifier ?? 0;
   if (ranged && hasKw(weapon, 'HEAVY') && o.remainedStationary) hitMod += 1; // Heavy: +1 to hit
   hitMod = clamp(hitMod, -1, 1);
+  // STEALTH (24.33): if every model in the DEFENDING unit has this ability, a RANGED attack
+  // targeting it always has the Benefit of Cover — the same -1-to-BS cover effect the manual
+  // targetInCover toggle applies. It is a defender keyword, always-on (no player toggle), and
+  // (being cover) is cancelled by Ignores Cover via the guard below. Cover doesn't stack, so a
+  // Stealth unit that is ALSO in cover gets the single -1 (the OR collapses both to one source).
+  const stealthCover = ranged && defenderHasKw(defender, 'STEALTH');
   // Bucket B, BS/WS *characteristic* modifiers (separate; Cover stacks past -1).
   let effTarget = ranged ? weapon.BS : weapon.WS;
   if (ranged) {
-    // Cover worsens BS by 1; Indirect Fire also grants the target Benefit of Cover (10.07). Either
-    // source applies it once (cover doesn't stack), unless the weapon Ignores Cover.
-    if ((o.targetInCover || indirect) && !hasKw(weapon, 'IGNORES COVER')) effTarget += 1;
+    // Cover worsens BS by 1; Indirect Fire also grants the target Benefit of Cover (10.07), and a
+    // STEALTH defender always has it (24.33). Any source applies it once (cover doesn't stack),
+    // unless the weapon Ignores Cover.
+    if ((o.targetInCover || indirect || stealthCover) && !hasKw(weapon, 'IGNORES COVER')) effTarget += 1;
     if (o.plungingFire) effTarget -= 1; // Plunging Fire: improve BS by 1
   }
   // 02.02 characteristic bounds: a modified BS/WS "cannot be 1+ (or better) or 7+ (or
