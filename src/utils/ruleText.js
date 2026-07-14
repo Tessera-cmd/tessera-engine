@@ -37,6 +37,30 @@ const SITUATIONAL_CONDITIONS = new Set(['objectiveControl', 'oncePerBattle', 'ar
 const DEGRADING_RE = /\b\d+\s*-\s*\d+\s+wounds?\s+remaining\b|\bdamaged\s*:\s*\d|\bwounds?\s+remaining\b|\bis\s+damaged\b/i;
 const AURA_RE = /\bwithin\s+\d+\s*"|\bwithin\s+\d+\s*inches\b/i;
 
+// The "N-M wounds remaining" range in a degrade ability (M = the UPPER bound: the unit degrades while
+// it has 1..M wounds, i.e. at M or fewer). Ground truth (F2.1, 2026-07-02): 10e BSData has NO
+// multi-bracket degrading statlines (SM/Orks/Necrons/Knights all carry exactly one statline profile);
+// a degrading unit instead carries ONE "Damaged: 1-M wounds remaining" ABILITY (a flat penalty below
+// the threshold, e.g. -1 to Hit). We already capture + show that ability verbatim — degradeInfo just
+// lets the UI surface an at-a-glance "degrades" flag beside the statline.
+const WOUNDS_REMAINING_RE = /(\d+)\s*-\s*(\d+)\s+wounds?\s+remaining/i;
+
+// Detect a datasheet's degrade ability from the captured abilities ([{name, text}]). Returns
+// { threshold, name, text } for the first ability NAMED "Damaged…" (the reliable 10e convention), or
+// null. `threshold` is the upper wound bound (parsed from name, then text), or null when the ability
+// exists but no range parses — we flag it without inventing a number (accuracy over a made-up value).
+export function degradeInfo(datasheetAbilities) {
+  for (const a of Array.isArray(datasheetAbilities) ? datasheetAbilities : []) {
+    const name = String(a?.name || '');
+    if (!/^\s*damaged\b/i.test(name)) continue;
+    const text = String(a?.text || '');
+    const m = name.match(WOUNDS_REMAINING_RE) || text.match(WOUNDS_REMAINING_RE);
+    const threshold = m ? Number(m[2]) : NaN;
+    return { threshold: Number.isFinite(threshold) ? threshold : null, name: name.trim(), text: text.trim() };
+  }
+  return null;
+}
+
 // Weapon keywords a rule may GRANT (engine grantKeywords). Restricted to a recognised set so a
 // stray bracketed UNIT keyword (e.g. [CHARACTER]) is never mistaken for a weapon grant. The
 // number suffix on SUSTAINED HITS / RAPID FIRE / MELTA / ANTI- is captured from the text.
@@ -85,6 +109,9 @@ const NOT_SIM_RE = /\b(reanimat|resurrect|return .* (?:destroyed|slain)|regain .
 
 // Normalise the raw text: strip New Recruit's ^^/** markup, collapse whitespace, decode the
 // couple of entities the XML parser may leave, but KEEP [KEYWORD] brackets (we read them).
+// Unicode punctuation is folded to ASCII (2026-07-14): the live 11e catalogues write "re‑roll"
+// with a NON-BREAKING HYPHEN (U+2011) and "units’" with a curly apostrophe — the ASCII-only
+// patterns below silently missed every such rule (a dozen live detachment rules unlocked).
 export function cleanRuleText(text) {
   return String(text || '')
     .replace(/\^\^/g, '')
@@ -92,6 +119,9 @@ export function cleanRuleText(text) {
     .replace(/&amp;/g, '&')
     .replace(/&apos;/g, "'")
     .replace(/&quot;/g, '"')
+    .replace(/[‐‑‒–—―]/g, '-') // hyphen/dash variants -> '-'
+    .replace(/[‘’]/g, "'") // curly single quotes -> '
+    .replace(/[“”]/g, '"') // curly double quotes -> "
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -107,9 +137,11 @@ function numFrom(v) {
 const NUM = '(\\d+|one|two|three|four|five|six)';
 
 // Detect the phase a clause applies in, from weapon-type / phase wording. Defaults to 'any'.
+// "selected to shoot/fight" is GW's standard per-phase ACTIVATION wording (Target Elimination,
+// Combat Doctrines), so it pins the phase even when no weapon-type word is present (B7 accuracy win).
 function detectPhase(t) {
-  if (/\b(melee weapons?|melee attacks?|fight phase|in the fight phase|made with melee)\b/i.test(t)) return 'fight';
-  if (/\b(ranged weapons?|ranged attacks?|shooting phase|in the shooting phase|made with ranged)\b/i.test(t)) return 'shooting';
+  if (/\b(melee weapons?|melee attacks?|fight phase|in the fight phase|made with melee|selected to fight)\b/i.test(t)) return 'fight';
+  if (/\b(ranged weapons?|ranged attacks?|shooting phase|in the shooting phase|made with ranged|selected to shoot)\b/i.test(t)) return 'shooting';
   return 'any';
 }
 
@@ -136,7 +168,7 @@ function detectCondition(t) {
   // a MONSTER or VEHICLE unit", "the closest eligible target", "when targeting … units", "(excluding …
   // that target MONSTERS…)", "is Battle-shocked", and Tau Observer/Spotted/Guided/markerlight gating.
   if (
-    /\b(?:targets?|against)\s+(?:a|an|one|that|the\s+closest)\s+(?:enemy\s+)?(?:unit|model)\b[^.]{0,40}?\b(?:that|which|is|cannot|can't|containing|contains|below|with|has)\b/i.test(t) ||
+    /\b(?:targets?|against)\s+(?:a|an|one|that|the\s+closest)\s+(?:enemy\s+)?(?:unit|model)\b[^.]{0,40}?\b(?:that|which|is|cannot|can't|containing|contains|below|with|has|in|within|wholly)\b/i.test(t) ||
     /\b(?:targets?|against)\s+(?:a|an|one)\s+[A-Z][A-Za-z' -]{1,40}?\b(?:units?|models?)\b/.test(t) || // "targets a MONSTER or VEHICLE unit"
     /\b(?:closest|nearest)\s+eligible\s+target\b/i.test(t) || // "targets the closest eligible target"
     /\bwhen targeting\b|\bexcluding\b[^.]{0,40}?\btarget/i.test(t) || // "[X] when targeting … units" / "(excluding attacks that target …)"
@@ -148,18 +180,170 @@ function detectCondition(t) {
   return null;
 }
 
-// Model-type scope of a clause (uppercase keywords), or [] for army-wide. Types named after an
-// "excluding"/"except" are removed (e.g. "VEHICLE and MOUNTED models (excluding TITANIC)").
-function detectScope(t) {
-  const up = t.toUpperCase();
-  const out = [];
-  for (const k of MODEL_TYPES) {
-    const re = new RegExp(`\\b${k.replace(/[-/]/g, '\\$&')}\\b[^.]{0,40}?\\b(MODELS?|UNITS?)\\b`);
-    if (re.test(up)) out.push(k);
-  }
-  const excl = up.match(/\b(?:EXCLUDING|EXCEPT)\b([^.)]*)/);
-  if (excl) return out.filter((k) => !new RegExp(`\\b${k.replace(/[-/]/g, '\\$&')}\\b`).test(excl[1]));
+// Words that can lead a capitalized run without being keywords (sentence starts, qualifiers).
+// A run token matching one of these is trimmed from the edges; a run of ONLY these is dropped.
+const SCOPE_STOPWORDS = new Set([
+  'EACH', 'WHILE', 'IF', 'WHEN', 'FRIENDLY', 'ENEMY', 'OTHER', 'YOUR', 'THE', 'THIS', 'THAT',
+  'THOSE', 'THESE', 'A', 'AN', 'ALL', 'ANY', 'ONE', 'TWO', 'THREE', 'SELECT', 'UNTIL', 'DURING',
+  'INSTEAD', 'OTHERWISE', 'IN', 'AT', 'ON', 'AS', 'OF', 'OR', 'AND', 'NOT', 'NO', 'THEN', 'BUT',
+  'SUCH', 'EVERY', 'ITS', 'THEIR', 'TO', 'FROM', 'FOR', 'WITH', 'ADD', 'SUBTRACT', 'IMPROVE',
+  'ONCE', 'PER', 'SEE', 'ONLY', 'BOTH', 'MORE', 'FEWER', 'NEW', 'FIRST', 'SECOND', 'THIRD',
+]);
+
+// Model-type / class-keyword scope of a clause, side-aware. GW scopes a detachment rule inside
+// its own text ("Friendly IMPERIAL KNIGHTS DOMINUS units' attacks…", "War Dog model", "targets a
+// BOYZ unit from your army") — the catalogues mix UPPERCASE and Title Case, so we extract the
+// CAPITALIZED keyword run immediately before "unit(s)"/"model(s)" (allowing "of" joins — "Avatar
+// of Khaine"), split it on and/or/commas/slashes into phrases, and classify each by context:
+//   · SUBJECT ("X models from your army have…") — scopes BOTH sides' effects to X;
+//   · FRIENDLY TARGET ("each time an attack targets an X unit from your army") — the defending
+//     unit, so it scopes DEFENDER effects only;
+//   · ENEMY TARGET ("targets a MONSTER or VEHICLE unit") — the enemy's type is a target
+//     CONDITION, never a scope on the acting unit — skipped;
+//   · an "excluding …" span, or a "X model is leading this unit" leader gate — skipped.
+// A multi-word phrase ("IMPERIAL KNIGHTS DOMINUS") is matched at sim time by segmenting it
+// against the unit's own keywords (engine/effects.js effectAppliesToUnit) — AND semantics, so
+// the faction umbrella inside the phrase never widens it. Under-apply by construction: a phrase
+// that isn't really unit keywords simply never matches. Returns { attacker: [], defender: [] }.
+// The capitalized-run grammar shared by detectScope and keywordAliases. A run is capitalized
+// words (letters/digits/'/-) joined by spaces, commas, slashes, "and", "or", and the lowercase
+// name joiners "of"/"the" ("Avatar of Khaine", "Ûthar the Destined").
+const RUN_SRC = "(?:(?:[A-ZÀ-Þ][A-Za-zÀ-þ0-9'-]*|of|and|or|the)[ ]+|[A-ZÀ-Þ][A-Za-zÀ-þ0-9'-]*[,/][ ]*)*[A-ZÀ-Þ][A-Za-zÀ-þ0-9'-]*";
+
+// Split a captured run into normalised phrases (on and/or/commas/slashes; stopword edges trimmed).
+function splitRunPhrases(run) {
+  return String(run || '')
+    .split(/\s*(?:,|\/|\band\b|\bor\b)\s*/)
+    .map((p) => {
+      const toks = p.trim().split(/\s+/).filter(Boolean);
+      while (toks.length && SCOPE_STOPWORDS.has(toks[0].toUpperCase())) toks.shift();
+      while (toks.length && SCOPE_STOPWORDS.has(toks[toks.length - 1].toUpperCase())) toks.pop();
+      return toks.join(' ').toUpperCase();
+    })
+    .filter(Boolean);
+}
+
+// Rule-INTERNAL keyword grants ("Heretic Astartes Vehicle … units gain the Soul Forge keyword",
+// "Friendly FOETID BLOAT-DRONE/… units have CONTAGION ENGINE") — round-3 review. The granted
+// name is not a real datasheet keyword, so a later clause scoped on it ("Soul Forge units …
+// have a 5+ invulnerable save") would match NOTHING. Returns Map<ALIAS, phrases[]> so
+// mapRuleText can UNION the granting classes into any scope naming the alias (union, not
+// substitution — if the granted name IS a real keyword, e.g. BATTLELINE, both readings stay).
+function keywordAliases(text) {
+  const out = new Map();
+  const add = (alias, run) => {
+    const key = alias.trim().toUpperCase();
+    const phrases = splitRunPhrases(run);
+    if (!key || !phrases.length) return;
+    out.set(key, [...new Set([...(out.get(key) || []), ...phrases])]);
+  };
+  // "<classes> units/models … gain/have the <Name> keyword"
+  const kwRe = new RegExp(`(${RUN_SRC})[ ]+(?:units?|models?)\\b[^.]{0,40}?\\b(?:gains?|ha(?:ve|s))\\s+(?:the\\s+)?([A-ZÀ-Þ][A-Za-zÀ-þ0-9' -]+?)\\s+keyword`, 'g');
+  let m;
+  while ((m = kwRe.exec(text))) add(m[2], m[1]);
+  // "<classes> units have <ALL-CAPS NAME>." — the bare form (all-caps only, so a prose Title-Case
+  // ability name never becomes an alias).
+  const bareRe = new RegExp(`(${RUN_SRC})[ ]+units?\\b[^.]{0,20}?\\bhave\\s+([A-ZÀ-Þ][A-ZÀ-Þ0-9' -]{2,}?)\\s*(?:\\.|$)`, 'g');
+  while ((m = bareRe.exec(text))) add(m[2], m[1]);
   return out;
+}
+
+function detectScope(t) {
+  const attacker = [];
+  const defender = [];
+  const pushTo = (arr, phrase) => {
+    if (!arr.includes(phrase)) arr.push(phrase);
+  };
+  // Every "unit(s)/model(s)" mention with a capitalized run directly before it (RUN_SRC grammar).
+  // KNOWN LIMITATION (round-3 review, Xenocreed Congregation): the "is a MAGUS, PRIMUS, or
+  // ACOLYTE ICONWARD, that model has…" idiom names its restriction BEFORE an anaphoric "that
+  // model", not before "units/models" — the restriction list is not captured, and the clause
+  // scopes to the broader earlier noun (CHARACTER). Expressing it needs AND-of-OR scope algebra
+  // the effect shape doesn't have; the result is still strictly NARROWER than the pre-2026-07-14
+  // army-wide application, and the effect stays suspect-flagged.
+  const re = new RegExp(`(${RUN_SRC})[ ]+(units?|models?)\\b`, 'g');
+  const allRuns = []; // every capitalized run seen (even skipped ones), for the fallback guard
+  let m;
+  while ((m = re.exec(t))) {
+    const pre = t.slice(0, m.index);
+    const post = t.slice(m.index + m[0].length);
+    allRuns.push(m[1].toUpperCase());
+    // Inside an "excluding/except …" span (same sentence/paren): not a scope, it's a carve-out.
+    if (/\b(?:excluding|except)\b[^.)]*$/i.test(pre)) continue;
+    // "X model is leading this unit" — a leader gate on the LED unit, not a scope on the bearer.
+    if (/^['’s]*\s+(?:is|are)\s+leading\b/i.test(post)) continue;
+    // A proximity condition about ANOTHER unit ("…is within Engagement Range of one or more other
+    // ADEPTUS ASTARTES units…") is battlefield state, never the acting subject — without this
+    // guard the ally's keyword joined the subject scope and OR-matching widened the rule to the
+    // whole ally family (round-2 review, Saga of the Hunter).
+    if (/\b(?:within|wholly\s+within)\b[^,.;]*$/i.test(pre)) continue;
+    // Split the run into phrases on and/or/commas/slashes; trim stopword edges per phrase.
+    const phrases = splitRunPhrases(m[1]);
+    if (!phrases.length) continue;
+    // Context: is this run the object of "targets/against/targeting"? If so it is only a DEFENDER
+    // scope when it is explicitly FRIENDLY ("…from your army" / "friendly X"); an enemy target is
+    // a condition, not a scope.
+    // The target-object detection tolerates quantifier phrases ("targets ONE OR MORE Genestealer
+    // Cults units from your army" — round-2 review, Blessed Visages): without them the run read as
+    // a SUBJECT and a later enemy-attack clause inherited it backwards onto the player's own units.
+    const isTarget =
+      /\b(?:targets?|targeting|against)\s+(?:one\s+or\s+more\s+|a\s+number\s+of\s+|\d+\s+or\s+more\s+)?(?:a|an|one|that|each|every|the|all)?\s*(?:enemy\s+)?(?:friendly\s+)?(?:other\s+)?$/i.test(pre);
+    const isFriendly =
+      /\bfriendly\s+$/i.test(pre) ||
+      /^\s*friendly\b/i.test(m[1]) ||
+      /^['’s]*\s*(?:\([^)]*\)\s*)?(?:from|in) your army\b/i.test(post);
+    if (isTarget && !isFriendly) continue;
+    for (const p of phrases) {
+      if (isTarget) pushTo(defender, p);
+      else {
+        pushTo(attacker, p);
+        pushTo(defender, p);
+      }
+    }
+  }
+  // Fixed model-type fallback (case-insensitive, the pre-2026-07-14 vocabulary) for a type word
+  // the capitalized-run pass missed entirely (e.g. lowercase "vehicle units"). A type word that
+  // appeared in ANY extracted run — even one the context pass deliberately SKIPPED (an enemy
+  // target, a leader gate) — is NOT re-added: the context decision stands.
+  const up = t.toUpperCase();
+  for (const k of MODEL_TYPES) {
+    const kw = new RegExp(`\\b${k.replace(/[-/]/g, '\\$&')}\\b`);
+    const kre = new RegExp(`${kw.source}[^.]{0,40}?\\b(MODELS?|UNITS?)\\b`);
+    if (!kre.test(up)) continue;
+    if (allRuns.some((r) => kw.test(r))) continue;
+    pushTo(attacker, k);
+    pushTo(defender, k);
+  }
+  // The restriction idiom "…is a MAGUS, PRIMUS, or ACOLYTE ICONWARD, that model has…" (round-3
+  // review, Xenocreed Congregation): the alternative list names the TIGHTEST subject description,
+  // so it REPLACES the clause's broader subject scope (each named class implies the broader noun).
+  const restr = t.match(new RegExp(`\\bis\\s+(?:a|an)\\s+(${RUN_SRC})\\s*,\\s*(?:that|this)\\s+(?:model|unit)\\b`));
+  if (restr) {
+    const phrases = splitRunPhrases(restr[1]);
+    if (phrases.length) {
+      attacker.length = 0;
+      defender.length = 0;
+      for (const p of phrases) {
+        attacker.push(p);
+        defender.push(p);
+      }
+    }
+  }
+  // "excluding"/"except" carve-outs: a kept phrase literally named in the span is removed (the
+  // pre-2026-07-14 behaviour), AND the span's own keyword runs are returned as `excl` — the effect
+  // carries them as scopeExcl, so "WORLD EATERS CHARACTER units (excluding EPIC HERO units)" never
+  // buffs an Epic Hero (engine effectAppliesToUnit checks exclusions before scope).
+  const exclSpan = t.match(/\b(?:excluding|except)\b([^.)]*)/i);
+  let excl = [];
+  if (exclSpan) {
+    const runRe = new RegExp(`(${RUN_SRC})`, 'g');
+    let rm;
+    while ((rm = runRe.exec(exclSpan[1]))) excl.push(...splitRunPhrases(rm[1]));
+    excl = [...new Set(excl)].filter((p) => !/^(?:UNITS?|MODELS?)$/.test(p));
+    const drop = (p) => new RegExp(`\\b${p.replace(/[-/+*?^$()[\]{}|\\]/g, '\\$&')}\\b`, 'i').test(exclSpan[1]);
+    return { attacker: attacker.filter((p) => !drop(p)), defender: defender.filter((p) => !drop(p)), excl };
+  }
+  return { attacker, defender, excl };
 }
 
 // Army-COMPOSITION conditional: a clause gated on which detachment you run or which keywords/
@@ -169,10 +353,15 @@ const ARMY_COMP_CONDITIONAL = /\bif (?:you are using\b|your army (?:includes|doe
 
 // Split a rule into clauses on sentence ends / bullets / "In addition,". Each clause is mapped
 // independently so phase, condition and scope from ONE clause don't bleed into another.
+// The ", and each time …" joiner also splits (2026-07-14): GW chains an unconditional grant and a
+// separately-gated modifier in ONE sentence ("…have the [ASSAULT] ability, and each time an attack
+// made with such a weapon targets a unit within 6\", add 1 to the Strength…" — Bringers of Flame),
+// and a single condition read would wrongly gate the grant too.
 function splitClauses(text) {
   return String(text || '')
     .replace(/■/g, '.')
     .replace(/\b(?:in addition|additionally|furthermore),/gi, '. ')
+    .replace(/,\s*and (each time)\b/gi, '. $1')
     .split(/[.;]+/)
     .map((c) => c.trim())
     .filter(Boolean);
@@ -217,6 +406,50 @@ const MOD_PATTERNS = [
   {
     re: new RegExp(`adds? ${NUM} to (?:the )?hit rolls?`, 'i'),
     build: (m) => ({ side: 'attacker', mod: { hitModifier: numFrom(m[1]) }, summary: `+${numFrom(m[1])} to Hit` }),
+  },
+  // "have +N to (the) hit roll(s)" — the sign form the live 11e catalogues use alongside "add N"
+  // (Dominus Foebreakers "have +1 to hit rolls", Bastions of Tyranny "+1 to the hit roll").
+  {
+    re: /\+(\d+) to (?:the |their )?hit rolls?/i,
+    build: (m) => ({ side: 'attacker', mod: { hitModifier: parseInt(m[1], 10) }, summary: `+${m[1]} to Hit` }),
+  },
+  // "have +N to (the) wound roll(s)" (Grey Knights Paladin "+1 to wound rolls")
+  {
+    re: /\+(\d+) to (?:the |their )?wound rolls?/i,
+    build: (m) => ({ side: 'attacker', mod: { woundModifier: parseInt(m[1], 10) }, summary: `+${m[1]} to Wound` }),
+  },
+  // "+N S" / "+N AP" — the terse characteristic shorthand ("that unit's ranged attacks have +1 S",
+  // World Eaters "+1 AP"). \b keeps "+1 SV" and prose "+2\" M" out.
+  {
+    re: /\+(\d+)\s+S\b(?!V)/,
+    build: (m) => ({ side: 'attacker', mod: { strengthBonus: parseInt(m[1], 10) }, summary: `+${m[1]} Strength` }),
+  },
+  {
+    re: /\+(\d+)\s+AP\b/,
+    build: (m) => ({ side: 'attacker', mod: { apBonus: parseInt(m[1], 10) }, summary: `+${m[1]} AP` }),
+  },
+  // "+N BS / WS / BS and WS" — a to-hit characteristic improvement; the BS/WS token pins the phase
+  // (Adepta Sororitas "attacks have +1 BS and WS", Thousand Sons "+1 WS").
+  {
+    re: /\+(\d+)\s+(BS and WS|WS and BS|BS|WS)\b/,
+    build: (m) => ({
+      side: 'attacker',
+      mod: { hitModifier: parseInt(m[1], 10) },
+      summary: `+${m[1]} ${m[2]}`,
+      phase: m[2] === 'BS' ? 'shooting' : m[2] === 'WS' ? 'fight' : undefined,
+    }),
+  },
+  // "improve the Strength characteristic ... by N" (T'au Battlesuit ranged-attack buffs) — the
+  // Strength twin of the AP improve pattern above.
+  {
+    re: new RegExp(`improves? (?:the )?strength characteristic[^.]*?by ${NUM}`, 'i'),
+    build: (m) => ({ side: 'attacker', mod: { strengthBonus: numFrom(m[1]) }, summary: `+${numFrom(m[1])} Strength` }),
+  },
+  // "N+ InSv" — the catalogues' invulnerable-save shorthand (AdMech "4+ InSv", Tyranid Warriors
+  // "5+ InSv").
+  {
+    re: /(\d)\+\s*InSv\b/i,
+    build: (m) => ({ side: 'defender', mod: { invuln: parseInt(m[1], 10) }, summary: `${m[1]}+ Invuln` }),
   },
   // -N to Hit rolls. Defender when the penalty is to attacks made AGAINST / TARGETING this unit —
   // the qualifier often PRECEDES "hit rolls" ("each time a melee attack targets this unit, subtract
@@ -312,20 +545,48 @@ function grantKeywordMods(t) {
   return out;
 }
 
-// Map ONE clause into effects. phase/condition/scope are read from this clause only, so they
-// never bleed across a rule's clauses (the lesson from the real files: a rule's second sentence
-// has a different phase/scope than its first). Returns the effects this clause produced.
-function mapClause(clause, { name, source, nameCondition }) {
+// Map ONE clause into effects. phase/condition are read from this clause only, so they never
+// bleed across a rule's clauses (the lesson from the real files: a rule's second sentence has a
+// different phase/scope than its first). SCOPE INHERITANCE (2026-07-14, review finding): GW's
+// dominant idiom puts the subject in one sentence and the modifiers in continuation clauses that
+// only say "this unit"/"such a unit"/a bare bullet ("Friendly X PSYKER units have that ability…
+// ▪ Re-roll hit rolls of 1"), so a clause that extracts NO subject of its own INHERITS the last
+// subject-bearing clause's scope (`inherited`) — without it those modifiers went army-wide, a
+// silent over-apply. A clause with its own subject replaces the inheritance. The narrow
+// "such/that weapon" anaphor also inherits the subject clause's PHASE (the weapon type was named
+// there — "Ranged weapons … have [ASSAULT], and each time an attack made with such a weapon…").
+// Returns { effects, matched, ownScope, ownPhase } so the caller can track the inheritance.
+function mapClause(clause, { name, source, nameCondition, inherited = null }) {
   // Drop a clause gated on state the sim can't represent (a degrading "Damaged:" bracket / a range
   // aura) BEFORE matching a modifier, so a healthy unit never inherits its last-bracket penalty and
   // a bearer never self-applies a within-N" aura meant for friends. Under-apply, never over-apply.
-  if (DEGRADING_RE.test(clause) || AURA_RE.test(clause)) return { effects: [], matched: [] };
+  // EXCEPTION (2026-07-14): "…attacks that target a unit within N\"" is a TARGET-RANGE gate on the
+  // attack, not an aura — detectCondition reads it as targetCondition (off by default), so keeping
+  // the clause never over-applies (the Hernkyn / Bringers of Flame / T'au Battlesuit shapes).
+  const targetRange = /\btargets?\s+(?:a|an|one)\s+unit\s+within\b/i.test(clause);
+  if (DEGRADING_RE.test(clause) || (AURA_RE.test(clause) && !targetRange)) return { effects: [], matched: [] };
 
   const effects = [];
   const matched = [];
-  const phase = detectPhase(clause);
+  const ownPhase = detectPhase(clause);
+  // "such/that weapon" refers to a weapon typed in the subject clause — inherit its phase.
+  const phase =
+    ownPhase === 'any' && inherited?.phase && inherited.phase !== 'any' && /\b(?:such|that) (?:a )?weapons?\b/i.test(clause)
+      ? inherited.phase
+      : ownPhase;
   const condition = detectCondition(clause) || nameCondition || null;
-  const scope = detectScope(clause);
+  const ownScope = detectScope(clause);
+  const hasOwnScope = ownScope.attacker.length > 0 || ownScope.defender.length > 0;
+  // A subject-less clause inherits the carried scope; its OWN exclusions still union in (a
+  // continuation can add a carve-out without restating the subject).
+  const scope =
+    hasOwnScope || !inherited?.scope
+      ? ownScope
+      : {
+          attacker: inherited.scope.attacker,
+          defender: inherited.scope.defender,
+          excl: [...new Set([...(inherited.scope.excl || []), ...(ownScope.excl || [])])],
+        };
   // A clause that is conditionally TRIGGERED but whose gate we couldn't resolve into a known
   // condition: an always-on effect from it is probably a mis-read (the buff is really conditional),
   // so it is flagged `_suspect` and the ability-capture routes it to review rather than auto-applying.
@@ -341,9 +602,11 @@ function mapClause(clause, { name, source, nameCondition }) {
       // across the live catalogues: Storm Speeder "select one enemy unit", "after this model has
       // shot", "in your Shooting phase", "roll one D6"). Route to review rather than auto-apply.
       /\bselect\s+(?:one|a|an)\b|\bafter\s+(?:it|this\s+(?:unit|model))\s+(?:has|shoots|shot)\b|\bin\s+your\s+(?:command|movement|shooting|charge|fight)\s+phase\b|\broll\s+(?:one|a)\s+d(?:ice|6)\b/i.test(clause));
-  const add = (side, mod, summary) => {
-    const eff = { name, side, phase, condition, mods: mod };
-    if (scope.length) eff.scope = scope;
+  const add = (side, mod, summary, phaseOverride) => {
+    const eff = { name, side, phase: phaseOverride || phase, condition, mods: mod };
+    const sideScope = side === 'defender' ? scope.defender : scope.attacker;
+    if (sideScope.length) eff.scope = sideScope;
+    if (scope.excl?.length) eff.scopeExcl = scope.excl;
     if (source) eff.source = source;
     if (suspect) eff._suspect = true;
     effects.push(eff);
@@ -353,12 +616,12 @@ function mapClause(clause, { name, source, nameCondition }) {
     const m = clause.match(p.re);
     if (m) {
       const r = p.build(m, clause);
-      if (r && r.mod) add(r.side, r.mod, r.summary);
+      if (r && r.mod) add(r.side, r.mod, r.summary, r.phase);
     }
   }
   for (const g of grantKeywordMods(clause)) add(g.side, g.mod, g.summary);
   for (const r of rerollMods(clause)) add(r.side, r.mod, r.summary);
-  return { effects, matched };
+  return { effects, matched, ownScope: hasOwnScope ? ownScope : null, ownPhase };
 }
 
 /**
@@ -386,10 +649,29 @@ export function mapRuleText(text, { name = 'Rule', source } = {}) {
 
   const effects = [];
   const matched = [];
+  // Scope inheritance across clauses (see mapClause): a subject-bearing clause establishes the
+  // carry; a subject-less continuation clause inherits it; the next subject replaces it.
+  let carry = null;
   for (const clause of splitClauses(mapText)) {
-    const r = mapClause(clause, { name, source, nameCondition });
+    const r = mapClause(clause, { name, source, nameCondition, inherited: carry });
     effects.push(...r.effects);
     matched.push(...r.matched);
+    if (r.ownScope) carry = { scope: r.ownScope, phase: r.ownPhase };
+  }
+
+  // Rule-internal keyword grants (round-3 review): a scope naming a keyword this rule itself
+  // CONFERS ("Soul Forge", "CONTAGION ENGINE") can never match a real datasheet — union the
+  // granting classes into it so the effect lands on the units the rule means.
+  const aliases = keywordAliases(mapText);
+  if (aliases.size) {
+    for (const e of effects) {
+      if (!e.scope) continue;
+      const expanded = [...e.scope];
+      for (const s of e.scope) for (const extra of aliases.get(String(s).toUpperCase()) || []) {
+        if (!expanded.includes(extra)) expanded.push(extra);
+      }
+      e.scope = expanded;
+    }
   }
 
   // Ability-LEVEL gates: a "once per battle" or "while the Waaagh! is active" marker ANYWHERE in the
@@ -466,13 +748,20 @@ export function captureUnitAbilities(items = []) {
     if (!text || !String(text).trim()) continue;
     const r = mapRuleText(text, { name: item.name });
     if (!r.effects.length) continue; // not-simulatable / no combat clause
+    // The ABILITY'S OWN VERBATIM TEXT (B7): the mapper reduces the prose to a small modelled mod
+    // ("+2 Attacks"), dropping the weapon scope / target restriction it can't express, so the modelled
+    // mod alone reads misleadingly. Carry the cleaned source text onto each emitted effect so the
+    // datasheet renderer can show the full wording PRIMARY and demote the modelled mod to a "sim
+    // applies" secondary chip. Additive: resolveEffects ignores unknown keys, so the sim is unaffected.
+    const abilityText = cleanRuleText(text);
     // A pure statline-save note is already read onto the unit's INV/FNP, so capturing it as an ability
     // would double-represent it. A model-specific invuln-save profile can ALSO carry a save RE-ROLL
     // rider — the BSData "Invulnerable Save (2+*) [Makari]" shape (Makari's own 2+ invuln, NOT the
     // whole Ghazghkull unit's) mapped to {invuln:2}+{saveReroll:all} and slipped through as a unit-wide
-    // defender buff (over-tanky). Drop it too: when EVERY effect is a no-condition defensive save key
-    // (invuln/fnp/saveReroll) AND at least one is an invuln/fnp, it is a save-characteristic note, not
-    // a combat aura. A STANDALONE save-reroll aura (no invuln/fnp) is NOT dropped — a genuine buff.
+    // defender buff (S40 F1, over-tanky). Drop it too: when EVERY effect is a no-condition defensive
+    // save key (invuln/fnp/saveReroll) AND at least one is an invuln/fnp, it is a save-characteristic
+    // note, not a combat aura. A STANDALONE save-reroll aura (no invuln/fnp) is NOT dropped — that is a
+    // genuine defensive buff the player may want.
     const defensiveSaveKeys = (e) => {
       const keys = Object.keys(e.mods || {});
       return e.side === 'defender' && !e.condition && keys.length > 0 && keys.every((k) => k === 'invuln' || k === 'fnp' || k === 'saveReroll');
@@ -514,10 +803,61 @@ export function captureUnitAbilities(items = []) {
         m.reroll?.hit === 'ones' ||
         m.reroll?.wound === 'ones';
       const apply = conditioned || (safeAlwaysOn && !negAtk && !isChoice && !_suspect);
-      out.push(apply ? { ...clean, source: 'ability' } : { ...clean, source: 'ability', captured: true });
+      const base = { ...clean, source: 'ability', text: abilityText };
+      out.push(apply ? base : { ...base, captured: true });
     }
   }
   return out;
+}
+
+// ---- the DISPLAY set of a unit's datasheet abilities -----------------------
+// captureUnitAbilities (above) deliberately DROPS every ability the damage sim can't express — a
+// psyker's powers, a movement/aura rule, most core abilities — because the engine has nothing to do
+// with them. But the datasheet is a REFERENCE, not the sim input: a card like Chief Librarian
+// Mephiston is almost all non-combat abilities, so filtering to the simulatable ones leaves it blank.
+// This keeps the FULL ability list ({ name, text }) for the on-device datasheet renderer, so every
+// ability shows even when the sim ignores it. It drops only:
+//   - the bare statline-save encodings ("Invulnerable Save 4+", "Feel No Pain 5+") — those values are
+//     already read onto the unit's INV/FNP and shown as statline chips, so re-listing them is noise
+//     (a CONDITIONAL invuln, whose text is real prose rather than a bare value, is KEPT — the player
+//     needs to know its condition since it isn't on the statline);
+//   - genuinely empty entries.
+// Pure; input (datasheet) order preserved; duplicates (same name+text) collapsed.
+const BARE_SAVE_VALUE_RE = /^[\d+*\s.,()x—-]*$/i;
+export function datasheetAbilitiesFrom(items = []) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items || []) {
+    const name = String(item?.name || '').trim();
+    const text = cleanRuleText(item?.text);
+    if (!name && !text) continue;
+    // Skip the statline-save encodings (bare value only, incl. "N/A") — already on the INV/FNP chips.
+    if (/^(?:invulnerable\s+save|feel\s+no\s+pain)\b/i.test(name) && (!text || BARE_SAVE_VALUE_RE.test(text) || /^n\/?a$/i.test(text))) continue;
+    const key = `${name}::${text}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text ? { name, text } : { name });
+  }
+  return out;
+}
+
+// A datasheet enhancement can be restricted to a unit KEYWORD ("Terminator model only", "Jump Pack
+// models only") — GW enforces it (and New Recruit honours it), but the Forge was offering an enhancement
+// to ANY non-Epic character. Extract that keyword from the enhancement text so the offer can be filtered
+// to eligible units. Gated to a known set of model-type restriction keywords, so a stray "this model
+// only" phrase can never hide an enhancement from everyone: an unrecognised phrase → no restriction
+// (safe failure = over-offer, never wrongly hide). The `.` breaks the character class, so a restriction
+// clause never spans a sentence boundary. Returns an UPPERCASE keyword, or null. Pure — exported for tests.
+const ENH_RESTRICT_KEYWORDS = new Set([
+  'TERMINATOR', 'GRAVIS', 'PHOBOS', 'TACTICUS', 'JUMP PACK', 'BIKER', 'BIKE', 'MOUNTED', 'CAVALRY',
+  'JETBIKE', 'INFANTRY', 'MONSTER', 'VEHICLE', 'WALKER', 'BEAST', 'SWARM', 'TITANIC', 'PSYKER', 'CHARACTER',
+]);
+export function enhancementRestriction(enh) {
+  const text = String(enh?.description || enh?.text || '').toUpperCase();
+  const m = text.match(/\b([A-Z][A-Z' -]{2,30}?)\s+MODELS?\s+ONLY\b/);
+  if (!m) return null;
+  const kw = m[1].trim();
+  return ENH_RESTRICT_KEYWORDS.has(kw) ? kw : null;
 }
 
 // ---- plan a whole roster's extracted rules ---------------------------------
@@ -565,8 +905,8 @@ export function planHasRules(plan) {
 // Attacks, missing Strength) and cannot express a unit Save/Wounds/Toughness change at all. Weapon
 // buffs map to the attacker mods (phase by weapon class — melee→fight, ranged→shooting); unit buffs
 // to the defender's saveSet / woundBonus / toughBonus (engine/effects.js, applied to the bearer). A
-// weapon BS/WS increment maps to hitModifier (a better skill = +1 to hit); a `set` on a weapon stat
-// has no effects-layer bonus equivalent and is skipped (no real 10e enhancement uses one).
+// weapon BS/WS increment maps to hitModifier (a better skill = +1 to hit, item 5d); a `set` on a
+// weapon stat has no effects-layer bonus equivalent and is skipped (no real 10e enhancement uses one).
 // Pure. Exported for tests.
 export function modsToEffects(mods, name = 'Enhancement') {
   const out = [];
@@ -579,9 +919,10 @@ export function modsToEffects(mods, name = 'Enhancement') {
         else if (m.stat === 'A') mod.attackBonus = m.delta;
         else if (m.stat === 'D') mod.damageBonus = m.delta;
         else if (m.stat === 'AP') mod.apBonus = -m.delta; // apBonus IMPROVES AP; a structured decrement (delta<0) is an improvement
-        // BS/WS → hitModifier: a better skill is a LOWER BS/WS number, so a decrement (delta<0) is a
-        // to-hit IMPROVEMENT → hitModifier = -delta (e.g. Orks "Master Meknologist" ranged BS -1 →
-        // +1 to hit). A weapon-stat `set` has no effects-layer equivalent, so it stays unmapped.
+        // BS/WS → the engine's hitModifier (S47 item 5d). A better skill is a LOWER BS/WS number, so a
+        // decrement (delta<0) is a to-hit IMPROVEMENT → hitModifier = -delta (e.g. Orks "Master
+        // Meknologist" ranged BS -1 → +1 to hit). The one real BS/WS enhancement in 10e data; a
+        // weapon-stat `set` has none, so it stays unmapped (no effects-layer equivalent).
         else if (m.stat === 'BS' || m.stat === 'WS') mod.hitModifier = -m.delta;
       }
       if (Object.keys(mod).length) {
@@ -624,7 +965,7 @@ function structuredCoveredKeys(mods) {
     else if (m.stat === 'A') add('attackBonus', phase);
     else if (m.stat === 'D') add('damageBonus', phase);
     else if (m.stat === 'AP') add('apBonus', phase);
-    else if (m.stat === 'BS' || m.stat === 'WS') add('hitModifier', phase); // structured BS/WS → hitModifier
+    else if (m.stat === 'BS' || m.stat === 'WS') add('hitModifier', phase); // structured BS/WS → hitModifier (item 5d)
   }
   return map;
 }
@@ -674,20 +1015,36 @@ export function planPackRules(raw = {}) {
       ? { name: entry.name || 'Rule', text: cleanRuleText(entry.text), ...mapRuleText(entry.text, { name: entry.name, source }) }
       : null;
 
-  // An enhancement may carry a points cost (from a catalogue parse); preserve it on the planned entry
-  // (planOne maps only the text), additive + display-only downstream. It may ALSO carry STRUCTURED
-  // profile modifiers (Session 45) — a reliable source for the buffs the free-text mapper under-reads;
-  // fold them into the effects, de-duplicating the prose.
+  // An enhancement may carry a points cost (from a catalogue parse — bsdataRules); preserve it on the
+  // planned entry (planOne maps only the text), additive + display-only downstream. It may ALSO carry
+  // STRUCTURED profile modifiers (Session 45) — a reliable source for the buffs the free-text mapper
+  // under-reads; fold them into the effects, de-duplicating the prose.
   const planEnh = (e) => {
     let p = planOne(e, 'enhancement');
     if (!p) return null;
     if (e?.points != null) p = { ...p, points: e.points };
+    // The source catalogue entry id (bsdataRules) — kept so the linked .rosz export can write the
+    // enhancement selection; absent on PDF/AI-sourced packs (they resolve by name instead).
+    if (e?.bsId) p = { ...p, bsId: e.bsId };
     if (Array.isArray(e?.wargearMods) && e.wargearMods.length) p = applyStructuredMods(p, e.wargearMods);
     return p;
   };
   const detachments = (Array.isArray(raw.detachments) ? raw.detachments : []).map((d) => ({
     name: d?.name || 'Detachment',
+    // The catalogue's 11e construction metadata (bsdataRules) — carried through so importLibraryRules
+    // can store it on the registry detachment (the builder then auto-fills the DP cost, Force
+    // Disposition and exclusion tag instead of offering manual controls). Additive +
+    // display/legality-only; the text mapper below is unaffected. Absent on PDF/AI packs.
+    detachmentPoints: d?.detachmentPoints,
+    forceDisposition: d?.forceDisposition,
+    keywords: Array.isArray(d?.keywords) ? d.keywords : undefined,
     rule: planOne(d?.rule, 'detachment'),
+    // Referenced abilities (Against the Horde …) — DISPLAY-ONLY reference text, never simulatable
+    // (they are conditional + unit-scoped, so applying them army-wide would be wrong). Carried
+    // through so the builder shows them under the detachment rule (2026-07-11).
+    abilities: (Array.isArray(d?.abilities) ? d.abilities : [])
+      .filter((a) => a && (a.name || a.text))
+      .map((a) => ({ name: a.name || 'Ability', text: cleanRuleText(a.text), classification: 'not-simulatable', simulated: false, effects: [] })),
     stratagems: (Array.isArray(d?.stratagems) ? d.stratagems : []).map((s) => planOne(s, 'stratagem')).filter(Boolean),
     enhancements: (Array.isArray(d?.enhancements) ? d.enhancements : []).map(planEnh).filter(Boolean),
   }));

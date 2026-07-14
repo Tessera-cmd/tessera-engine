@@ -12,10 +12,55 @@ import {
   packHasRules,
   mergePackRules,
   captureUnitAbilities,
+  datasheetAbilitiesFrom,
+  enhancementRestriction,
   modsToEffects,
+  degradeInfo,
 } from './ruleText.js';
+import { effectAppliesToUnit } from '../engine/effects.js';
 
 const modsOf = (r, pred) => r.effects.filter(pred).map((e) => e.mods);
+
+describe('degradeInfo (F2.1 — 10e degrade ability, not a statline bracket)', () => {
+  // Real BSData ability text (SM Redemptor-style): name carries the "1-M" range, text repeats it.
+  it('parses the upper wound threshold from a real "Damaged: 1-M wounds remaining" ability', () => {
+    const abils = [
+      { name: 'Deadly Demise 1', text: 'Deadly Demise 1.' },
+      { name: 'Damaged: 1-10 wounds remaining', text: 'While this model has 1-10 wounds remaining, each time this model makes an attack, subtract 1 from the Hit roll.' },
+    ];
+    expect(degradeInfo(abils)).toEqual({
+      threshold: 10,
+      name: 'Damaged: 1-10 wounds remaining',
+      text: 'While this model has 1-10 wounds remaining, each time this model makes an attack, subtract 1 from the Hit roll.',
+    });
+  });
+
+  it('handles an Ork-style degrade that also drops OC (still the upper wound bound)', () => {
+    const abils = [{ name: 'Damaged: 1-8 wounds remaining', text: 'While this model has 1-8 wounds remaining, subtract 4 from this model’s Objective Control characteristic, and each time this model makes an attack, subtract 1 from the Hit roll.' }];
+    expect(degradeInfo(abils).threshold).toBe(8);
+  });
+
+  it('falls back to the ability TEXT for the threshold when the name lacks the range', () => {
+    expect(degradeInfo([{ name: 'Damaged', text: 'While this model has 1-6 wounds remaining, subtract 1 from the Hit roll.' }]).threshold).toBe(6);
+  });
+
+  it('flags a "Damaged" ability with no parseable range WITHOUT inventing a number', () => {
+    const info = degradeInfo([{ name: 'Damaged', text: 'This model is degraded while wounded.' }]);
+    expect(info).toBeTruthy();
+    expect(info.threshold).toBeNull();
+  });
+
+  it('returns null when there is no degrade ability', () => {
+    expect(degradeInfo([{ name: 'Feel No Pain 5+', text: 'Feel No Pain 5+' }, { name: 'Deadly Demise D3', text: '' }])).toBeNull();
+    expect(degradeInfo([])).toBeNull();
+    expect(degradeInfo(undefined)).toBeNull();
+  });
+
+  it('does NOT false-positive on a non-"Damaged" ability that merely mentions wounds remaining', () => {
+    // Under-detection is the safe direction — only the reliably-named "Damaged…" ability is flagged.
+    expect(degradeInfo([{ name: 'Reanimation Protocols', text: 'At the end of your turn each unit with 5-10 wounds remaining reanimates.' }])).toBeNull();
+  });
+});
 
 describe('cleanRuleText', () => {
   it('strips New Recruit ^^/** markup and collapses whitespace', () => {
@@ -213,9 +258,214 @@ describe('mapRuleText — model-type scope', () => {
     expect(r.effects[0].mods).toEqual({ hitModifier: 1 });
     expect(r.effects[0].scope).toEqual(['VEHICLE', 'MOUNTED']);
   });
-  it('does not scope a faction-umbrella rule (no model-type word)', () => {
+  it('scopes a faction-umbrella rule to the faction phrase (2026-07-14 — every own-faction unit carries the keyword, so it applies army-wide there, but never to an allied unit of another faction)', () => {
     const r = mapRuleText('each Adeptus Astartes unit adds 1 to the Strength characteristic of melee weapons', {});
+    expect(r.effects[0].scope).toEqual(['ADEPTUS ASTARTES']);
+    // Applies via the faction keyword AND the FACTION:-prefixed catalogue form...
+    expect(effectAppliesToUnit(r.effects[0], ['INFANTRY', 'ADEPTUS ASTARTES'])).toBe(true);
+    expect(effectAppliesToUnit(r.effects[0], ['INFANTRY', 'FACTION: ADEPTUS ASTARTES'])).toBe(true);
+    // ...and via the unit's faction NAME when no faction keyword is carried (preset/hand-entered)...
+    expect(effectAppliesToUnit(r.effects[0], ['INFANTRY'], 'Adeptus Astartes')).toBe(true);
+    // ...but never to an allied unit of another faction in the same list.
+    expect(effectAppliesToUnit(r.effects[0], ['VEHICLE', 'FACTION: IMPERIAL KNIGHTS'], 'Imperial Knights')).toBe(false);
+  });
+});
+
+describe('mapRuleText — keyword-phrase scope + the 2026-07-14 pattern batch (live 11e detachment-rule shapes)', () => {
+  it('Dominus Foebreakers (verbatim, curly apostrophe): +1 to hit, target-condition gated, DOMINUS-scoped', () => {
+    const r = mapRuleText(
+      'Friendly IMPERIAL KNIGHTS DOMINUS units’ attacks that target a unit in a terrain area have +1 to hit rolls.',
+      { name: 'Rain of Devastation' },
+    );
+    expect(r.classification).toBe('situational');
+    expect(r.effects).toHaveLength(1);
+    expect(r.effects[0].mods).toEqual({ hitModifier: 1 });
+    expect(r.effects[0].condition).toBe('targetCondition'); // "…a unit in a terrain area"
+    expect(r.effects[0].scope).toEqual(['IMPERIAL KNIGHTS DOMINUS']);
+  });
+
+  it('Throne-bonded Outriders (verbatim): the [IGNORES COVER] grant is ARMIGER-scoped, shooting-phase', () => {
+    const r = mapRuleText(
+      "While a friendly ARMIGER unit is affected by a Bondsman ability, that unit’s ranged attacks have [IGNORES COVER].",
+      { name: 'Driven From Their Lairs' },
+    );
+    const grant = r.effects.find((e) => (e.mods.grantKeywords || []).includes('IGNORES COVER'));
+    expect(grant).toBeTruthy();
+    expect(grant.phase).toBe('shooting');
+    expect(grant.scope).toEqual(['ARMIGER']);
+  });
+
+  it('an ENEMY-target phrase is a condition, never a scope on the acting unit', () => {
+    const r = mapRuleText('Each time a model in this unit makes an attack that targets a MONSTER or VEHICLE unit, add 1 to the Wound roll.', {});
+    expect(r.effects[0].mods).toEqual({ woundModifier: 1 });
+    expect(r.effects[0].condition).toBe('targetCondition');
+    expect(r.effects[0].scope).toBeUndefined(); // MONSTER/VEHICLE describe the TARGET, not the attacker
+  });
+
+  it('a FRIENDLY-target phrase scopes the defender (Green Tide): the BOYZ invuln lands only on BOYZ', () => {
+    const r = mapRuleText('Each time an attack targets a BOYZ unit from your army, models in that unit have a 6+ invulnerable save against that attack.', { name: 'Green Tide' });
+    const inv = r.effects.find((e) => e.mods.invuln === 6);
+    expect(inv.side).toBe('defender');
+    expect(inv.scope).toEqual(['BOYZ']);
+    expect(effectAppliesToUnit(inv, ['INFANTRY', 'BOYZ', 'FACTION: ORKS'])).toBe(true);
+    expect(effectAppliesToUnit(inv, ['INFANTRY', 'FACTION: ORKS'], 'Orks')).toBe(false); // Gretchin etc.
+  });
+
+  it('a "X model is leading this unit" phrase is a leader gate, not a scope (Awakened Dynasty stays army-wide)', () => {
+    const r = mapRuleText('While a NECRONS CHARACTER model is leading this unit, each time a model in this unit makes an attack, add 1 to the Hit roll.', {});
+    expect(r.effects[0].mods).toEqual({ hitModifier: 1 });
     expect(r.effects[0].scope).toBeUndefined();
+  });
+
+  it('an excluding-span phrase is dropped from scope, the subject phrase kept, and the carve-out is carried as scopeExcl', () => {
+    const r = mapRuleText('Each time a Heretic Astartes model from your army (excluding Damned models) makes an attack, re-roll a Hit roll of 1.', {});
+    const rr = r.effects.find((e) => e.mods.reroll?.hit === 'ones');
+    expect(rr.scope).toEqual(['HERETIC ASTARTES']);
+    expect(rr.scopeExcl).toEqual(['DAMNED']);
+    expect(effectAppliesToUnit(rr, ['INFANTRY', 'FACTION: HERETIC ASTARTES'])).toBe(true);
+    expect(effectAppliesToUnit(rr, ['INFANTRY', 'FACTION: HERETIC ASTARTES', 'DAMNED'])).toBe(false); // carved out
+  });
+
+  it('an excluded SUBTYPE of a kept phrase never receives the buff (Vessels of Wrath — Angron is an EPIC HERO)', () => {
+    const r = mapRuleText(
+      "When a friendly WORLD EATERS CHARACTER unit (excluding EPIC HERO units) is selected to fight, that unit's CHARACTER models' melee attacks can have: - [CLEAVE 1]. - Or: +1 AP.",
+      { name: 'Vessels of Wrath' },
+    );
+    const ap = r.effects.find((e) => e.mods.apBonus === 1);
+    expect(ap.scopeExcl).toEqual(['EPIC HERO']);
+    // A normal World Eaters character gets it; Angron (EPIC HERO) never does.
+    expect(effectAppliesToUnit(ap, ['INFANTRY', 'CHARACTER', 'FACTION: WORLD EATERS'])).toBe(true);
+    expect(effectAppliesToUnit(ap, ['MONSTER', 'CHARACTER', 'EPIC HERO', 'FACTION: WORLD EATERS'])).toBe(false);
+  });
+
+  it('the restriction idiom "is a A, B, or C, that model…" REPLACES the broader subject scope (Xenocreed Congregation)', () => {
+    const r = mapRuleText(
+      'If that CHARACTER model is a MAGUS, PRIMUS, or ACOLYTE ICONWARD, that model has the Feel No Pain 3+ ability while leading that unit.',
+      { name: 'Xenocreed Congregation' },
+    );
+    const fnp = r.effects.find((e) => e.mods.fnp === 3);
+    expect(fnp.scope).toEqual(['MAGUS', 'PRIMUS', 'ACOLYTE ICONWARD']);
+    expect(effectAppliesToUnit(fnp, ['CHARACTER', 'PSYKER', 'MAGUS', 'FACTION: GENESTEALER CULTS'])).toBe(true);
+    expect(effectAppliesToUnit(fnp, ['CHARACTER', 'PATRIARCH', 'FACTION: GENESTEALER CULTS'])).toBe(false); // not one of the three
+  });
+
+  it('lowercase name joiners stay inside a phrase ("Ûthar the Destined"), lists split on or/commas', () => {
+    const r = mapRuleText('Kâhl, Einhyr Hearthguard or Ûthar the Destined units’ attacks have +1 to wound rolls.', {});
+    expect(r.effects[0].mods).toEqual({ woundModifier: 1 });
+    expect(r.effects[0].scope).toEqual(['KÂHL', 'EINHYR HEARTHGUARD', 'ÛTHAR THE DESTINED']);
+  });
+
+  it('the Unicode non-breaking hyphen no longer hides re‑rolls (live 11e phrasing)', () => {
+    const r = mapRuleText('Each time an Adeptus Astartes model from your army makes an attack, re‑roll a Hit roll of 1 and re‑roll a Wound roll of 1.', {});
+    expect(r.effects.find((e) => e.mods.reroll?.hit === 'ones')).toBeTruthy();
+    expect(r.effects.find((e) => e.mods.reroll?.wound === 'ones')).toBeTruthy();
+  });
+
+  it('"N+ InSv" maps to an invulnerable save; "+N BS and WS" / "+N WS" map to phase-pinned hit modifiers; "+N S" to Strength', () => {
+    expect(mapRuleText('Friendly TECH-PRIEST models have: - 4+ InSv.', {}).effects.find((e) => e.mods.invuln === 4)).toBeTruthy();
+    const bsws = mapRuleText('Friendly CELESTIAN SACRESANTS units’ attacks have +1 BS and WS.', {}).effects[0];
+    expect(bsws.mods).toEqual({ hitModifier: 1 });
+    expect(bsws.phase).toBe('any');
+    const ws = mapRuleText('that unit’s melee attacks have +1 WS.', {}).effects[0];
+    expect(ws.mods).toEqual({ hitModifier: 1 });
+    expect(ws.phase).toBe('fight');
+    const s = mapRuleText('that unit’s attacks have +1 S until the end of the turn.', {}).effects[0];
+    expect(s.mods).toEqual({ strengthBonus: 1 });
+  });
+
+  it('a subject-less continuation clause INHERITS the subject scope (Librarius Conclave bullet shape) — review finding 2026-07-14', () => {
+    const r = mapRuleText(
+      'At the start of the battle round, select one of the following Psychic Disciplines abilities. Friendly Adeptus Astartes Psyker units have that ability until the end of the battle round. ▪ Divination Discipline: This unit’s attacks can: ▫ Re‑roll hit rolls of 1.',
+      { name: 'Librarius Conclave' },
+    );
+    const rr = r.effects.find((e) => e.mods.reroll?.hit === 'ones');
+    expect(rr.scope).toEqual(['ADEPTUS ASTARTES PSYKER']); // inherited — was army-wide (over-apply)
+  });
+
+  it('a "such a unit" continuation inherits scope (Biosanctic Broodsurge); a new subject REPLACES the carry', () => {
+    const r = mapRuleText(
+      'Add 1 to Charge rolls made for Aberrants, Biophagus and Purestrain Genestealers units from your army. In addition, each time such a unit is selected to fight, if it made a Charge move this turn, until the end of the phase, add 1 to the Attacks characteristic of melee weapons equipped by the models in that unit.',
+      { name: 'Biosanctic Broodsurge' },
+    );
+    const atk = r.effects.find((e) => e.mods.attackBonus === 1);
+    expect(atk.scope).toEqual(['ABERRANTS', 'BIOPHAGUS', 'PURESTRAIN GENESTEALERS']);
+    // A later clause with its OWN subject does not inherit the earlier one.
+    const r2 = mapRuleText('DOMINUS units gain [LANCE]. VEHICLE models add 1 to the wound rolls.', {});
+    const wound = r2.effects.find((e) => e.mods.woundModifier);
+    expect(wound.scope).toEqual(['VEHICLE']);
+  });
+
+  it('the ", and each time…" joiner splits: the grant stays unconditional, the range-gated modifier is conditioned, and "such a weapon" inherits the phase (Bringers of Flame)', () => {
+    const r = mapRuleText(
+      'Ranged weapons equipped by ADEPTA SORORITAS models from your army have the [ASSAULT] ability, and each time an attack made with such a weapon targets a unit within 6", add 1 to the Strength characteristic of that attack.',
+      { name: 'Bringers of Flame' },
+    );
+    const grant = r.effects.find((e) => (e.mods.grantKeywords || []).includes('ASSAULT'));
+    const str = r.effects.find((e) => e.mods.strengthBonus === 1);
+    expect(grant.condition).toBeNull(); // the ASSAULT grant is NOT gated on the range condition
+    expect(grant.phase).toBe('shooting');
+    expect(str.condition).toBe('targetCondition');
+    expect(str.phase).toBe('shooting'); // "such a weapon" refers to the ranged weapons named before
+    expect(str.scope).toEqual(['ADEPTA SORORITAS']); // inherited subject
+  });
+
+  it('"targets ONE OR MORE X units from your army" is a FRIENDLY TARGET, never a subject — an enemy-attack continuation must not inherit it backwards (Blessed Visages, round-2 review)', () => {
+    const r = mapRuleText(
+      'Each time an enemy unit declares a charge that targets one or more Genestealer Cults units from your army, that enemy unit must take a Leadership test. If failed, until the end of the turn, each time a model in that enemy unit makes an attack, subtract 1 from the Hit roll.',
+      { name: 'Blessed Visages' },
+    );
+    const pen = r.effects.find((e) => e.mods.hitModifier === -1);
+    expect(pen).toBeTruthy();
+    // The -1 is (pre-existing mis-side aside) an ATTACKER-side effect — it must NOT carry the
+    // player's own GENESTEALER CULTS as scope: that would penalise the player's own units.
+    expect(pen.scope).toBeUndefined();
+  });
+
+  it('an ally-proximity condition ("within Engagement Range of one or more other X units") never joins the subject scope (Saga of the Hunter, round-2 review)', () => {
+    const r = mapRuleText(
+      'Each time a model in a Space Wolves unit from your army makes a melee attack that targets an enemy unit, if that enemy unit is within Engagement Range of one or more other Adeptus Astartes units from your army, or if the attacking unit contains more models than that enemy unit. ■ Add 1 to the Hit roll.',
+      { name: "Pack's Quarry" },
+    );
+    const hit = r.effects.find((e) => e.mods.hitModifier === 1);
+    expect(hit.scope).toEqual(['SPACE WOLVES']); // inherited subject — NOT widened to Adeptus Astartes
+  });
+
+  it('a rule-internal keyword grant is UNIONED into a scope naming it (Cult of the Arkifane "Soul Forge", round-3 review) — the effect must reach the granting classes', () => {
+    const r = mapRuleText(
+      'Heretic Astartes Vehicle units from your army gain the Daemon keyword. Heretic Astartes Vehicle, Lord Discordant and Vashtorr the Arkifane units from your army gain the Soul Forge keyword. Soul Forge units from your army have a 5+ invulnerable save.',
+      { name: 'Cult of the Arkifane' },
+    );
+    const inv = r.effects.find((e) => e.mods.invuln === 5);
+    expect(inv.scope).toContain('SOUL FORGE');
+    expect(inv.scope).toContain('HERETIC ASTARTES VEHICLE');
+    expect(inv.scope).toContain('LORD DISCORDANT');
+    expect(inv.scope).toContain('VASHTORR THE ARKIFANE');
+    // A real CSM vehicle (FACTION: keyword + VEHICLE) gets the invuln; infantry does not.
+    expect(effectAppliesToUnit(inv, ['VEHICLE', 'FACTION: HERETIC ASTARTES', 'DAEMON ENGINE'])).toBe(true);
+    expect(effectAppliesToUnit(inv, ['INFANTRY', 'FACTION: HERETIC ASTARTES'], 'Chaos Space Marines')).toBe(false);
+  });
+
+  it('the bare all-caps grant form aliases too (Contagion Engines "units have CONTAGION ENGINE")', () => {
+    const r = mapRuleText(
+      "Friendly FOETID BLOAT-DRONE/HELBRUTE/MYPHITIC BLIGHT-HAULER units have CONTAGION ENGINE. - Friendly CONTAGION ENGINE units’ ranged attacks have [ASSAULT].",
+      { name: 'Contagion Engines' },
+    );
+    const grant = r.effects.find((e) => (e.mods.grantKeywords || []).includes('ASSAULT'));
+    expect(grant.scope).toContain('CONTAGION ENGINE');
+    expect(grant.scope).toContain('HELBRUTE');
+    expect(effectAppliesToUnit(grant, ['VEHICLE', 'HELBRUTE', 'FACTION: DEATH GUARD'])).toBe(true);
+    expect(effectAppliesToUnit(grant, ['INFANTRY', 'PLAGUE MARINES', 'FACTION: DEATH GUARD'], 'Death Guard')).toBe(false);
+  });
+
+  it('a target-range gate ("targets a unit within 12\\"") is a condition, not an aura drop (Hernkyn shape)', () => {
+    const r = mapRuleText('Friendly HERNKYN units’ ranged attacks that target a unit within 12" have +1 to hit rolls.', {});
+    expect(r.effects).toHaveLength(1);
+    expect(r.effects[0].mods).toEqual({ hitModifier: 1 });
+    expect(r.effects[0].condition).toBe('targetCondition');
+    expect(r.effects[0].scope).toEqual(['HERNKYN']);
+    // …while a genuine friendly-radius aura is still dropped, never captured as always-on.
+    const aura = mapRuleText('While a friendly ARMIGER unit is within 6" of this model, that unit’s attacks have +1 to hit rolls.', {});
+    expect(aura.effects).toHaveLength(0);
   });
 });
 
@@ -335,11 +585,13 @@ describe('structured wargear modifiers — modsToEffects (Session 45)', () => {
   it('a `set` weapon stat has no bonus equivalent → skipped (no real 10e enhancement uses one)', () => {
     expect(modsToEffects([{ target: 'melee', op: 'set', stat: 'S', value: 8 }])).toEqual([]);
   });
-  it('a weapon BS/WS increment → hitModifier: a better skill is +1 to hit', () => {
-    // Orks "Master Meknologist": ranged BS -1 → +1 to hit (shooting). delta signed (decrement = improve).
+  it('a weapon BS/WS increment → hitModifier (item 5d): a better skill is +1 to hit', () => {
+    // Orks "Master Meknologist" (the one real 10e case): ranged BS -1 → +1 to hit in the shooting phase.
+    // The structured delta is signed for the characteristic (decrement = improvement), so hit = -delta.
     expect(modsToEffects([{ target: 'ranged', op: 'add', stat: 'BS', delta: -1 }], 'Master Meknologist')).toEqual([
       { name: 'Master Meknologist', side: 'attacker', phase: 'shooting', condition: null, mods: { hitModifier: 1 }, source: 'enhancement' },
     ]);
+    // a melee WS improvement → fight-phase +1 to hit
     expect(modsToEffects([{ target: 'melee', op: 'add', stat: 'WS', delta: -1 }])).toEqual([
       { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { hitModifier: 1 }, source: 'enhancement' },
     ]);
@@ -347,6 +599,9 @@ describe('structured wargear modifiers — modsToEffects (Session 45)', () => {
 });
 
 describe('structured wargear modifiers — planEnh de-dup (Session 45)', () => {
+  // The prose mapper under-reads "Add 1 to the Attacks and Strength" (only Attacks); the structured
+  // modifier carries both. Folding it in must REPLACE the prose's incomplete unconditioned mod, not
+  // double it, and keep the conditioned/situational prose part.
   const rawDet = (enh) => ({ faction: 'SM', armyRule: null, detachments: [{ name: 'D', rule: null, stratagems: [], enhancements: [enh] }] });
 
   it('strips the overlapping unconditioned prose mod and adds the complete structured buff (no double)', () => {
@@ -357,20 +612,11 @@ describe('structured wargear modifiers — planEnh de-dup (Session 45)', () => {
     }));
     const eff = plan.detachments[0].enhancements[0].effects;
     const uncondAttack = eff.filter((e) => !e.condition && e.mods.attackBonus);
+    // exactly ONE unconditioned +1 Attacks (the structured one); the prose's +1 was stripped (no double)
     expect(uncondAttack).toHaveLength(1);
     expect(uncondAttack[0].mods.attackBonus).toBe(1);
+    // and the +1 Strength the prose mapper under-read is now present (the whole point of the feature)
     expect(eff.some((e) => !e.condition && e.mods.strengthBonus === 1)).toBe(true);
-  });
-
-  it('keeps a non-overlapping prose mod (Artificer: fnp prose + saveSet structured)', () => {
-    const plan = planPackRules(rawDet({
-      name: 'Artificer Armour',
-      text: 'The bearer has a Save characteristic of 2+ and the Feel No Pain 5+ ability.',
-      wargearMods: [{ target: 'unit', op: 'set', stat: 'SV', value: 2 }],
-    }));
-    const eff = plan.detachments[0].enhancements[0].effects;
-    expect(eff.some((e) => e.mods.fnp === 5)).toBe(true);
-    expect(eff.some((e) => e.mods.saveSet === 2)).toBe(true);
   });
 
   it('keeps a CONDITIONED prose effect (a situational buff the structured modifier does not carry)', () => {
@@ -380,22 +626,34 @@ describe('structured wargear modifiers — planEnh de-dup (Session 45)', () => {
       wargearMods: [{ target: 'melee', op: 'add', stat: 'S', delta: 1 }],
     }));
     const eff = plan.detachments[0].enhancements[0].effects;
-    expect(eff.some((e) => !e.condition && e.mods.strengthBonus === 1)).toBe(true);
-    expect(eff.some((e) => e.condition === 'onCharge' && e.mods.attackBonus === 1)).toBe(true);
+    expect(eff.some((e) => !e.condition && e.mods.strengthBonus === 1)).toBe(true); // structured S (prose S stripped)
+    expect(eff.some((e) => e.condition === 'onCharge' && e.mods.attackBonus === 1)).toBe(true); // conditioned prose kept
   });
 
-  it('PHASE-AWARE: a structured MELEE buff does NOT strip a prose RANGED same-key buff', () => {
+  it('keeps a non-overlapping prose mod (Artificer: fnp prose + saveSet structured)', () => {
+    const plan = planPackRules(rawDet({
+      name: 'Artificer Armour',
+      text: 'The bearer has a Save characteristic of 2+ and the Feel No Pain 5+ ability.',
+      wargearMods: [{ target: 'unit', op: 'set', stat: 'SV', value: 2 }],
+    }));
+    const eff = plan.detachments[0].enhancements[0].effects;
+    expect(eff.some((e) => e.mods.fnp === 5)).toBe(true); // prose fnp kept (structured doesn't cover it)
+    expect(eff.some((e) => e.mods.saveSet === 2)).toBe(true); // the Save the prose missed
+  });
+
+  it('PHASE-AWARE: a structured MELEE buff does NOT strip a prose RANGED same-key buff (review fix)', () => {
     const plan = planPackRules(rawDet({
       name: 'Cross-phase Relic',
       text: "Add 1 to the Strength characteristic of the bearer's melee weapons. Add 1 to the Strength characteristic of the bearer's ranged weapons.",
       wargearMods: [{ target: 'melee', op: 'add', stat: 'S', delta: 1 }],
     }));
     const eff = plan.detachments[0].enhancements[0].effects;
+    // the structured melee +S is present (fight); the prose RANGED +S must survive (shooting), NOT stripped
     expect(eff.some((e) => e.phase === 'fight' && e.mods.strengthBonus === 1)).toBe(true);
     expect(eff.some((e) => e.phase === 'shooting' && e.mods.strengthBonus === 1)).toBe(true);
   });
 
-  it('de-dups a prose +to-hit covered by a structured BS modifier of the same phase (no double)', () => {
+  it('de-dups a prose +to-hit covered by a structured BS modifier of the same phase (item 5d, no double)', () => {
     const plan = planPackRules(rawDet({
       name: 'Master Meknologist',
       text: "Add 1 to the Hit rolls of the bearer's ranged weapons.",
@@ -403,14 +661,14 @@ describe('structured wargear modifiers — planEnh de-dup (Session 45)', () => {
     }));
     const eff = plan.detachments[0].enhancements[0].effects;
     const hits = eff.filter((e) => !e.condition && e.mods.hitModifier);
-    expect(hits).toHaveLength(1);
+    expect(hits).toHaveLength(1); // the structured BS owns it; the prose +to-hit was stripped (no double)
     expect(hits[0].mods.hitModifier).toBe(1);
   });
 
   it('reclassifies a not-simulatable enhancement to mapped when a structured buff is added', () => {
     const plan = planPackRules(rawDet({
       name: 'Odd Relic',
-      text: 'The bearer is annoying.',
+      text: 'The bearer is annoying.', // maps to nothing
       wargearMods: [{ target: 'melee', op: 'add', stat: 'S', delta: 1 }],
     }));
     const e = plan.detachments[0].enhancements[0];
@@ -536,10 +794,10 @@ describe('captureUnitAbilities — the confidence split (P2)', () => {
     expect(captureUnitAbilities([{ name: 'X', text: '' }, {}])).toHaveLength(0);
   });
 
-  // A model-specific invuln-save profile with a save RE-ROLL rider — the BSData
-  // "Invulnerable Save (2+*) [Makari]" shape (Makari's OWN 2+ invuln, not the whole unit's) — mapped to
-  // {invuln:2}+{saveReroll:all} and slipped through onlyStatline as a unit-wide defender buff. Drop the
-  // save-note; do NOT over-correct (a standalone save-reroll aura is kept).
+  // S40 F1: a model-specific invuln-save profile with a save RE-ROLL rider — the BSData
+  // "Invulnerable Save (2+*) [Makari]" shape (Makari's OWN 2+ invuln, not the whole Ghazghkull unit's)
+  // mapped to {invuln:2}+{saveReroll:all} and slipped through onlyStatline as a unit-wide defender buff
+  // (over-tanky). Drop the save-note, but DON'T over-correct: a standalone save-reroll aura is kept.
   it('drops an invuln-save note with a save-reroll rider (Makari shape); keeps a standalone save-reroll aura', () => {
     const makari = captureUnitAbilities([
       { name: 'Invulnerable Save (2+*) [Makari]', text: 'This model has a 2+ invulnerable save. Re-roll invulnerable saving throws for this model.' },
@@ -550,6 +808,109 @@ describe('captureUnitAbilities — the confidence split (P2)', () => {
     ]);
     expect(aura).toHaveLength(1); // a genuine save-reroll aura is NOT over-dropped
     expect(aura[0].mods.saveReroll).toBeTruthy();
+  });
+
+  // B7 (CONFIRMED, ground-truthed against Wahapedia): the Intercessors' "Target Elimination" reduces
+  // to "+2 Attacks", dropping "bolt rifles", "Shooting" and "one enemy unit" — the modelled mod alone
+  // reads misleadingly. captureUnitAbilities must carry the VERBATIM source text onto the effect so the
+  // datasheet can show the full wording + a "sim applies: +2 Attacks" chip. The mod stays captured:true
+  // (a bare +Attacks is not a safe always-on shape), so the sim still never auto-applies a blanket +2A.
+  it('attaches the verbatim ability text, and pins the phase from "selected to shoot" (B7)', () => {
+    const eff = captureUnitAbilities([
+      {
+        name: 'Target Elimination',
+        text:
+          'Each time this unit is selected to shoot, until the end of the phase, add 2 to the Attacks characteristic of bolt rifles equipped by models in this unit, and you can only select one enemy unit as the target of all of this unit’s attacks.',
+      },
+    ]);
+    expect(eff).toHaveLength(1);
+    expect(eff[0].mods.attackBonus).toBe(2);
+    expect(eff[0].captured).toBe(true); // a bare +Attacks is held for review — the sim never auto-applies it
+    expect(eff[0].phase).toBe('shooting'); // "selected to shoot" pins the phase (was 'any' before B7)
+    expect(eff[0].text).toMatch(/bolt rifles/); // the dropped weapon scope is preserved verbatim
+    expect(eff[0].text).toMatch(/one enemy unit/); // and the dropped target restriction
+  });
+
+  it('a "selected to fight" activation pins the fight phase (B7)', () => {
+    // Phase detection alone (no weapon-type word) — the modelled mod is still gated as a choice, but the
+    // phase is now correct ('fight'), so the datasheet "when" reads honestly.
+    const eff = captureUnitAbilities([
+      { name: 'Doctrines', text: 'Each time this unit is selected to fight, select one of the following to apply: weapons have [SUSTAINED HITS 1] or [LETHAL HITS].' },
+    ]);
+    expect(eff.every((e) => e.phase === 'fight')).toBe(true);
+    expect(eff.every((e) => e.text && /selected to fight/.test(e.text))).toBe(true);
+  });
+});
+
+// datasheetAbilitiesFrom is the DISPLAY set — the FULL ability list captureUnitAbilities filters away
+// (the Mephiston bug: a psyker's non-combat abilities were dropped, leaving a blank datasheet).
+describe('datasheetAbilitiesFrom — the full reference ability list', () => {
+  it('keeps a NON-simulatable ability that captureUnitAbilities drops (the core fix)', () => {
+    const profiles = [
+      { name: 'Psychic Mastery', text: 'This model can attempt to manifest one psychic power in your Psychic phase.' },
+      { name: 'Sanguinary Discipline', text: 'While this model is on the battlefield, friendly units are unshaken.' },
+    ];
+    // captureUnitAbilities finds no combat modifier in either -> would show NOTHING on the datasheet.
+    expect(captureUnitAbilities(profiles)).toHaveLength(0);
+    // datasheetAbilitiesFrom keeps them both, verbatim, for the reference display.
+    const view = datasheetAbilitiesFrom(profiles);
+    expect(view).toHaveLength(2);
+    expect(view[0]).toEqual({ name: 'Psychic Mastery', text: 'This model can attempt to manifest one psychic power in your Psychic phase.' });
+    expect(view[1].name).toBe('Sanguinary Discipline');
+  });
+
+  it('drops the bare statline-save encodings (already shown as INV/FNP chips) but keeps a CONDITIONAL invuln', () => {
+    const view = datasheetAbilitiesFrom([
+      { name: 'Invulnerable Save', text: '4+' }, // bare value -> already on the INV chip
+      { name: 'Feel No Pain', text: '5+' }, // bare value -> already on the FNP chip
+      { name: 'Invulnerable Save', text: 'This model has a 4+ invulnerable save against ranged attacks.' }, // conditional -> keep
+    ]);
+    expect(view.map((a) => a.name)).toEqual(['Invulnerable Save']);
+    expect(view[0].text).toMatch(/against ranged attacks/);
+  });
+
+  it('dedupes identical (name+text) entries, drops blanks, preserves order', () => {
+    const view = datasheetAbilitiesFrom([
+      { name: 'Deep Strike', text: 'This unit can be set up in Reserves.' },
+      { name: 'Deep Strike', text: 'This unit can be set up in Reserves.' }, // duplicate
+      { name: '', text: '' }, // blank
+      { name: 'Scouts 6"' }, // name-only (no text) is kept
+    ]);
+    expect(view).toEqual([
+      { name: 'Deep Strike', text: 'This unit can be set up in Reserves.' },
+      { name: 'Scouts 6"' },
+    ]);
+  });
+
+  it('handles empty / nullish input', () => {
+    expect(datasheetAbilitiesFrom()).toEqual([]);
+    expect(datasheetAbilitiesFrom([])).toEqual([]);
+  });
+});
+
+describe('enhancementRestriction — a "<KEYWORD> model only" eligibility gate', () => {
+  it('extracts a model-type keyword restriction', () => {
+    expect(enhancementRestriction({ description: 'Terminator model only. The bearer has the Feel No Pain 5+ ability.' })).toBe('TERMINATOR');
+    expect(enhancementRestriction({ description: 'Jump Pack models only. Add 1 to the Wound roll.' })).toBe('JUMP PACK');
+    expect(enhancementRestriction({ text: 'MOUNTED model only.' })).toBe('MOUNTED');
+  });
+
+  it('returns null when there is no restriction', () => {
+    expect(enhancementRestriction({ description: 'Add 1 to the Wound roll of the bearer.' })).toBeNull();
+    expect(enhancementRestriction({})).toBeNull();
+    expect(enhancementRestriction()).toBeNull();
+  });
+
+  it('does NOT treat a stray "this model only" as a restriction (would hide it from everyone)', () => {
+    // Safe failure: an unrecognised phrase falls back to no restriction (over-offer, never wrongly hide).
+    expect(enhancementRestriction({ description: 'This model only makes one attack.' })).toBeNull();
+    expect(enhancementRestriction({ description: 'The bearer, this model only, gains a bonus.' })).toBeNull();
+  });
+
+  it('does not let a restriction clause span a sentence boundary', () => {
+    // The keyword class excludes ".", so "…Vehicle. Infantry model only" resolves to INFANTRY, not a
+    // run-on capture across the full stop.
+    expect(enhancementRestriction({ description: 'Improves saves vs a Vehicle. Infantry model only.' })).toBe('INFANTRY');
   });
 });
 

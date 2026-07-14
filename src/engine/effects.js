@@ -101,7 +101,9 @@ function phraseMatchesKeywords(phrase, have) {
 }
 
 export function effectAppliesToUnit(effect, unitKeywords, unitFaction) {
-  if (!effect?.scope?.length) return true;
+  const scoped = effect?.scope?.length;
+  const excluded = effect?.scopeExcl?.length;
+  if (!scoped && !excluded) return true;
   const have = new Set();
   for (const k of unitKeywords || []) {
     const K = String(k).toUpperCase().trim();
@@ -114,6 +116,10 @@ export function effectAppliesToUnit(effect, unitKeywords, unitFaction) {
   // faction keyword), so a faction-phrased army-wide rule ("Orks models from your army…") still
   // lands on it.
   if (unitFaction) have.add(String(unitFaction).toUpperCase().trim());
+  // Exclusions first (2026-07-14): a rule's "(excluding EPIC HERO units)" carve-out — a unit
+  // matching ANY excluded phrase never receives the effect, whatever the scope says.
+  if (excluded && effect.scopeExcl.some((s) => phraseMatchesKeywords(String(s).toUpperCase().trim(), have))) return false;
+  if (!scoped) return true;
   return effect.scope.some((s) => phraseMatchesKeywords(String(s).toUpperCase().trim(), have));
 }
 

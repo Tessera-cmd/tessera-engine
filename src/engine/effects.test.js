@@ -55,6 +55,16 @@ describe('effectAppliesToUnit — keyword-phrase scope (Session 17; phrases 2026
     expect(filterEffectsForUnit(effs, ['ARMIGER'], 'Imperial Knights')).toHaveLength(1);
     expect(filterEffectsForUnit(effs, ['DOMINUS'])).toHaveLength(2);
   });
+
+  it('scopeExcl carves a unit out of a scoped OR scope-less effect (checked before scope)', () => {
+    const carved = { ...eff(['WORLD EATERS CHARACTER']), scopeExcl: ['EPIC HERO'] };
+    expect(effectAppliesToUnit(carved, ['CHARACTER', 'FACTION: WORLD EATERS'])).toBe(true);
+    expect(effectAppliesToUnit(carved, ['CHARACTER', 'EPIC HERO', 'FACTION: WORLD EATERS'])).toBe(false);
+    // An exclusion with NO scope still gates (an army-wide rule with a carve-out).
+    const bare = { ...eff(undefined), scopeExcl: ['DAMNED'] };
+    expect(effectAppliesToUnit(bare, ['INFANTRY'])).toBe(true);
+    expect(effectAppliesToUnit(bare, ['INFANTRY', 'DAMNED'])).toBe(false);
+  });
 });
 
 describe('collectEffects — captured abilities are not applied (Session 37 capture-safety)', () => {
