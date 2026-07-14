@@ -65,24 +65,65 @@ export const CONDITIONS = [
   { id: 'belowStrength', label: 'Below Starting / Half strength' },
 ];
 
-// ---- model-type scope (Session 17) -----------------------------------------
-// An auto-imported army/detachment effect may be SCOPED to certain model types ("VEHICLE and
-// MOUNTED models add 1 to Hit"). The mapper records that as `effect.scope` (uppercase keywords);
-// the unit-aware caller (the matrix per cell, the single sim per side) drops a scoped effect for
-// a unit that has none of those keywords, so an army-wide rule never lands on the wrong units.
-// An effect with no scope always applies. Pure.
-export function effectAppliesToUnit(effect, unitKeywords) {
-  if (!effect?.scope?.length) return true;
-  const have = new Set((unitKeywords || []).map((k) => String(k).toUpperCase()));
-  return effect.scope.some((k) => have.has(String(k).toUpperCase()));
+// ---- model-type scope (Session 17; keyword phrases 2026-07-14) --------------
+// An auto-imported army/detachment effect may be SCOPED to certain model types or class
+// keywords ("VEHICLE and MOUNTED models add 1 to Hit", "Friendly IMPERIAL KNIGHTS DOMINUS
+// units' attacks…"). The mapper records that as `effect.scope`: an array of uppercase keyword
+// PHRASES. A single-word entry matches when the unit has that keyword (the pre-2026-07-14
+// behaviour, unchanged). A multi-word entry is matched by SEGMENTING it into the unit's own
+// keywords — "IMPERIAL KNIGHTS DOMINUS" applies only to a unit carrying both "IMPERIAL
+// KNIGHTS" (or "FACTION: IMPERIAL KNIGHTS") and "DOMINUS" — AND semantics, so the faction
+// umbrella inside a phrase never widens it, and a phrase that can't be segmented from the
+// unit's keywords simply never applies (under-apply, the safe direction). An effect with no
+// scope always applies. Pure.
+
+// Can `phrase` (uppercase, space-separated tokens) be split into contiguous groups, each one
+// of the unit's keywords? Tries longest group first; a light plural fallback (trailing S) on
+// each candidate absorbs "Orks models" vs an "ORK" keyword and vice versa.
+function phraseMatchesKeywords(phrase, have) {
+  const hasKw = (cand) =>
+    have.has(cand) || (cand.endsWith('S') && have.has(cand.slice(0, -1))) || have.has(`${cand}S`);
+  const toks = phrase.split(/\s+/).filter(Boolean);
+  if (!toks.length) return false;
+  if (toks.length === 1) return hasKw(toks[0]);
+  if (hasKw(phrase)) return true; // the whole phrase is itself one keyword
+  const dead = new Set();
+  const seg = (i) => {
+    if (i === toks.length) return true;
+    if (dead.has(i)) return false;
+    for (let j = toks.length; j > i; j--) {
+      if (hasKw(toks.slice(i, j).join(' ')) && seg(j)) return true;
+    }
+    dead.add(i);
+    return false;
+  };
+  return seg(0);
 }
 
-// Filter a list of effects to those that apply to a unit with the given keywords. When
-// `unitKeywords` is null/undefined, gating is skipped (effects returned unchanged) so existing
-// callers that don't supply keywords are unaffected.
-export function filterEffectsForUnit(effects, unitKeywords) {
+export function effectAppliesToUnit(effect, unitKeywords, unitFaction) {
+  if (!effect?.scope?.length) return true;
+  const have = new Set();
+  for (const k of unitKeywords || []) {
+    const K = String(k).toUpperCase().trim();
+    if (!K) continue;
+    have.add(K);
+    // Catalogue drafts carry the faction keyword as "FACTION: X" — expose the bare X too.
+    if (K.startsWith('FACTION:')) have.add(K.slice(8).trim());
+  }
+  // The unit's faction NAME backs up the keyword list (a preset/hand-entered unit may carry no
+  // faction keyword), so a faction-phrased army-wide rule ("Orks models from your army…") still
+  // lands on it.
+  if (unitFaction) have.add(String(unitFaction).toUpperCase().trim());
+  return effect.scope.some((s) => phraseMatchesKeywords(String(s).toUpperCase().trim(), have));
+}
+
+// Filter a list of effects to those that apply to a unit with the given keywords (+ optional
+// faction name, used as a keyword fallback). When `unitKeywords` is null/undefined, gating is
+// skipped (effects returned unchanged) so existing callers that don't supply keywords are
+// unaffected.
+export function filterEffectsForUnit(effects, unitKeywords, unitFaction) {
   if (unitKeywords == null) return effects || [];
-  return (effects || []).filter((e) => effectAppliesToUnit(e, unitKeywords));
+  return (effects || []).filter((e) => effectAppliesToUnit(e, unitKeywords, unitFaction));
 }
 
 const REROLL_RANK = { none: 0, ones: 1, failed: 2, all: 3 };

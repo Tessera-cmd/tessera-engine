@@ -15,9 +15,48 @@ import {
   effectiveKeywords,
   collectEffects,
   strongerReroll,
+  effectAppliesToUnit,
+  filterEffectsForUnit,
 } from './effects.js';
 
 // ---- 1. pure resolver ------------------------------------------------------
+describe('effectAppliesToUnit — keyword-phrase scope (Session 17; phrases 2026-07-14)', () => {
+  const eff = (scope) => ({ name: 'e', side: 'attacker', phase: 'any', mods: { hitModifier: 1 }, scope });
+
+  it('single-keyword scope keeps the pre-phrase behaviour (membership, incl. spaced keywords)', () => {
+    expect(effectAppliesToUnit(eff(['VEHICLE']), ['VEHICLE', 'WALKER'])).toBe(true);
+    expect(effectAppliesToUnit(eff(['VEHICLE']), ['INFANTRY'])).toBe(false);
+    expect(effectAppliesToUnit(eff(['JUMP PACK']), ['INFANTRY', 'JUMP PACK'])).toBe(true);
+    expect(effectAppliesToUnit(eff(undefined), [])).toBe(true); // no scope = army-wide
+  });
+
+  it('a multi-word phrase is AND of the unit\'s own keywords — the faction umbrella inside it never widens it', () => {
+    const dominus = eff(['IMPERIAL KNIGHTS DOMINUS']);
+    // Knight Castellan: faction keyword (FACTION:-prefixed, as the catalogue drafts carry it) + DOMINUS.
+    expect(effectAppliesToUnit(dominus, ['VEHICLE', 'TITANIC', 'FACTION: IMPERIAL KNIGHTS', 'DOMINUS'])).toBe(true);
+    // Armiger Helverin: same faction, NOT Dominus — the phrase must not degrade to "any IK unit".
+    expect(effectAppliesToUnit(dominus, ['VEHICLE', 'FACTION: IMPERIAL KNIGHTS', 'ARMIGER'])).toBe(false);
+    // A phrase that cannot be segmented from real keywords never applies (under-apply, safe).
+    expect(effectAppliesToUnit(eff(['SOUL FORGE']), ['VEHICLE', 'FACTION: CHAOS SPACE MARINES'])).toBe(false);
+  });
+
+  it('the unit faction NAME backs up a missing faction keyword; a light plural fallback absorbs Orks-vs-Ork', () => {
+    // Preset/hand-entered unit with no faction keyword at all.
+    expect(effectAppliesToUnit(eff(['ORKS']), ['INFANTRY'], 'Orks')).toBe(true);
+    expect(effectAppliesToUnit(eff(['ORKS']), ['INFANTRY'], 'Space Marines')).toBe(false);
+    // Trailing-S tolerance in either direction.
+    expect(effectAppliesToUnit(eff(['GENESTEALER CULT']), ['FACTION: GENESTEALER CULTS'])).toBe(true);
+    expect(effectAppliesToUnit(eff(['GENESTEALER CULTS']), ['FACTION: GENESTEALER CULT'])).toBe(true);
+  });
+
+  it('filterEffectsForUnit skips gating when keywords are null, gates when supplied', () => {
+    const effs = [eff(['DOMINUS']), eff(undefined)];
+    expect(filterEffectsForUnit(effs, null)).toHaveLength(2);
+    expect(filterEffectsForUnit(effs, ['ARMIGER'], 'Imperial Knights')).toHaveLength(1);
+    expect(filterEffectsForUnit(effs, ['DOMINUS'])).toHaveLength(2);
+  });
+});
+
 describe('collectEffects — captured abilities are not applied (Session 37 capture-safety)', () => {
   it('skips an ability flagged `captured` (import-extracted, unconfirmed) but keeps a confirmed one', () => {
     const abilities = [

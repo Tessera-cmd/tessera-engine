@@ -41,6 +41,7 @@ function resolveSelection(ctx, atkSel, defSel, conditions, baseOptions = ctx.bas
       enhancements: new Set(atkSel.enhancements),
     }).filter(offensive),
     ctx.attackerKeywords,
+    ctx.attackerFaction,
   );
   const defEffects = filterEffectsForUnit(
     collectEffects({
@@ -51,6 +52,7 @@ function resolveSelection(ctx, atkSel, defSel, conditions, baseOptions = ctx.bas
       enhancements: new Set(defSel.enhancements),
     }).filter(defensive),
     ctx.defenderKeywords,
+    ctx.defenderFaction,
   );
   const resolved = resolveEffects([...atkEffects, ...defEffects], {
     phase: ctx.phase,
