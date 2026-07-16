@@ -14,6 +14,8 @@ import {
   captureUnitAbilities,
   datasheetAbilitiesFrom,
   enhancementRestriction,
+  enhancementEligibility,
+  enhancementMatches,
   modsToEffects,
   degradeInfo,
 } from './ruleText.js';
@@ -911,6 +913,61 @@ describe('enhancementRestriction — a "<KEYWORD> model only" eligibility gate',
     // The keyword class excludes ".", so "…Vehicle. Infantry model only" resolves to INFANTRY, not a
     // run-on capture across the full stop.
     expect(enhancementRestriction({ description: 'Improves saves vs a Vehicle. Infantry model only.' })).toBe('INFANTRY');
+  });
+});
+
+describe("enhancementEligibility + enhancementMatches — the generic restriction grammar (2026-07-16, the T'au report)", () => {
+  // GROUND TRUTH: the live 11e T'au + Imperial Knights enhancement texts (see the session's
+  // ground-tau-legality run) — markdown emphasis markers, faction phrases, slash OR-lists,
+  // "(excluding …)" carve-outs, "unit only" (a NON-character unit may take it) and the bare
+  // "<PHRASE> only" opening clause.
+  it('parses a markdown-marked faction phrase with an excluding carve-out (Kauyon)', () => {
+    const e = enhancementEligibility({
+      description: '**^^T’au Empire^^** model only (excluding **^^Kroot Shaper^^** models). While the bearer is leading a unit…',
+    });
+    expect(e).toEqual({ any: ['T’AU EMPIRE'], excl: ['KROOT SHAPER'], unitScope: false });
+  });
+
+  it('parses a slash OR-list with "unit only" (Advanced Acquisition Cadre — non-characters allowed)', () => {
+    const e = enhancementEligibility({
+      description: '**GHOSTKEEL BATTLESUIT/PATHFINDER TEAM/STEALTH BATTLESUITS** unit only. When this unit is selected to shoot…',
+    });
+    expect(e.any).toEqual(['GHOSTKEEL BATTLESUIT', 'PATHFINDER TEAM', 'STEALTH BATTLESUITS']);
+    expect(e.unitScope).toBe(true);
+  });
+
+  it('parses an " or " conjunction as alternatives (Canoness or Palatine — 2026-07-16 legality scan)', () => {
+    const e = enhancementEligibility({ description: '**^^Canoness^^** or **^^Palatine^^** model only. Once per battle…' });
+    expect(e.any).toEqual(['CANONESS', 'PALATINE']);
+    expect(enhancementMatches(e, ['CHARACTER', 'PALATINE'])).toBe(true);
+    expect(enhancementMatches(e, ['CHARACTER', 'MISSIONARY'])).toBe(false);
+  });
+
+  it('parses the bare "<PHRASE> only" opening clause (Borthrod Gland)', () => {
+    const e = enhancementEligibility({ description: '**^^Kroot Flesh Shaper^^** only. While the bearer is leading a unit…' });
+    expect(e.any).toEqual(['KROOT FLESH SHAPER']);
+    expect(e.unitScope).toBe(false);
+  });
+
+  it('still rejects stray determiner/bearer phrasings (never hide from everyone)', () => {
+    expect(enhancementEligibility({ description: 'This model only makes one attack.' })).toBeNull();
+    expect(enhancementEligibility({ description: 'The bearer, this model only, gains a bonus.' })).toBeNull();
+  });
+
+  it('matches a multi-keyword phrase by AND-segmentation into the unit keywords (Retaliation Cadre)', () => {
+    const elig = enhancementEligibility({ description: '**T’AU EMPIRE BATTLESUIT** model only. Each time…' });
+    const commander = ['FACTION: T’AU EMPIRE', 'BATTLESUIT', 'CHARACTER', 'FLY'];
+    const fireblade = ['FACTION: T’AU EMPIRE', 'INFANTRY', 'CHARACTER'];
+    expect(enhancementMatches(elig, commander)).toBe(true);
+    expect(enhancementMatches(elig, fireblade)).toBe(false); // no BATTLESUIT keyword
+  });
+
+  it('tolerates plural/apostrophe differences and applies the excluding carve-out', () => {
+    const elig = enhancementEligibility({ description: "**T'AU EMPIRE** model only (excluding **KROOT SHAPER** models)." });
+    expect(enhancementMatches(elig, ['FACTION: T’AU EMPIRE', 'CHARACTER'])).toBe(true); // curly vs straight apostrophe
+    expect(enhancementMatches(elig, ['FACTION: T’AU EMPIRE', 'KROOT', 'SHAPER', 'CHARACTER'])).toBe(false); // excluded
+    const stealth = enhancementEligibility({ description: '**STEALTH BATTLESUITS** unit only.' });
+    expect(enhancementMatches(stealth, ['FACTION: T’AU EMPIRE', 'STEALTH BATTLESUIT'])).toBe(true); // plural phrase, singular keyword
   });
 });
 

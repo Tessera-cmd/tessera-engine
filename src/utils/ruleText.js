@@ -841,23 +841,114 @@ export function datasheetAbilitiesFrom(items = []) {
   return out;
 }
 
-// A datasheet enhancement can be restricted to a unit KEYWORD ("Terminator model only", "Jump Pack
-// models only") — GW enforces it (and New Recruit honours it), but the Forge was offering an enhancement
-// to ANY non-Epic character. Extract that keyword from the enhancement text so the offer can be filtered
-// to eligible units. Gated to a known set of model-type restriction keywords, so a stray "this model
-// only" phrase can never hide an enhancement from everyone: an unrecognised phrase → no restriction
-// (safe failure = over-offer, never wrongly hide). The `.` breaks the character class, so a restriction
-// clause never spans a sentence boundary. Returns an UPPERCASE keyword, or null. Pure — exported for tests.
-const ENH_RESTRICT_KEYWORDS = new Set([
-  'TERMINATOR', 'GRAVIS', 'PHOBOS', 'TACTICUS', 'JUMP PACK', 'BIKER', 'BIKE', 'MOUNTED', 'CAVALRY',
-  'JETBIKE', 'INFANTRY', 'MONSTER', 'VEHICLE', 'WALKER', 'BEAST', 'SWARM', 'TITANIC', 'PSYKER', 'CHARACTER',
-]);
+// A datasheet enhancement can be restricted by KEYWORD ("Terminator model only", "T'au Empire
+// Battlesuit model only (excluding Kroot Shaper models)", "Ghostkeel Battlesuit/Pathfinder
+// Team/Stealth Battlesuits unit only") — GW enforces it and New Recruit honours it. The old parser
+// knew a fixed vocabulary and only the "model(s) only" noun, so NO real T'au/Knights restriction
+// parsed (they carry markdown markers, faction phrases, slash-lists, "unit only" and bare "only"
+// forms) — every enhancement was over-offered to every character and NEVER to a restriction-named
+// non-character unit (the owner's Stealth Battlesuits report, 2026-07-16). Now:
+//   - enhancementEligibility(enh) parses the restriction generically → { any, excl, unitScope }:
+//     `any` = slash-separated OR alternatives (uppercase phrases), `excl` = "(excluding …)"
+//     carve-outs, `unitScope` = the "unit(s) only" phrasing (GW's "otherwise stated" that lets a
+//     NON-character unit take the enhancement — the Advanced Acquisition Cadre shape).
+//   - enhancementMatches(elig, keywords, faction) matches each phrase against the unit's own
+//     keywords by AND-segmentation (the 2.72.0 detachment-scope model: "T'AU EMPIRE BATTLESUIT"
+//     must segment into "FACTION: T'AU EMPIRE" + "BATTLESUIT"), with FACTION:-prefix exposure and
+//     plural tolerance both ways ("STEALTH BATTLESUITS" keyword ⇄ "STEALTH BATTLESUIT" phrase).
+// Safety: a stray "this model only" can never hide an enhancement from everyone — restriction
+// phrases containing determiner/bearer stopwords parse as NO restriction, and the bare
+// "<PHRASE> only." form (Borthrod Gland) is accepted only as the text's OPENING clause.
+const ENH_MARKUP = /\*\*|\^\^|__|[[\]]/g;
+const ENH_STOPWORDS = /(^|\s)(THIS|THAT|THE|A|AN|ITS|YOUR|ANY|ONE|EACH|BEARER|BEARER'S|MODEL|MODELS|UNIT|UNITS)(\s|$)/;
+export function enhancementEligibility(enh) {
+  const text = String(enh?.description || enh?.text || '')
+    .replace(ENH_MARKUP, '')
+    .toUpperCase();
+  if (!text.trim()) return null;
+  // "<PHRASE> model(s)/unit(s) only" — anchored at the text start or a sentence boundary, so a
+  // mid-sentence "this model only" aside never parses. '.' is excluded from the phrase class.
+  const m = text.match(/(?:^|[.;:!?]\s*|\n\s*)([A-Z0-9'’/\- ]{2,90}?)\s+(MODELS?|UNITS?)\s+ONLY\b/);
+  let phrase = m ? m[1].trim() : null;
+  let unitScope = m ? /^UNITS?$/.test(m[2]) : false;
+  if (!phrase) {
+    // The bare "<PHRASE> only" form ("Kroot Flesh Shaper only. …") — opening clause only.
+    const b = text.match(/^\s*([A-Z0-9'’/\- ]{2,90}?)\s+ONLY\b/);
+    if (b) phrase = b[1].trim();
+  }
+  if (!phrase || ENH_STOPWORDS.test(phrase)) return null;
+  // Alternatives arrive as a slash list ("GHOSTKEEL BATTLESUIT/PATHFINDER TEAM/STEALTH
+  // BATTLESUITS") or an " or " conjunction ("Canoness or Palatine model only" — the 2026-07-16
+  // legality scan found 81 live restrictions unmatchable without the OR split: hidden from
+  // everyone, the cardinal sin).
+  const any = phrase
+    .split(/\/|\bOR\b/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!any.length) return null;
+  const excl = [];
+  const em = text.match(/\(\s*EXCLUDING\s+([^)]+?)\s*\)/);
+  if (em) {
+    for (const part of em[1].split(/\/|,| OR | AND /)) {
+      const p = part.replace(/\bMODELS?\b|\bUNITS?\b/g, '').trim();
+      if (p) excl.push(p);
+    }
+  }
+  return { any, excl, unitScope };
+}
+
+// Can `phrase` be split into contiguous groups, each one of the unit's own keywords? (The same
+// AND-segmentation model effects.js uses for detachment-rule scopes — kept self-contained here
+// because ruleText.js is mirrored verbatim into the engine repo and must not grow imports.)
+function phraseSegments(phrase, have) {
+  if (have.has(phrase)) return true;
+  const toks = phrase.split(/\s+/).filter(Boolean);
+  if (!toks.length) return false;
+  const memo = new Array(toks.length + 1).fill(null);
+  const can = (i) => {
+    if (i === toks.length) return true;
+    if (memo[i] != null) return memo[i];
+    memo[i] = false;
+    for (let j = toks.length; j > i; j--) {
+      if (have.has(toks.slice(i, j).join(' ')) && can(j)) {
+        memo[i] = true;
+        break;
+      }
+    }
+    return memo[i];
+  };
+  return can(0);
+}
+export function enhancementMatches(elig, keywords = [], faction = '') {
+  if (!elig) return true;
+  // Curly vs straight apostrophes differ between the GW text ("T’au") and catalogue keywords —
+  // normalise both sides or the faction phrase never matches.
+  const apos = (s) => String(s || '').replace(/[’‘`]/g, "'");
+  const have = new Set();
+  const addForms = (raw) => {
+    const K = apos(raw)
+      .toUpperCase()
+      .trim();
+    if (!K) return;
+    for (const v of [K, K.startsWith('FACTION:') ? K.slice(8).trim() : null]) {
+      if (!v) continue;
+      have.add(v);
+      // plural tolerance both ways (a phrase says "STEALTH BATTLESUIT", the keyword is plural)
+      if (v.endsWith('S')) have.add(v.slice(0, -1));
+      else have.add(`${v}S`);
+    }
+  };
+  for (const k of keywords || []) addForms(k);
+  addForms(faction);
+  const matches = (p) => phraseSegments(apos(p).toUpperCase().trim(), have);
+  if ((elig.excl || []).some(matches)) return false;
+  return (elig.any || []).some(matches);
+}
+
+// Back-compat single-keyword view (the original API): the first parsed alternative, or null.
 export function enhancementRestriction(enh) {
-  const text = String(enh?.description || enh?.text || '').toUpperCase();
-  const m = text.match(/\b([A-Z][A-Z' -]{2,30}?)\s+MODELS?\s+ONLY\b/);
-  if (!m) return null;
-  const kw = m[1].trim();
-  return ENH_RESTRICT_KEYWORDS.has(kw) ? kw : null;
+  const e = enhancementEligibility(enh);
+  return e ? e.any[0] : null;
 }
 
 // ---- plan a whole roster's extracted rules ---------------------------------
