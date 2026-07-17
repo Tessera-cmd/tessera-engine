@@ -925,7 +925,9 @@ describe("enhancementEligibility + enhancementMatches — the generic restrictio
     const e = enhancementEligibility({
       description: '**^^T’au Empire^^** model only (excluding **^^Kroot Shaper^^** models). While the bearer is leading a unit…',
     });
-    expect(e).toEqual({ any: ['T’AU EMPIRE'], excl: ['KROOT SHAPER'], unitScope: false });
+    // Phrases come out apostrophe-NORMALISED (curly → straight) so the stopword guard and the
+    // matcher share one form (review fix, 2026-07-17).
+    expect(e).toEqual({ any: ["T'AU EMPIRE"], excl: ['KROOT SHAPER'], unitScope: false });
   });
 
   it('parses a slash OR-list with "unit only" (Advanced Acquisition Cadre — non-characters allowed)', () => {

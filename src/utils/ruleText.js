@@ -861,8 +861,12 @@ export function datasheetAbilitiesFrom(items = []) {
 // "<PHRASE> only." form (Borthrod Gland) is accepted only as the text's OPENING clause.
 const ENH_MARKUP = /\*\*|\^\^|__|[[\]]/g;
 const ENH_STOPWORDS = /(^|\s)(THIS|THAT|THE|A|AN|ITS|YOUR|ANY|ONE|EACH|BEARER|BEARER'S|MODEL|MODELS|UNIT|UNITS)(\s|$)/;
+// Curly vs straight apostrophes differ between the GW text ("T’au", "bearer’s") and catalogue
+// keywords — normalise EVERYWHERE (the parse too, or the BEARER'S stopword never fires on real
+// curly-apostrophe text — review finding 2026-07-17).
+const enhApos = (s) => String(s || '').replace(/[’‘`]/g, "'");
 export function enhancementEligibility(enh) {
-  const text = String(enh?.description || enh?.text || '')
+  const text = enhApos(String(enh?.description || enh?.text || ''))
     .replace(ENH_MARKUP, '')
     .toUpperCase();
   if (!text.trim()) return null;
@@ -921,9 +925,7 @@ function phraseSegments(phrase, have) {
 }
 export function enhancementMatches(elig, keywords = [], faction = '') {
   if (!elig) return true;
-  // Curly vs straight apostrophes differ between the GW text ("T’au") and catalogue keywords —
-  // normalise both sides or the faction phrase never matches.
-  const apos = (s) => String(s || '').replace(/[’‘`]/g, "'");
+  const apos = enhApos; // one normaliser for the whole pipeline (parse + match)
   const have = new Set();
   const addForms = (raw) => {
     const K = apos(raw)
