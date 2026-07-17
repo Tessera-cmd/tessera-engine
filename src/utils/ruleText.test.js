@@ -1062,3 +1062,41 @@ describe('capture-safety mapper fixes', () => {
     expect(r.effects.find((e) => e.mods.reroll?.wound)?.mods.reroll.wound).toBe('failed');
   });
 });
+
+describe('enhancement restriction widenings (legality-scan triage 2026-07-17)', () => {
+  it("corrects the upstream ADPETUS typo (Vanguard Spearhead's The Blade Driven Deep was hidden from everyone)", () => {
+    const e = enhancementEligibility({ description: 'Adpetus Astartes Infantry model only. While the bearer is leading a unit…' });
+    expect(e.any).toEqual(['ADEPTUS ASTARTES INFANTRY']);
+    expect(enhancementMatches(e, ['FACTION: ADEPTUS ASTARTES', 'INFANTRY', 'CHARACTER'])).toBe(true);
+  });
+
+  it('matches the datasheet NAME when the restriction names the unit (Sword Brethren Squad)', () => {
+    const e = enhancementEligibility({ description: 'SWORD BRETHREN SQUAD unit only. This unit has +1 to charge rolls' });
+    // keywords alone miss (the sheet only carries PRIMARIS SWORD BRETHREN)…
+    expect(enhancementMatches(e, ['PRIMARIS SWORD BRETHREN', 'INFANTRY'], 'Black Templars')).toBe(false);
+    // …the unit name closes it.
+    expect(enhancementMatches(e, ['PRIMARIS SWORD BRETHREN', 'INFANTRY'], 'Black Templars', 'Sword Brethren Squad')).toBe(true);
+  });
+
+  it("suffix-matches a single-word keyword FAMILY on the ANY side (SPEEDER -> LAND SPEEDER, WAGON -> BATTLEWAGON)", () => {
+    const speeder = enhancementEligibility({ description: 'SPEEDER unit only. This unit can re-roll Damage rolls.' });
+    expect(enhancementMatches(speeder, ['LAND SPEEDER', 'VEHICLE', 'FLY'])).toBe(true);
+    expect(enhancementMatches(speeder, ['GLADIATOR', 'VEHICLE'])).toBe(false);
+    const wagon = enhancementEligibility({ description: 'WAGON model only. Improve the ramshackle roll.' });
+    expect(enhancementMatches(wagon, ['BATTLEWAGON', 'VEHICLE'])).toBe(true); // compound single token
+  });
+
+  it('BREAKING VARIANT: an EXCLUSION is never suffix-widened (over-matching there would hide)', () => {
+    const e = enhancementEligibility({ description: 'VEHICLE model only (excluding SPEEDER models).' });
+    // LAND SPEEDER is not excluded by the bare SPEEDER carve-out — strict matching on excl.
+    expect(enhancementMatches(e, ['LAND SPEEDER', 'VEHICLE'])).toBe(true);
+    expect(enhancementMatches(e, ['SPEEDER', 'VEHICLE'])).toBe(false); // the exact keyword still excludes
+  });
+
+  it('BREAKING VARIANT: multi-word and short phrases never suffix-match', () => {
+    const multi = enhancementEligibility({ description: 'MILITARUM TEMPESTUS OFFICER model only. When this model issues an Order…' });
+    expect(enhancementMatches(multi, ['MILITARUM TEMPESTUS'])).toBe(false); // OFFICER missing: no partial credit
+    const short = enhancementEligibility({ description: 'ORK model only. Waaagh.' });
+    expect(enhancementMatches(short, ['GORKANAUT'])).toBe(false); // 3-letter suffix stays strict
+  });
+});

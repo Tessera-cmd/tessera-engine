@@ -868,7 +868,12 @@ const enhApos = (s) => String(s || '').replace(/[’‘`]/g, "'");
 export function enhancementEligibility(enh) {
   const text = enhApos(String(enh?.description || enh?.text || ''))
     .replace(ENH_MARKUP, '')
-    .toUpperCase();
+    .toUpperCase()
+    // Upstream TYPO in the live wh40k-11e data (legality-scan triage 2026-07-17): the Vanguard
+    // Spearhead "The Blade Driven Deep" restriction reads "Adpetus Astartes Infantry model only"
+    // — without the correction the enhancement matched NO datasheet and was hidden from every
+    // unit across all 13 chapter catalogues. Report upstream; this is a spelling fix, not data.
+    .replace(/\bADPETUS\b/g, 'ADEPTUS');
   if (!text.trim()) return null;
   // "<PHRASE> model(s)/unit(s) only" — anchored at the text start or a sentence boundary, so a
   // mid-sentence "this model only" aside never parses. '.' is excluded from the phrase class.
@@ -923,7 +928,7 @@ function phraseSegments(phrase, have) {
   };
   return can(0);
 }
-export function enhancementMatches(elig, keywords = [], faction = '') {
+export function enhancementMatches(elig, keywords = [], faction = '', unitName = '') {
   if (!elig) return true;
   const apos = enhApos; // one normaliser for the whole pipeline (parse + match)
   const have = new Set();
@@ -942,9 +947,28 @@ export function enhancementMatches(elig, keywords = [], faction = '') {
   };
   for (const k of keywords || []) addForms(k);
   addForms(faction);
+  // GW restrictions can name the UNIT rather than a keyword ("SWORD BRETHREN SQUAD unit only" —
+  // the datasheet is named exactly that but only carries PRIMARIS SWORD BRETHREN as a keyword;
+  // legality-scan triage 2026-07-17). The unit's name is as authoritative as its keywords.
+  addForms(unitName);
   const matches = (p) => phraseSegments(apos(p).toUpperCase().trim(), have);
+  // A single-word phrase can be GW's 11e keyword FAMILY shorthand that the community data only
+  // carries inside compound keywords ("SPEEDER unit only" — the datasheets read LAND SPEEDER /
+  // STORM SPEEDER; the Orks "WAGON" family reads BATTLEWAGON / LIFTA WAGON). Suffix-matching is
+  // over-offer at worst — the safe failure direction — so it applies to the ANY side ONLY: an
+  // over-matched EXCLUSION would hide an enhancement, the cardinal sin.
+  const matchesAny = (p) => {
+    const P = apos(p).toUpperCase().trim();
+    if (phraseSegments(P, have)) return true;
+    if (!/\s/.test(P) && P.length >= 5) {
+      for (const k of have) {
+        if (k.length > P.length && k.endsWith(P)) return true;
+      }
+    }
+    return false;
+  };
   if ((elig.excl || []).some(matches)) return false;
-  return (elig.any || []).some(matches);
+  return (elig.any || []).some(matchesAny);
 }
 
 // Back-compat single-keyword view (the original API): the first parsed alternative, or null.
