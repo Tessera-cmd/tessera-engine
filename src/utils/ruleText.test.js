@@ -19,7 +19,7 @@ import {
   modsToEffects,
   degradeInfo,
 } from './ruleText.js';
-import { effectAppliesToUnit } from '../engine/effects.js';
+import { effectAppliesToUnit, resolveEffects, CONDITIONS } from '../engine/effects.js';
 
 const modsOf = (r, pred) => r.effects.filter(pred).map((e) => e.mods);
 
@@ -1023,9 +1023,14 @@ describe('real-data over-apply gates (S37b regression gate)', () => {
 
 // ---- Session 37 capture-safety review: the over-apply classes the mapper must NOT mis-handle ----
 describe('capture-safety mapper fixes', () => {
-  it('DROPS a degrading "Damaged:" / "N-M wounds remaining" penalty (no live wound tracking)', () => {
-    // A healthy unit must not inherit its last-bracket -1 to hit (the Redemptor/Repulsor bug).
-    expect(mapRuleText('While this model has 1-4 wounds remaining, subtract 1 from the Hit roll.').effects).toHaveLength(0);
+  it('GATES a degrading "N-M wounds remaining" penalty on `damaged` (never always-on)', () => {
+    // F2.1 (2026-07-30): the penalty is no longer dropped — it is captured and gated. The original
+    // safety property is unchanged and asserted below: a healthy unit must not inherit its damaged
+    // -1 to hit (the Redemptor/Repulsor bug), which holds because `damaged` defaults OFF.
+    const r = mapRuleText('While this model has 1-4 wounds remaining, subtract 1 from the Hit roll.');
+    expect(r.effects).toHaveLength(1);
+    expect(r.effects[0].condition).toBe('damaged');
+    expect(r.effects[0].mods.hitModifier).toBe(-1);
   });
 
   it('DROPS a within-N" aura (no board geometry; the buff is for OTHER units, not the bearer)', () => {
@@ -1050,8 +1055,10 @@ describe('capture-safety mapper fixes', () => {
     expect(r.effects.some((e) => e.mods.reroll)).toBe(false);
   });
 
-  it('DROPS a standalone "while this model is Damaged" penalty (split from its bracket header)', () => {
-    expect(mapRuleText('While this model is Damaged, subtract 1 from the Hit rolls of this model\'s attacks.').effects).toHaveLength(0);
+  it('GATES a standalone "while this model is Damaged" penalty on `damaged`', () => {
+    const r = mapRuleText('While this model is Damaged, subtract 1 from the Hit rolls of this model\'s attacks.');
+    expect(r.effects).toHaveLength(1);
+    expect(r.effects[0].condition).toBe('damaged');
   });
 
   it('KEEPS "re-roll one or more" (a blanket re-roll), and a single-die re-roll does not swallow a later blanket one', () => {
@@ -1098,5 +1105,152 @@ describe('enhancement restriction widenings (legality-scan triage 2026-07-17)', 
     expect(enhancementMatches(multi, ['MILITARUM TEMPESTUS'])).toBe(false); // OFFICER missing: no partial credit
     const short = enhancementEligibility({ description: 'ORK model only. Waaagh.' });
     expect(enhancementMatches(short, ['GORKANAUT'])).toBe(false); // 3-letter suffix stays strict
+  });
+});
+
+// ---- F2.1 (2026-07-30): the DEGRADE BRACKET, grounded on the real 11e text -------------------
+//
+// GROUND TRUTH (established 2026-07-30 from the authorities, NOT the in-repo spec):
+//   * GW 11e Core Rules ("Core Rules 11th.pdf") define NO degrading mechanic at all — the word
+//     "damaged" does not appear, and the datasheet anatomy (02.02) has no bracket table.
+//   * Across all 29 official 11e faction packs in reference/ there are 168 degrading datasheets.
+//     EVERY one is a single statline plus ONE flat "DAMAGED: 1-N WOUNDS REMAINING" ability; every
+//     band's lower bound is 1, so there is no second band and no bracket TABLE to model.
+//     By effect: 117 are "-1 to the Hit roll", 50 are that plus an Objective Control drop, and
+//     exactly 1 is a buff (Chaos Daemons, +2 Attacks). ZERO carry a second gate (on the charge,
+//     within N", etc.), which is why forcing the `damaged` condition can never overwrite one.
+//   * The live 11e BSData catalogue agrees: 1,114 datasheets swept, max Unit profiles on any one
+//     model entry = 1, zero profiles encode a wounds range in their name, 346 carry the flat
+//     "Damaged…" ability (scripts/ground-f21-brackets.mjs).
+// So the mapper's job is not to capture a bracket table (there is none) but to make the ONE real
+// bracket — healthy vs damaged — resolve in the engine, gated OFF by default.
+describe('F2.1 — degrading "Damaged: 1-N wounds remaining" brackets', () => {
+  const cap = (text, name = 'Damaged: 1-9 Wounds Remaining') => captureUnitAbilities([{ name, text }]);
+
+  it('maps the real GW Knight wording to a `damaged`-gated -1 to Hit (OC is not invented)', () => {
+    // Verbatim from warhammer40000_faction_pack_imperial_knights.pdf (Knight Paladin) and from the
+    // live BSData catalogue's "Damaged: 1-9 Wounds Remaining" ability text.
+    const [e] = cap(
+      "While this model has 1-9 wounds remaining, subtract 5 from this model's Objective Control characteristic and each time this model makes an attack, subtract 1 from the Hit roll."
+    );
+    expect(e.condition).toBe('damaged');
+    expect(e.side).toBe('attacker');
+    expect(e.mods.hitModifier).toBe(-1);
+    // Objective Control is not a combat characteristic the engine models — it must NOT become some
+    // other modifier. The verbatim text is still carried for display.
+    expect(Object.keys(e.mods)).toEqual(['hitModifier']);
+    expect(e.text).toMatch(/Objective Control/);
+    // A conditioned effect is safe to auto-apply (the toggle gates it), so it is not held for review.
+    expect(e.captured).toBeUndefined();
+  });
+
+  it('the bracket is INERT until the player toggles it (a healthy model keeps its full BS)', () => {
+    const effects = cap('While this model has 1-6 wounds remaining, each time this model makes an attack, subtract 1 from the Hit roll.');
+    // Default: no conditions active -> the penalty does not apply. This is the Session-37 safety
+    // property that the old blanket DROP protected; gating preserves it exactly.
+    expect(resolveEffects(effects, { activeConditions: [] }).attacker.hitModifier).toBe(0);
+    expect(resolveEffects(effects, { activeConditions: ['damaged'] }).attacker.hitModifier).toBe(-1);
+  });
+
+  it('`damaged` is a registered situational condition, so the sim renders a toggle for it', () => {
+    expect(CONDITIONS.map((c) => c.id)).toContain('damaged');
+  });
+
+  it('carries the outlier damaged BUFF too (Chaos Daemons, the only non-penalty of the 168)', () => {
+    const [e] = cap(
+      "While this model has 1-7 wounds remaining, add 2 to the Attacks characteristic of this model's Slaughter and Carnage.",
+      'Damaged: 1-7 Wounds Remaining'
+    );
+    expect(e.condition).toBe('damaged');
+    expect(e.mods.attackBonus).toBe(2);
+  });
+
+  it('BREAKING VARIANT: a revive rule that merely says "wounds remaining" is still DROPPED', () => {
+    // The over-apply this guards: 31 of the non-"DAMAGED:" mentions of "wounds remaining" across the
+    // official packs are revive/heal rules. Gating one on `damaged` would mislabel it as a bracket.
+    expect(
+      mapRuleText('Set up that model on the battlefield as close as possible to where it was destroyed, with its full wounds remaining.').effects
+    ).toHaveLength(0);
+    expect(mapRuleText('That model has half of its starting number of wounds remaining.').effects).toHaveLength(0);
+  });
+
+  it('BREAKING VARIANT: the gate wins over any other condition the clause text suggests', () => {
+    // If a bracket clause also read as, say, a target-state buff, gating on `targetCondition`
+    // instead would let a HEALTHY model apply the penalty whenever that other toggle was on.
+    const r = mapRuleText(
+      'While this model has 1-5 wounds remaining, each time this model makes an attack that targets a MONSTER unit, subtract 1 from the Hit roll.'
+    );
+    expect(r.effects[0].condition).toBe('damaged');
+  });
+
+  it('BREAKING VARIANT: an aura clause is still dropped even when it mentions the bracket', () => {
+    // AURA_RE must keep priority — the buff is for other units, and the sim has no board geometry.
+    expect(
+      mapRuleText('While a friendly ADEPTUS ASTARTES unit is within 6" of this model, add 1 to the Hit roll.').effects
+    ).toHaveLength(0);
+  });
+
+  it('degradeInfo reads the threshold from both real band spellings, and invents nothing', () => {
+    expect(degradeInfo([{ name: 'Damaged: 1-9 Wounds Remaining', text: 'While this model has 1-9 wounds remaining…' }]).threshold).toBe(9);
+    // Threshold only in the text (the band is not always in the name).
+    expect(degradeInfo([{ name: 'Damaged', text: 'While this model has 1-13 wounds remaining, …' }]).threshold).toBe(13);
+    // Unparseable band -> flagged WITHOUT a made-up number.
+    expect(degradeInfo([{ name: 'Damaged', text: 'While this model is damaged, it suffers.' }]).threshold).toBeNull();
+    expect(degradeInfo([{ name: 'Feel No Pain', text: '5+' }])).toBeNull();
+  });
+});
+
+// ---- F2.1 round 2: the three real-data findings, each pinned by the input that broke it -------
+// Found by grounding the first cut against the LIVE 11e catalogue (scripts/ground-f21-brackets.mjs).
+// The first two were LATENT BEFORE F2.1: the bracket opener was dropped while the penalty clause
+// survived as an always-on -1 to hit, which the capture routed to review — one "Apply" in the
+// abilities editor and a HEALTHY Gorkanaut would have shot at -1 for the whole game.
+describe('F2.1 — degrade brackets that the real catalogue writes awkwardly', () => {
+  const cond = (text, name = 'Damaged: 1-7 Wounds Remaining') =>
+    mapRuleText(text, { name }).effects.map((e) => e.condition);
+
+  it('BREAKING VARIANT: the ", and each time…" split does not strand the penalty always-on', () => {
+    // Verbatim live text (Gorkanaut / Morkanaut / Kill Krusha). splitClauses turns ", and each time"
+    // into a new clause, so the penalty ends up in a clause with no "wounds remaining" opener.
+    const text =
+      "While this model has 1-7 wounds remaining, subtract 4 from this model's Objective Control characteristic, and each time this model makes an attack, subtract 1 from the Hit roll.";
+    expect(cond(text)).toEqual(['damaged']);
+    // and it is inert until toggled
+    const effects = captureUnitAbilities([{ name: 'Damaged: 1-7 Wounds Remaining', text }]);
+    expect(resolveEffects(effects, { activeConditions: [] }).attacker.hitModifier).toBe(0);
+    expect(resolveEffects(effects, { activeConditions: ['damaged'] }).attacker.hitModifier).toBe(-1);
+  });
+
+  it('BREAKING VARIANT: a band scoped to a NAMED model still gates (The Silent King)', () => {
+    const text =
+      "While this unit's Szarekh model has 1-6 wounds remaining, halve the Attacks characteristic of that model's weapons, and each time this unit makes an attack, subtract 1 from the Hit roll.";
+    expect(cond(text, 'Damaged: 1-6 wounds remaining')).toEqual(['damaged']);
+  });
+
+  it('BREAKING VARIANT: the ability NAME gates it when the body text carries an upstream typo', () => {
+    // Live 11e data, Onager Dunecrawler + Terrax-Pattern Termite: "While this MDEL has 1-4 wounds…".
+    // Report upstream; the name is authority enough here.
+    const text = 'While this mdel has 1-4 wounds remaining, each time this model makes an attack, subtract 1 from the Hit roll.';
+    expect(cond(text, 'Damaged: 1-4 wounds remaining')).toEqual(['damaged']);
+  });
+
+  it('BREAKING VARIANT: "Damaged Armour" is NOT a bracket (name-prefix match is not enough)', () => {
+    // The live Necron "Damaged Armour" is an enemy-debuff aura on the Canoptek Acanthrites. Reading
+    // it as a bracket both put a false "Degrades" chip on the datasheet and would have gated a real
+    // always-on ability behind a toggle the player has no reason to set.
+    const ability = {
+      name: 'Damaged Armour',
+      text: 'In your Shooting phase, after this unit has shot, select one enemy unit hit by one or more of those attacks. Until the end of the phase, each time a friendly NECRONS model makes an attack that targets that unit, on a Critical Wound, improve the Armour Penetration characteristic of that attack by 1.',
+    };
+    expect(degradeInfo([ability])).toBeNull();
+    expect(mapRuleText(ability.text, { name: ability.name }).effects.every((e) => e.condition !== 'damaged')).toBe(true);
+  });
+
+  it('an unmodellable bracket maps to NOTHING rather than an invented modifier (Tesseract Vault)', () => {
+    // Objective Control plus a weapon-SELECTION restriction: neither is a combat modifier the engine
+    // has. Under-apply is the safe direction; the verbatim text still shows on the datasheet.
+    const text =
+      "While this model has 1-8 wounds remaining, subtract 4 from its Objective Control characteristic and you can only select one of the C'tan Powers weapons in your Shooting phase, instead of two.";
+    expect(mapRuleText(text, { name: 'Damaged: 1-8 wounds remaining' }).effects).toHaveLength(0);
   });
 });

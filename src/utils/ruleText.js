@@ -25,16 +25,37 @@ const MODELLABLE_CONDITIONS = new Set(['onCharge', 'halfRange', 'stationary', 't
 // Conditions gated on board/game state the sim does NOT model — a rule using one of these is
 // 'situational' (the effect is emitted but its toggle defaults OFF). These ids are also added
 // to engine/effects.js CONDITIONS so they appear as toggles in the sim.
-const SITUATIONAL_CONDITIONS = new Set(['objectiveControl', 'oncePerBattle', 'armyAbilityActive', 'targetCondition', 'belowStrength']);
+const SITUATIONAL_CONDITIONS = new Set(['objectiveControl', 'oncePerBattle', 'armyAbilityActive', 'targetCondition', 'belowStrength', 'damaged']);
 
 // Clauses that gate a buff on state the sim genuinely CANNOT represent, so a modifier inside one is
 // DROPPED (never captured as always-on) — under-applying is safe, silently over-applying is not
 // (Session 37, the capture-safety review):
-//   - a DEGRADING ("Damaged:" / "while this model has N-M wounds remaining …") bracket: the sim has
-//     no live wound tracking, so a healthy unit must NOT inherit its last-bracket penalty;
+//   - a wound-state mention the mapper can't pin to a bracket ("returned … with its full wounds
+//     remaining"): almost always a revive/heal rule, which the engine cannot express at all;
 //   - an AURA / range gate ("while a friendly … within N\"" / "within N\" of this model"): the sim
 //     has no board geometry, and the buff is usually to OTHER units, not the bearer.
 const DEGRADING_RE = /\b\d+\s*-\s*\d+\s+wounds?\s+remaining\b|\bdamaged\s*:\s*\d|\bwounds?\s+remaining\b|\bis\s+damaged\b/i;
+// The DEGRADE BRACKET GATE (F2.1, 2026-07-30) — the narrow, GW-verbatim idiom that opens a
+// "Damaged: 1-N wounds remaining" ability: "While this model has 1-9 wounds remaining, …". A clause
+// matching THIS is no longer dropped: it is mapped and force-gated on the `damaged` condition
+// (default OFF), so the player can simulate a degraded model and a healthy one is untouched.
+//
+// WHY IT IS NARROWER THAN DEGRADING_RE (grounded, 2026-07-30): "wounds remaining" is overwhelmingly
+// NOT a degrade bracket in real 11e text — a sweep of the 29 official faction packs found 31
+// non-"DAMAGED:" mentions, and nearly all are revive rules ("… returned to the battlefield with its
+// full wounds remaining"). Gating those on `damaged` would mislabel them, so anything that does not
+// match this narrow idiom keeps the old DROP behaviour. Under-apply, never over-apply.
+// The SUBJECT (a model / unit) is required between "while" and "has", so the gate cannot span a
+// sentence boundary and swallow unrelated always-on text. Verified against every occurrence in the
+// official packs (170 matches, all "While this model has …") and the whole live 11e catalogue: the
+// only variation is a band scoped to a named model ("While this unit's Szarekh model has 1-6 …").
+const DEGRADE_GATE_RE =
+  /\bwhile\b[^.]{0,50}?\b(?:models?|units?)(?:'s|’s)?\b[^.]{0,20}?\bhas\s*\d+\s*[-‐‑‒–—―]\s*\d+\s+wounds?\s+remaining\b|\bdamaged\s*:\s*\d+\s*[-‐‑‒–—―]\s*\d+\s+wounds?\s+remaining\b|\bwhile\s+(?:this|that)\s+(?:model|unit)\s+is\s+damaged\b/i;
+// The ability NAME form of the same gate. Deliberately strict: it must be the "Damaged:" heading
+// GW uses for the bracket, NOT merely a name starting with the word "Damaged" — the live Necron
+// catalogue has an unrelated "Damaged Armour" ability (an enemy-debuff aura) that must never be
+// read as a degrade bracket.
+const DEGRADE_NAME_RE = /^\s*damaged\s*(?:[:\-‐‑‒–—―]|$)/i;
 const AURA_RE = /\bwithin\s+\d+\s*"|\bwithin\s+\d+\s*inches\b/i;
 
 // The "N-M wounds remaining" range in a degrade ability (M = the UPPER bound: the unit degrades while
@@ -52,8 +73,12 @@ const WOUNDS_REMAINING_RE = /(\d+)\s*-\s*(\d+)\s+wounds?\s+remaining/i;
 export function degradeInfo(datasheetAbilities) {
   for (const a of Array.isArray(datasheetAbilities) ? datasheetAbilities : []) {
     const name = String(a?.name || '');
-    if (!/^\s*damaged\b/i.test(name)) continue;
     const text = String(a?.text || '');
+    // The name must be GW's bracket HEADING ("Damaged:", or a bare "Damaged"), or the body must
+    // state a band. A name merely STARTING with the word "Damaged" is not enough: the live Necron
+    // catalogue's "Damaged Armour" is an enemy-debuff aura, and flagging it as a degrade bracket
+    // put a false "Degrades" chip on the Canoptek Acanthrites (found by grounding, 2026-07-30).
+    if (!DEGRADE_NAME_RE.test(name) && !DEGRADE_GATE_RE.test(text)) continue;
     const m = name.match(WOUNDS_REMAINING_RE) || text.match(WOUNDS_REMAINING_RE);
     const threshold = m ? Number(m[2]) : NaN;
     return { threshold: Number.isFinite(threshold) ? threshold : null, name: name.trim(), text: text.trim() };
@@ -556,15 +581,22 @@ function grantKeywordMods(t) {
 // "such/that weapon" anaphor also inherits the subject clause's PHASE (the weapon type was named
 // there — "Ranged weapons … have [ASSAULT], and each time an attack made with such a weapon…").
 // Returns { effects, matched, ownScope, ownPhase } so the caller can track the inheritance.
-function mapClause(clause, { name, source, nameCondition, inherited = null }) {
-  // Drop a clause gated on state the sim can't represent (a degrading "Damaged:" bracket / a range
-  // aura) BEFORE matching a modifier, so a healthy unit never inherits its last-bracket penalty and
-  // a bearer never self-applies a within-N" aura meant for friends. Under-apply, never over-apply.
+function mapClause(clause, { name, source, nameCondition, inherited = null, degradeAbility = false }) {
+  // A DEGRADE BRACKET clause ("While this model has 1-9 wounds remaining, …") is GATED, not dropped
+  // (F2.1, 2026-07-30): it maps normally and every effect it emits is force-gated on the `damaged`
+  // condition, which defaults OFF — so a healthy model never inherits its damaged penalty (the
+  // original Session-37 safety requirement) while a player simulating a degraded Knight can turn it
+  // on. The gate WINS over any condition detected in the clause text; grounded across all 168 real
+  // 11e degrade abilities, none carries a second gate, so nothing is being overwritten.
+  const degradeGated = degradeAbility || DEGRADE_GATE_RE.test(clause);
+  // Drop a clause gated on state the sim can't represent (an unpinnable wound-state mention such as
+  // a revive rule / a range aura) BEFORE matching a modifier, so a bearer never self-applies a
+  // within-N" aura meant for friends. Under-apply, never over-apply.
   // EXCEPTION (2026-07-14): "…attacks that target a unit within N\"" is a TARGET-RANGE gate on the
   // attack, not an aura — detectCondition reads it as targetCondition (off by default), so keeping
   // the clause never over-applies (the Hernkyn / Bringers of Flame / T'au Battlesuit shapes).
   const targetRange = /\btargets?\s+(?:a|an|one)\s+unit\s+within\b/i.test(clause);
-  if (DEGRADING_RE.test(clause) || (AURA_RE.test(clause) && !targetRange)) return { effects: [], matched: [] };
+  if ((DEGRADING_RE.test(clause) && !degradeGated) || (AURA_RE.test(clause) && !targetRange)) return { effects: [], matched: [] };
 
   const effects = [];
   const matched = [];
@@ -574,7 +606,9 @@ function mapClause(clause, { name, source, nameCondition, inherited = null }) {
     ownPhase === 'any' && inherited?.phase && inherited.phase !== 'any' && /\b(?:such|that) (?:a )?weapons?\b/i.test(clause)
       ? inherited.phase
       : ownPhase;
-  const condition = detectCondition(clause) || nameCondition || null;
+  // The degrade bracket is the dominant gate on its own clause — it wins over any other condition
+  // the text would suggest, and over a name-derived one (F2.1).
+  const condition = degradeGated ? 'damaged' : detectCondition(clause) || nameCondition || null;
   const ownScope = detectScope(clause);
   const hasOwnScope = ownScope.attacker.length > 0 || ownScope.defender.length > 0;
   // A subject-less clause inherits the carried scope; its OWN exclusions still union in (a
@@ -652,8 +686,12 @@ export function mapRuleText(text, { name = 'Rule', source } = {}) {
   // Scope inheritance across clauses (see mapClause): a subject-bearing clause establishes the
   // carry; a subject-less continuation clause inherits it; the next subject replaces it.
   let carry = null;
+  // Whether THIS ability is a degrade bracket is an ability-level fact (see the gate block below),
+  // so it is decided once, before the clauses, and handed to every clause — otherwise a clause that
+  // lost the "while … wounds remaining" opener in the split would be dropped or read as always-on.
+  const degradeAbility = DEGRADE_GATE_RE.test(mapText) || DEGRADE_NAME_RE.test(name || '');
   for (const clause of splitClauses(mapText)) {
-    const r = mapClause(clause, { name, source, nameCondition, inherited: carry });
+    const r = mapClause(clause, { name, source, nameCondition, inherited: carry, degradeAbility });
     effects.push(...r.effects);
     matched.push(...r.matched);
     if (r.ownScope) carry = { scope: r.ownScope, phase: r.ownPhase };
@@ -678,6 +716,24 @@ export function mapRuleText(text, { name = 'Rule', source } = {}) {
   // ability gates the WHOLE ability, even when the effect clause is a separate sentence that doesn't
   // repeat the trigger (e.g. "Once per battle … If it does, … add 3 to the Attacks" — Finest Hour).
   // Apply the gate to any conditionless effect, so a split conditional never reads as always-on.
+  //
+  // The DEGRADE BRACKET is checked FIRST and applied to EVERY effect, not just conditionless ones
+  // (F2.1, 2026-07-30). It is ability-level for two reasons found by grounding against the live
+  // catalogue, both of which silently produced an ALWAYS-ON -1 to hit on a healthy model:
+  //   * splitClauses turns "…, and each time…" into a new clause, so GW's Gorkanaut / Morkanaut /
+  //     Kill Krusha wording ("…subtract 4 from this model's Objective Control characteristic, AND
+  //     each time this model makes an attack, subtract 1 from the Hit roll") left the penalty in a
+  //     clause that no longer carried the "while … wounds remaining" gate;
+  //   * The Silent King scopes the band to a named model ("While this unit's Szarekh model has 1-6
+  //     wounds remaining, … each time this unit makes an attack, subtract 1 from the Hit roll").
+  // The ability NAME is authority too: "Damaged: 1-4 wounds remaining" identifies the bracket even
+  // when the body text is unparseable — the live 11e data carries an upstream typo ("While this
+  // MDEL has 1-4 wounds remaining", Onager Dunecrawler + Terrax-Pattern Termite) that no text regex
+  // should have to know about. GW writes each degrade ability as ONE sentence wholly inside the
+  // bracket (verified across all 168 in the official packs), so gating the whole ability cannot
+  // under-gate a genuinely always-on clause.
+  if (degradeAbility) for (const e of effects) e.condition = 'damaged';
+
   const abilityGate = /\bonce per (?:battle|turn|game)\b/i.test(mapText)
     ? 'oncePerBattle'
     : /\bwaaa?gh!?\b[^.]{0,30}?\bactive\b|\bis active for your army\b/i.test(mapText)

@@ -63,6 +63,14 @@ export const CONDITIONS = [
   // The ATTACKING unit has taken casualties ("if this unit is below its Starting Strength / Below
   // Half-strength") — the sim has no mid-game casualty state, so it is a toggle the player sets.
   { id: 'belowStrength', label: 'Below Starting / Half strength' },
+  // The model is in its DEGRADING ("Damaged: 1-N wounds remaining") bracket (F2.1, 2026-07-30).
+  // Ground truth: 11e has no multi-bracket statline table — a degrading datasheet carries ONE
+  // statline plus one flat "Damaged: 1-N wounds remaining" ability (168 of them across the 29
+  // official 11e faction packs; 167 are "-1 to the Hit roll", 50 of those also drop Objective
+  // Control, and exactly one is a buff). The sim tracks no live wound total, so the bracket is a
+  // toggle the player sets for the round it applies — and it defaults OFF, so a healthy model
+  // never inherits its damaged penalty.
+  { id: 'damaged', label: 'Damaged (wound bracket)' },
 ];
 
 // ---- model-type scope (Session 17; keyword phrases 2026-07-14) --------------
