@@ -1210,6 +1210,8 @@ export function planPackRules(raw = {}) {
     // display/legality-only; the text mapper below is unaffected. Absent on PDF/AI packs.
     detachmentPoints: d?.detachmentPoints,
     forceDisposition: d?.forceDisposition,
+    // Two dispositions can happen since MFM v1.4 (the codex Orks War Horde) — additive array.
+    forceDispositions: Array.isArray(d?.forceDispositions) && d.forceDispositions.length ? d.forceDispositions : undefined,
     keywords: Array.isArray(d?.keywords) ? d.keywords : undefined,
     rule: planOne(d?.rule, 'detachment'),
     // Referenced abilities (Against the Horde …) — DISPLAY-ONLY reference text, never simulatable
