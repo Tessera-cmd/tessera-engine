@@ -472,3 +472,64 @@ describe('points-efficiency output (Session 7)', () => {
     expect(res.woundsPerPoint).toBeUndefined();
   });
 });
+
+// ---- 2026-09-08: conditional weapon keywords (the Codex: Orks idiom) ------------------------
+// "LETHAL HITS: NON-MONSTER/VEHICLE" is Lethal Hits only against units with NONE of the listed
+// keywords; "DEVASTATING WOUNDS: MONSTER/VEHICLE" only against units with ANY. Resolution happens
+// against the defender BEFORE grouping (combat.js resolveConditionalKeywords), so an active
+// condition must be STREAM-IDENTICAL to the plain keyword and an unmet one STREAM-IDENTICAL to no
+// keyword at a fixed seed — asserted as exact stat equality, no tolerances.
+import { resolveConditionalKeywords, groupWeapons } from './combat.js';
+
+describe('conditional weapon keywords (Codex: Orks era)', () => {
+  const shooter = (kw) => ({
+    models: 5,
+    weapons: [{ name: 'Shoota', type: 'ranged', count: 5, A: 3, BS: 4, S: 4, AP: 0, D: 1, keywords: kw }],
+  });
+  const target = (keywords) => ({ models: 10, T: 4, SV: 7, W: 1, INV: null, FNP: null, keywords });
+  const opts = { phase: 'ranged', iterations: 4000, seed: SEED };
+
+  it('resolver: NON- form activates only when the defender has none of the listed keywords', () => {
+    expect(resolveConditionalKeywords(['LETHAL HITS: NON-MONSTER/VEHICLE'], ['INFANTRY'])).toEqual(['LETHAL HITS']);
+    expect(resolveConditionalKeywords(['LETHAL HITS: NON-MONSTER/VEHICLE'], ['VEHICLE'])).toEqual([]);
+    expect(resolveConditionalKeywords(['LETHAL HITS: NON-MONSTER/VEHICLE'], ['MONSTER', 'TITANIC'])).toEqual([]);
+  });
+
+  it('resolver: positive form activates only when the defender has any listed keyword', () => {
+    expect(resolveConditionalKeywords(['DEVASTATING WOUNDS: MONSTER/VEHICLE'], ['VEHICLE'])).toEqual(['DEVASTATING WOUNDS']);
+    expect(resolveConditionalKeywords(['DEVASTATING WOUNDS: MONSTER/VEHICLE'], ['INFANTRY'])).toEqual([]);
+    expect(resolveConditionalKeywords(['DEVASTATING WOUNDS: INFANTRY'], ['INFANTRY', 'MOB'])).toEqual(['DEVASTATING WOUNDS']);
+    expect(resolveConditionalKeywords(['SUSTAINED HITS 2: MONSTER/VEHICLE'], ['MONSTER'])).toEqual(['SUSTAINED HITS 2']);
+  });
+
+  it('resolver: BREAKING VARIANTS — plain keywords untouched (same reference), degenerate condition inert', () => {
+    const plain = ['LETHAL HITS', 'RAPID FIRE 1'];
+    expect(resolveConditionalKeywords(plain, ['VEHICLE'])).toBe(plain); // fast path, SAME array
+    // The one malformed upstream entry ("LETHAL HITS: NON-") must stay verbatim and never crash.
+    expect(resolveConditionalKeywords(['LETHAL HITS: NON-'], ['INFANTRY'])).toEqual(['LETHAL HITS: NON-']);
+    expect(resolveConditionalKeywords([], ['INFANTRY'])).toEqual([]);
+  });
+
+  it('end-to-end: an ACTIVE condition is stream-identical to the plain keyword', () => {
+    const conditional = runSimulation(shooter(['LETHAL HITS: NON-MONSTER/VEHICLE']), target(['INFANTRY']), opts);
+    const plain = runSimulation(shooter(['LETHAL HITS']), target(['INFANTRY']), opts);
+    expect(conditional.woundsDealt).toEqual(plain.woundsDealt);
+    expect(conditional.kills).toEqual(plain.kills);
+  });
+
+  it('end-to-end: an UNMET condition is stream-identical to no keyword at all', () => {
+    const conditional = runSimulation(shooter(['LETHAL HITS: NON-MONSTER/VEHICLE']), target(['VEHICLE', 'WALKER']), opts);
+    const bare = runSimulation(shooter([]), target(['VEHICLE', 'WALKER']), opts);
+    expect(conditional.woundsDealt).toEqual(bare.woundsDealt);
+    expect(conditional.kills).toEqual(bare.kills);
+  });
+
+  it('the defender union includes attached characters (the Anti-[keyword] 19.03 precedent)', () => {
+    const atk = shooter(['DEVASTATING WOUNDS: MONSTER/VEHICLE']);
+    const defWithVehicleLeader = { ...target(['INFANTRY']), attached: [{ name: 'Beast', models: 1, W: 6, SV: 3, keywords: ['MONSTER', 'CHARACTER'], weapons: [] }] };
+    const groups = groupWeapons(atk, { phase: 'ranged' }, defWithVehicleLeader);
+    expect(groups[0].weapon.keywords).toContain('DEVASTATING WOUNDS');
+    const plainDef = groupWeapons(atk, { phase: 'ranged' }, target(['INFANTRY']));
+    expect(plainDef[0].weapon.keywords).toEqual([]);
+  });
+});

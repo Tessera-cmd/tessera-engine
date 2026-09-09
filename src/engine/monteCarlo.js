@@ -99,7 +99,9 @@ export function runSimulation(attacker, defender, options = {}) {
   let sOverkill = 0;
   // Per-weapon-group damage sums, aligned to groupWeapons() order (static metadata
   // resolved once below).
-  const groups = groupWeapons(attacker, options);
+  // The defender threads through so conditional weapon keywords resolve identically here and in
+  // each run's simulateUnitAttack — the per-profile attribution stays aligned to the same groups.
+  const groups = groupWeapons(attacker, options, defender);
   const sProfile = new Array(groups.length).fill(0);
 
   for (let i = 0; i < N; i++) {
@@ -157,8 +159,9 @@ export function runSimulation(attacker, defender, options = {}) {
     unsaved: mean(sFailed + sMortalInst), // wounds that beat the save (pre-damage, pre-cap)
     mortalInstances: mean(sMortalInst),
     fnpIgnored: mean(sFnp),
-    // Overkill: wasted output (spillover past a kill + wounds on an already-dead unit).
-    // overkillChance is how often the unit is wiped outright.
+    // Overkill: unsaved wounds that landed after the unit was already destroyed (wasted
+    // output). `overkillChance` is how often the unit is wiped outright. Together they answer
+    // "am I over-committing into this target?".
     overkill: mean(sOverkill),
     overkillChance: totalModels > 0 ? kills.filter((k) => k >= totalModels).length / N : null,
     hitChance: rate(sHits, sAttacks),
@@ -177,8 +180,21 @@ export function runSimulation(attacker, defender, options = {}) {
 
   // Efficiency metric, only meaningful once a real points cost is set.
   if (attacker.points) {
+    result.points = attacker.points; // echo the points the efficiency was computed against
     result.killsPerPoint = +(result.kills.mean / attacker.points).toFixed(4);
     result.woundsPerPoint = +(result.woundsDealt.mean / attacker.points).toFixed(4);
+  }
+  // The points TRADE: echo the defender's points and an estimate of the value destroyed
+  // (proportional to the share of the unit removed), so the UI can show what you commit vs
+  // what you take off the table. pointsDestroyed is an estimate (it doesn't know WHICH
+  // models died — a cheap body and the leader count the same per-model here).
+  if (defender.points) {
+    result.defenderPoints = defender.points;
+    const totalModels = result.breakdown?.totalModels || 0;
+    if (totalModels > 0) {
+      const fracKilled = Math.min(1, result.kills.mean / totalModels);
+      result.pointsDestroyed = Math.round(fracKilled * defender.points);
+    }
   }
   return result;
 }

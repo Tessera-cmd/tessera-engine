@@ -459,19 +459,64 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   }
 }
 
+// ---- conditional weapon keywords (Codex: Orks era, 2026-09) ----------------
+// A weapon keyword may carry a TARGET condition after a colon: "LETHAL HITS: NON-MONSTER/VEHICLE"
+// is Lethal Hits only against units with NONE of the slash-listed keywords; "DEVASTATING WOUNDS:
+// MONSTER/VEHICLE" only against units with ANY of them. Live vocabulary at pin 05363b50 (repo-wide
+// sweep 2026-09-08, 113 instances): LETHAL HITS / DEVASTATING WOUNDS / SUSTAINED HITS X, both
+// polarities. Resolved against the DEFENDER — the same attached-union keyword set Anti-[keyword]
+// uses (19.03) — BEFORE grouping, so group keys and every downstream hasKw/kwNum read the
+// effective plain keyword. An unparsable condition (upstream carries one truncated "LETHAL HITS:
+// NON-" on a Legends sheet) stays verbatim: inert, never a crash. A list with no colon returns
+// the SAME array reference (the exact pre-codex fast path — grouping stays byte-identical).
+export function resolveConditionalKeywords(keywords, defenderKeywords) {
+  const list = keywords || [];
+  if (!list.some((k) => String(k).includes(':'))) return list;
+  const def = new Set((defenderKeywords || []).map((k) => String(k).toUpperCase()));
+  const out = [];
+  for (const raw of list) {
+    const k = String(raw);
+    const m = k.match(/^([^:]+):\s*(NON-)?([A-Z0-9 /-]+)$/i);
+    if (!m) {
+      out.push(k); // no/unparsable condition — keep verbatim (inert if it was conditional)
+      continue;
+    }
+    const names = m[3].split('/').map((s) => s.trim().toUpperCase()).filter(Boolean);
+    // Malformed condition (the truncated upstream "LETHAL HITS: NON-" — the optional NON- group
+    // backtracks into the name class, leaving a bare NON token): keep verbatim, inert.
+    if (!names.length || names.some((n) => n === 'NON' || n === 'NON-')) {
+      out.push(k);
+      continue;
+    }
+    const hasAny = names.some((n) => def.has(n));
+    // Condition met -> the plain keyword applies; not met -> it simply doesn't, for this target.
+    if (m[2] ? !hasAny : hasAny) out.push(m[1].trim().toUpperCase());
+  }
+  return out;
+}
+
 // Group identical weapon profiles, summing the model counts that carry each.
-export function groupWeapons(attacker, options) {
+// `defender` (optional, additive) enables conditional-keyword resolution against the target —
+// simulateUnitAttack and the Monte Carlo metadata pass it; a defender-less call (tests, display
+// paths that have no target) behaves exactly as before.
+export function groupWeapons(attacker, options, defender = null) {
   const phase = options.phase || 'ranged'; // 'ranged' | 'melee' | 'all'
   const groups = new Map();
   // Army/detachment rules can grant keywords to the whole unit (e.g. LETHAL HITS).
   const granted = (options.grantKeywords || []).map((k) => String(k).toUpperCase());
+  // The target's keyword set for conditional weapon keywords: body + attached characters,
+  // mirroring the Anti-[keyword] union (19.03).
+  const defKw = defender
+    ? [...(defender.keywords || []), ...attachedChars(defender).flatMap((ch) => ch.keywords || [])]
+    : null;
   const add = (weapon, defaultCount) => {
     if (phase !== 'all' && weapon.type !== phase) return;
     const count = weapon.count != null ? weapon.count : defaultCount;
     if (!count) return;
     // Merge granted keywords (deduped) so they resolve and grouping stays consistent.
     const mergedKw = granted.length ? [...new Set([...kwList(weapon), ...granted])] : kwList(weapon);
-    const w = granted.length ? { ...weapon, keywords: mergedKw } : weapon;
+    const resolvedKw = defKw ? resolveConditionalKeywords(mergedKw, defKw) : mergedKw;
+    const w = granted.length || resolvedKw !== mergedKw ? { ...weapon, keywords: resolvedKw } : weapon;
     // Canonicalise the dice-able fields so a numeric 2 and a string '2' (or 'd6'/'D6')
     // merge into one group — they fire identically, and a type-split only fragments the
     // per-weapon breakdown display.
@@ -485,7 +530,7 @@ export function groupWeapons(attacker, options) {
       w.AP,
       canon(w.D),
       w.meltaBonus ?? null,
-      mergedKw.slice().sort(),
+      resolvedKw.slice().sort(),
     ]);
     if (groups.has(key)) groups.get(key).count += count;
     else groups.set(key, { weapon: w, count });
@@ -509,7 +554,7 @@ export function simulateUnitAttack(attacker, defender, options = {}, rng) {
   // Damage attributed to each weapon group, in groupWeapons() order. Computed by
   // diffing woundsDealt around each group, no extra rolls, no change to outcomes.
   const perProfile = [];
-  for (const g of groupWeapons(attacker, options)) {
+  for (const g of groupWeapons(attacker, options, defender)) {
     const before = state.woundsDealt;
     simulateAttackSequence(g.weapon, g.count, defender, state, options, rng);
     perProfile.push(state.woundsDealt - before);
