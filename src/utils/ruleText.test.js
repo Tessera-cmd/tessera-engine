@@ -555,6 +555,37 @@ describe('planPackRules (faction-pack: army rule + many detachments)', () => {
     expect(packHasRules(planPackRules({ detachments: [] }))).toBe(false);
     expect(packHasRules(planPackRules({}))).toBe(false);
   });
+
+  // A stratagem's Command-point cost (the PDF heading, a rules pack, an AI transcription) rides through
+  // the plan when it is a non-negative integer; anything else is dropped, never guessed, and an entry
+  // without one keeps the exact pre-cost shape (no `cp` key).
+  it('carries an integer stratagem cp through the plan and drops anything else', () => {
+    const plan = planPackRules({
+      faction: 'Orks',
+      detachments: [
+        {
+          name: 'War Horde',
+          stratagems: [
+            { name: 'Get Stuck In', cp: 1, text: 'Add 1 to the Attacks characteristic.' },
+            { name: 'Free', cp: 0, text: 'Add 1 to the Attacks characteristic.' },
+            { name: 'No Cost', text: 'Add 1 to the Attacks characteristic.' },
+            { name: 'Bad Cost', cp: 'lots', text: 'Add 1 to the Attacks characteristic.' },
+            { name: 'Half Cost', cp: 1.5, text: 'Add 1 to the Attacks characteristic.' },
+            { name: 'Negative', cp: -1, text: 'Add 1 to the Attacks characteristic.' },
+            { name: 'Top Cost', cp: 99, text: 'Add 1 to the Attacks characteristic.' },
+            { name: 'Too Dear', cp: 100, text: 'Add 1 to the Attacks characteristic.' },
+          ],
+          enhancements: [{ name: 'Not A Stratagem', cp: 2, text: 'Add 1 to the Attacks characteristic.' }],
+        },
+      ],
+    });
+    const [a, free, none, bad, half, neg, top, dear] = plan.detachments[0].stratagems;
+    expect(a.cp).toBe(1);
+    expect(free.cp).toBe(0);
+    expect(top.cp).toBe(99);
+    for (const s of [none, bad, half, neg, dear]) expect('cp' in s).toBe(false);
+    expect('cp' in plan.detachments[0].enhancements[0]).toBe(false); // stratagems only
+  });
 });
 
 describe('structured wargear modifiers — modsToEffects (Session 45)', () => {

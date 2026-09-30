@@ -94,7 +94,8 @@ const MAX_VARIANTS = 16;
 /**
  * @param ctx { attackerAbilities, defenderAbilities, atkRules, defRules, conditions,
  *              baseOptions, baseDefender, phase }
- * @returns { full: {options, defender}, variants: [{ key, label, kind, side, options, defender }] }
+ * @returns { full: {options, defender}, variants: [{ key, label, kind, side, options, defender, cp? }] }
+ *          (`cp`: a stratagem variant's integer Command-point cost, only when the stratagem has one)
  */
 export function buildImpactPlan(ctx) {
   const { atkRules, defRules, conditions } = ctx;
@@ -115,6 +116,9 @@ export function buildImpactPlan(ctx) {
       const strat = det?.stratagems?.find((s) => s.id === sId);
       const { a, d } = withSel({ ...sel, stratagems: sel.stratagems.filter((x) => x !== sId) });
       push(`${side}:strat:${sId}`, strat?.name || 'Stratagem', 'stratagem', side, resolveSelection(ctx, a, d, conditions));
+      // The stratagem's Command-point cost, when the library carries one (display-only: the hint names
+      // it). Additive: absent keeps the variant's shape unchanged.
+      if (Number.isInteger(strat?.cp) && strat.cp >= 0) variants[variants.length - 1].cp = strat.cp;
     }
     for (const eId of sel.enhancements || []) {
       const enh = det?.enhancements?.find((e) => e.id === eId);

@@ -4,8 +4,28 @@
 // low-impact against 1-wound models (excess damage is lost) but high-impact against
 // 2-wound models, measured through the real plan + engine, as the worker does.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { runSimulation } from './monteCarlo.js';
+
+// X4 review C4: one extra detachment whose stratagem carries a CP cost, resolved only for its own id;
+// every other selection falls through to the real library, so the other tests are unaffected.
+const COSTED_DETACHMENT = {
+  id: 'test-det-cp',
+  name: 'Costed',
+  rule: { effects: [] },
+  stratagems: [
+    { id: 'test-strat-cp', name: 'Paid For', phase: 'shooting', effects: [], cp: 2 },
+    { id: 'test-strat-free', name: 'No Cost Given', phase: 'shooting', effects: [] },
+  ],
+  enhancements: [],
+};
+vi.mock('../data/rules.js', async (importOriginal) => {
+  const orig = await importOriginal();
+  return {
+    ...orig,
+    detachmentForSelection: (sel = {}) => (sel.detachmentId === 'test-det-cp' ? COSTED_DETACHMENT : orig.detachmentForSelection(sel)),
+  };
+});
 import { buildImpactPlan, classifyLowImpact, LOW_IMPACT } from './impact.js';
 
 const attacker = {
@@ -126,5 +146,31 @@ describe('+1 Damage stratagem impact depends on target wounds', () => {
     const imp = impactOf(planFor(2), 'attacker:strat:ex-strat-fury', 2);
     expect(imp.damageDelta).toBeGreaterThan(LOW_IMPACT.damage);
     expect(classifyLowImpact(imp)).toBe(false); // → Hints would NOT flag it
+  });
+});
+
+// X4 review C4 (2026-09-30): a stratagem variant carries the library stratagem's integer CP cost, so
+// the Hints line can say "likely not worth the N CP here". Additive: a stratagem without a cost (the
+// example library) keeps the variant shape unchanged.
+describe('stratagem variant carries its CP cost', () => {
+  it('adds cp only when the stratagem has an integer cost', () => {
+    const plan = buildImpactPlan({
+      attackerAbilities: [],
+      defenderAbilities: [],
+      atkRules: { armyRuleId: '', detachmentId: 'test-det-cp', stratagems: ['test-strat-cp', 'test-strat-free'], enhancements: [] },
+      defRules: emptyRules,
+      conditions: [],
+      baseOptions: { phase: 'all' },
+      baseDefender: defender(1),
+      phase: 'shooting',
+    });
+    const paid = plan.variants.find((v) => v.key === 'attacker:strat:test-strat-cp');
+    const free = plan.variants.find((v) => v.key === 'attacker:strat:test-strat-free');
+    expect(paid.cp).toBe(2);
+    expect(paid.label).toBe('Paid For');
+    expect('cp' in free).toBe(false);
+    // the example library stratagem (no cost) keeps the pre-CP variant shape exactly
+    const ex = planFor(1).variants.find((v) => v.key === 'attacker:strat:ex-strat-fury');
+    expect(Object.keys(ex).sort()).toEqual(['defender', 'key', 'kind', 'label', 'options', 'side']);
   });
 });

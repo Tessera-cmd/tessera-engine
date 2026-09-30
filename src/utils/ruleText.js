@@ -1202,6 +1202,15 @@ export function planPackRules(raw = {}) {
     if (Array.isArray(e?.wargearMods) && e.wargearMods.length) p = applyStructuredMods(p, e.wargearMods);
     return p;
   };
+  // A stratagem may carry its Command-point cost (the PDF heading, a rules pack, the AI transcription);
+  // preserve it on the planned entry when it is an integer 0..99 (planOne maps only the text). Additive +
+  // display-only downstream (the reference panel's CP chip and the Play-mode spend button). The 0..99
+  // bound matches the app's cpValue, inlined so this module stays import-free.
+  const planStrat = (s) => {
+    const p = planOne(s, 'stratagem');
+    if (!p) return null;
+    return Number.isInteger(s?.cp) && s.cp >= 0 && s.cp <= 99 ? { ...p, cp: s.cp } : p;
+  };
   const detachments = (Array.isArray(raw.detachments) ? raw.detachments : []).map((d) => ({
     name: d?.name || 'Detachment',
     // The catalogue's 11e construction metadata (bsdataRules) — carried through so importLibraryRules
@@ -1220,7 +1229,7 @@ export function planPackRules(raw = {}) {
     abilities: (Array.isArray(d?.abilities) ? d.abilities : [])
       .filter((a) => a && (a.name || a.text))
       .map((a) => ({ name: a.name || 'Ability', text: cleanRuleText(a.text), classification: 'not-simulatable', simulated: false, effects: [] })),
-    stratagems: (Array.isArray(d?.stratagems) ? d.stratagems : []).map((s) => planOne(s, 'stratagem')).filter(Boolean),
+    stratagems: (Array.isArray(d?.stratagems) ? d.stratagems : []).map(planStrat).filter(Boolean),
     enhancements: (Array.isArray(d?.enhancements) ? d.enhancements : []).map(planEnh).filter(Boolean),
   }));
 

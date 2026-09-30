@@ -38,6 +38,8 @@ function computeImpacts(attacker, defender, options, variants, iterations, seed)
       side: v.side,
       killsDelta: +(full.kills.mean - r.kills.mean).toFixed(2),
       damageDelta: +(full.woundsDealt.mean - r.woundsDealt.mean).toFixed(2),
+      // a stratagem's Command-point cost, carried from the plan for the hint wording (absent = none)
+      ...(Number.isInteger(v.cp) ? { cp: v.cp } : {}),
     };
   });
 }
