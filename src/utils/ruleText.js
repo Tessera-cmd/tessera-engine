@@ -36,7 +36,12 @@
 //     makes it 2, and so on: one bump per release that changes a reading is enough.
 // 2 = 2.93.8: a rule naming both the Shooting and the Fight phase (a stratagem WHEN line, or
 //     "selected to shoot or fight") reads as phase 'any' unless its effect pins melee or ranged.
-export const MAPPER_VERSION = 2;
+// 3 = 2.93.9: unread-trigger precision. Movement / turn / ability-use / disembark triggers and weapon or
+//     attack qualifiers ("Psychic weapons", "Torrent weapons") gate their clause; heal words gate only their
+//     own clause and an activation only what follows it; bulleted items read their lead-in's phase and gate;
+//     a pack sentence before a capitalised "If" splits; an "instead" tier stores its delta over the head; a
+//     Feel No Pain "against mortal wounds / Psychic Attacks" is not emitted.
+export const MAPPER_VERSION = 3;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -50,6 +55,7 @@ const SITUATIONAL_CONDITIONS = new Set(['objectiveControl', 'oncePerBattle', 'ar
 const RULE_TRIGGER = 'ruleTrigger';
 const RULE_TRIGGER_NOTE = 'Part of this rule depends on a trigger the sim can\'t read, so that part is off by default. Turn on "Rule trigger met" for the round it applies.';
 const NON_COMBAT_NOTE = 'Mapped the combat part; an action or movement part is ignored (the sim only resolves the attack).';
+const INSTEAD_NOTE = 'A bonus this rule gives "instead" is stored as the extra on top of the basic bonus, so with its toggle on the total matches the rule.';
 // A CHOICE between listed options ("select one of the following", "select two of the … abilities
 // listed below", "select up to three of the following", "select which augmentations are active",
 // "select either the [LETHAL HITS] or [SUSTAINED HITS 1] ability", and the bulleted alternative
@@ -207,6 +213,9 @@ function detectPhase(t) {
   }
   if (/\b(melee weapons?|melee attacks?|fight phase|in the fight phase|made with melee|selected to fight)\b/i.test(t)) return 'fight';
   if (/\b(ranged weapons?|ranged attacks?|shooting phase|in the shooting phase|made with ranged|selected to shoot)\b/i.test(t)) return 'shooting';
+  // A weapon ability only ranged weapons carry ("Torrent weapons", "Heavy weapons") names the shooting phase
+  // too (2026-10-03), never a unit named after it ("HEAVY WEAPONS SQUAD").
+  if (/\b(?:torrent|blast|heavy|rapid[\s-]+fire|indirect[\s-]+fire|pistol|melta)\s+weapons?\b(?!\s+(?:squads?|teams?|platforms?|batter(?:y|ies))\b)/i.test(t)) return 'shooting';
   return 'any';
 }
 
@@ -528,10 +537,31 @@ const ARMY_COMP_CONDITIONAL = /\bif (?:you are using\b|your army (?:includes|doe
 // The tail is marked (CONJUNCT) so mapRuleText treats it as a continuation of the head: it inherits
 // the head's phase, and the head's gate when it resolves none of its own — never always-on.
 const CONJUNCT = '\u0001';
+// A pack-PDF sentence boundary (2026-10-03, Ruthless Butchery). A faction pack's full stop arrives as a
+// U+FFFD glyph, which is not a clause break, so a stratagem's "add 1 to the Hit roll � If your unit is
+// below Starting Strength, add 1 to the Wound roll as well" read as ONE clause and the tier's gate swallowed
+// the head's unconditional +1 to Hit. The two-column page split can also move that glyph into the other
+// column, leaving "…the Hit roll If your unit…". A capitalised "If" after the glyph, or straight after a
+// word with no punctuation, starts a new sentence (GW never capitalises a mid-sentence "If"). The new clause
+// is marked (SENTENCE) so it keeps the stratagem's phase when it names none: its WHEN line stays in the head.
+const SENTENCE = '\u0002';
+// A bulleted list item after a lead-in that ends with a colon ("…your unit's ranged attacks have: ▪ [LETHAL
+// HITS] . ▪ [SUSTAINED HITS 1] ."). Each item is its own clause (BULLET-marked) and reads the lead-in's phase,
+// gate, trigger and subject, which only the first item used to share (see mapRuleText `leadIn`). The
+// catalogues write the same list with a spaced dash after the colon or a full stop ("[PSYCHIC] attacks
+// have: - +1 S. - +1 S for every 5 models…"); a dash elsewhere ("re - roll" in a PDF, "Blight - Each time")
+// is not a bullet.
+const BULLET = '\u0003';
 function splitClauses(text) {
   return String(text || '')
     .replace(/■/g, '.')
+    .replace(/(?:\s*�\s*|(?<=[a-z0-9\])])\s+)(?=If\b)/g, `. ${SENTENCE}`)
+    .replace(/\s*▪\s*(?:in addition|additionally|furthermore),\s*/gi, `. ${BULLET}`)
+    .replace(/\s*▪\s*|(?<=[:.])\s+-\s+(?=\S)/g, `. ${BULLET}`)
     .replace(/\b(?:in addition|additionally|furthermore),/gi, '. ')
+    // "…Torrent weapons equipped by models in that unit, and all other ranged weapons … have [SUSTAINED HITS
+    // 1]" (Fire and Fury) is two effects on two sets of weapons: a qualifier on the first must not gate the second.
+    .replace(/,\s*and\s+(?=all\s+other\b)/gi, '. ')
     .replace(/,\s*and (each time)\b/gi, '. $1')
     .replace(/(?:,?\s+|\s*\(\s*)and,?\s+(?=if\b)/gi, `. ${CONJUNCT}`)
     .split(/[.;]+/)
@@ -722,10 +752,26 @@ const MOD_PATTERNS = [
       return { side: 'defender', mod: { invuln: parseInt(m[1], 10) }, summary: `${m[1]}+ Invuln`, phase };
     },
   },
-  // Feel No Pain X+ (defensive)
+  // Feel No Pain X+ (defensive). Its "against …" qualifier reads like the invulnerable save's (2026-10-03):
+  // "Feel No Pain 5+ against mortal wounds" (a dozen pack stratagems) or "against Psychic Attacks" can't be
+  // expressed, and as a plain Feel No Pain it would apply to every wound, so it is not emitted.
   {
     re: /feel no pain\s*(\d)\+/i,
-    build: (m) => ({ side: 'defender', mod: { fnp: parseInt(m[1], 10) }, summary: `${m[1]}+ FNP` }),
+    each: true,
+    build: (m, clause = '') => {
+      const q = clause.slice((m.index ?? 0) + m[0].length).match(/^\s*(?:abilit(?:y|ies)\s+)?(?:against|vs\.?)\s+([^,.;]*)/i);
+      let phase;
+      if (q) {
+        const qual = q[1].trim();
+        if (/^melee\s+attacks?\b/i.test(qual)) phase = 'fight';
+        else if (/^ranged\s+attacks?\b/i.test(qual)) phase = 'shooting';
+        else if (!/^(?:that|this|the|those|such)\s+attacks?\b(?!\s+(?:made|with|from|by|that|which|of)\b)|^(?:it|them)\b/i.test(qual)) return null;
+      } else if (/feel no pain\s*\d\+\s*(?:abilit(?:y|ies)\s+)?(?:against|vs\.?)\s+(?:melee|ranged)\s+attacks?/i.test(clause)) {
+        // An unqualified Feel No Pain beside a melee- or ranged-qualified one is not that one's phase.
+        phase = 'any';
+      }
+      return { side: 'defender', mod: { fnp: parseInt(m[1], 10) }, summary: `${m[1]}+ FNP`, phase };
+    },
   },
   // Halve the Damage (defensive)
   {
@@ -815,6 +861,8 @@ function mapClause(
     conjunctHead = false,
     abilityGated = false,
     holdUnresolved = false,
+    lead = null,
+    sentence = false,
   },
 ) {
   // A DEGRADE BRACKET clause ("While this model has 1-9 wounds remaining, …") is GATED, not dropped
@@ -843,25 +891,39 @@ function mapClause(
   //   - a tier of a DROPPED clause is dropped with it ("…wholly within 6" of the bearer, add 2 to the
   //     Attacks… If the bearer's unit has achieved one or more Boasts, add 3 … instead" — Hordeslayer).
   const tier = !!prev && (conjunct || TIER_CONT_RE.test(clause));
-  const headText = tier ? prev.text || '' : '';
-  const gateCtx = { prevTarget: tier && prev.strength === 'target', headText };
+  // A bulleted item reads its subject and side through its lead-in ("Each time an attack targets your
+  // unit: ▪ subtract 1 from the Hit roll"), as a tier does through its head.
+  const headText = tier ? prev.text || '' : lead ? lead.text || '' : '';
+  const gateCtx = { prevTarget: (tier && prev.strength === 'target') || (!tier && lead?.strength === 'target'), headText };
   // A strength EVENT trigger ("cause it to become Below Half-strength") and a full-strength SELF gate
   // ("while this unit is at its Starting Strength") have no sim toggle — drop, never auto-apply.
   const sg = strengthGate(clause, gateCtx);
   const strengthUntoggleable = STRENGTH_EVENT_RE.test(clause) || (sg && sg.subject === 'self' && sg.negated);
-  const dropped = { effects: [], matched: [], prev: { phase: detectPhase(clause), condition: null, strength: sg?.subject || null, dropped: true, text: clause } };
-  if ((DEGRADING_RE.test(clause) && !degradeGated) || (AURA_RE.test(clause) && !targetRange) || strengthUntoggleable || (tier && prev.dropped)) return dropped;
+  const dropped = { effects: [], matched: [], prev: { phase: detectPhase(clause), condition: null, strength: sg?.subject || null, dropped: true, suspect: false, text: clause } };
+  // An item of a dropped lead-in ("While a friendly unit is within 6\" of this model, its ranged attacks
+  // have: ▪ +1 BS . ▪ [HEAVY] .") goes with it, like a tier of a dropped clause. A lead-in that SELECTS a
+  // model within range ("you can select one friendly VEHICLE model within 3\" of this model: - That VEHICLE
+  // model's attacks have +1 to hit rolls…") is an activation, not an aura: its items buff the selected model
+  // and are held / gated by the activation check (mapRuleText), as the same buff in a sentence of its own is.
+  const leadDropped = !!lead?.dropped && !/\bselect\s+(?:one|a|an|up\s+to)\b/i.test(lead.text || '');
+  if ((DEGRADING_RE.test(clause) && !degradeGated) || (AURA_RE.test(clause) && !targetRange) || strengthUntoggleable || (tier && prev.dropped) || leadDropped) return dropped;
 
   const effects = [];
   const matched = [];
   const ownPhase = detectPhase(clause);
-  // "such/that weapon" refers to a weapon typed in the subject clause — inherit its phase.
+  // "such/that weapon" refers to a weapon typed in the subject clause — inherit its phase. A bulleted item
+  // takes its lead-in's phase ("…ranged attacks have: ▪ [SUSTAINED HITS 1]"), and a sentence a pack PDF ran
+  // into its stratagem's effect (SENTENCE) takes that effect's phase: the WHEN line stays in the head.
   const phase =
     ownPhase === 'any' && inherited?.phase && inherited.phase !== 'any' && /\b(?:such|that) (?:a )?weapons?\b/i.test(clause)
       ? inherited.phase
       : ownPhase === 'any' && tier && prev.phase && prev.phase !== 'any'
         ? prev.phase
-        : ownPhase;
+        : ownPhase === 'any' && lead?.phase && lead.phase !== 'any'
+          ? lead.phase
+          : ownPhase === 'any' && sentence && prev?.phase && prev.phase !== 'any'
+            ? prev.phase
+            : ownPhase;
   // The degrade bracket is the dominant gate on its own clause — it wins over any other condition
   // the text would suggest, and over a name-derived one (F2.1).
   // A CONJUNCT tail takes the gate its unsplit clause had (head + tail read together, first gate
@@ -870,16 +932,43 @@ function mapClause(
   // gets the target gate). A separate-sentence tier keeps its OWN gate and inherits the head's only
   // when it has none — an effect has one condition slot, so a two-gate tier keeps the narrower,
   // specific one ("If your unit is Battle-shocked, add 2 … instead" must not ride the charge toggle).
-  const condition = degradeGated
+  const readCondition = degradeGated
     ? 'damaged'
     : conjunct && tier
       ? detectCondition(`${headText} ${clause}`, gateCtx) || prev.condition || nameCondition || null
-      : detectCondition(clause, gateCtx) || (tier ? prev.condition : null) || nameCondition || null;
+      : detectCondition(clause, gateCtx) || (tier ? prev.condition : null) || (lead ? lead.condition : null) || nameCondition || null;
+  // A tier the one condition slot can't tell apart from its head (2026-10-03, review of the pack sentence
+  // split) is UNRESOLVED, so it is dropped (pack rules) or held (datasheets) like any gate-less tier:
+  //   - an "instead" tier on the head's own gate, read or inherited. Kill Shot's "re-roll a Wound roll of 1
+  //     [vs a MONSTER or VEHICLE] … If the target unit is below its Starting Strength, you can re-roll the
+  //     Wound roll instead" put both on the one target toggle, so it re-rolled every wound against a healthy
+  //     MONSTER; a spaced "Battle - shocked" the reader can't see left Maddened Ferocity's +2 riding the charge.
+  //     An unreadable "instead" tier under a rule-wide once-per-battle / Waaagh! gate rides that same gate.
+  //     It only counts when the head emitted the modifier the tier replaces (checked once mapped below):
+  //     "If you do, … this unit does not have the Fights First ability, but instead, … re-roll the Hit roll"
+  //     replaces nothing. Both tiers of a NESTED strength rule ("below its Starting Strength … If that unit is
+  //     Below Half-strength, … instead") share one toggle on purpose (the Kroot rule, see strengthGate).
+  //   - a tier gated on the unit's own keyword ("If your unit has the Anhrathe keyword, then … within range
+  //     of an objective marker, … instead") when another gate holds the slot: the keyword is lost and the
+  //     bonus reached every unit. A keyword gate that IS what fills the slot keeps it.
+  const insteadCandidate =
+    tier &&
+    !degradeGated &&
+    /\binstead\b(?!\s+of\b)/i.test(clause) &&
+    (prev.condition ? readCondition === prev.condition : !readCondition && abilityGated) &&
+    !(sg && prev.strength && sg.subject === prev.strength);
+  const keywordGateLost = tier && !degradeGated && OWN_KEYWORD_GATE_RE.test(clause) && !!detectCondition(clause.replace(OWN_KEYWORD_GATE_RE, ''), gateCtx);
+  const condition = keywordGateLost ? null : readCondition;
   // With a review surface (datasheet abilities, `holdUnresolved`), the gate-less tier is kept and HELD
   // (`_suspect` below) so the player can still see and apply it; without one (pack rules, whose
   // effects apply as stored) it is dropped.
-  if (tier && !condition && !abilityGated && !holdUnresolved) return dropped;
-  const ownScope = detectScope(clause);
+  // An ability-level gate covers a gate-less tier, but not one the slot can't tell apart from its head.
+  if (tier && !condition && (!abilityGated || keywordGateLost) && !holdUnresolved) return dropped;
+  // A bulleted item with no subject of its own reads it through its lead-in, as the first item always did
+  // when it shared the lead-in's clause ("Friendly ADEPTUS ASTARTES MOUNTED have: ▪ This unit's ranged
+  // attacks have [ASSAULT]" scopes to MOUNTED only through the item's "unit").
+  let ownScope = detectScope(clause);
+  if (lead && !ownScope.attacker.length && !ownScope.defender.length) ownScope = detectScope(`${lead.text || ''} ${clause}`);
   // A CONJUNCT tail ("…improve the Ballistic Skill by 1 and, if the Spotted unit was marked by an
   // Observer unit, that attack has [IGNORES COVER]") shares the head's subject: the units it names
   // are objects of its condition, never the acting unit, so it always inherits the carried scope.
@@ -909,14 +998,32 @@ function mapClause(
       // …and the exempt shape, like a conjunct HEAD ("…add 1 to the Hit roll, and if …", which lost
       // the tail's "if" in the split), stays held when another gate word the mapper can't resolve
       // sits anywhere in it ("Until the end of the phase, …", "Unless this unit is Engaged, …").
-      ((conjunctHead || /\btargets?\s+(?:a|an|one)\s+enemy\s+unit\s*,/i.test(clause)) && UNRESOLVED_GATE_WORDS_RE.test(clause)) ||
+      // A pack stratagem's own WHEN / TARGET lines and the "Until the end of the phase," that opens its EFFECT
+      // are its timing and duration, met when it is used, so they are not gate words here (2026-10-03: Codex
+      // Discipline's, Entrophasic Aura Targeting's and Hyperferocity's re-roll of 1s sat behind the toggle).
+      ((conjunctHead || /\btargets?\s+(?:a|an|one)\s+enemy\s+unit\s*,/i.test(clause)) && UNRESOLVED_GATE_WORDS_RE.test(stratagemEffectText(clause))) ||
       /\bagainst\s+(?:a|an|one|each|enemy)\b/i.test(clause) ||
       (/\bwhile\b/i.test(clause) && !/\bleading\b/i.test(clause)) ||
       // Activation / per-phase / random triggers that don't map to a sim toggle — a positive buff
       // behind one of these is once-per-phase / one-target / chance-based, not always-on (grounded
       // across the live catalogues: Storm Speeder "select one enemy unit", "after this model has
       // shot", "in your Shooting phase", "roll one D6"). Route to review rather than auto-apply.
-      /\bselect\s+(?:one|a|an)\b|\bafter\s+(?:it|this\s+(?:unit|model))\s+(?:has|shoots|shot)\b|\bin\s+your\s+(?:command|movement|shooting|charge|fight)\s+phase\b|\broll\s+(?:one|a)\s+d(?:ice|6)\b/i.test(clause));
+      /\bselect\s+(?:one|a|an)\b|\bafter\s+(?:it|this\s+(?:unit|model))\s+(?:has|shoots|shot)\b|\bin\s+your\s+(?:command|movement|shooting|charge|fight)\s+phase\b|\broll\s+(?:one|a)\s+d(?:ice|6)\b/i.test(clause) ||
+      // A movement / ability-use / turn trigger (2026-10-03): "selected to make an Advance/Fall Back move",
+      // "in a turn in which … chose to …", "uses its Mekaniak ability", "disembarks from a Transport". A
+      // pack stratagem's own WHEN / TARGET lines are met when it is used, so they are not read for these.
+      EVENT_TRIGGER_RE.test(clause.replace(STRATAGEM_TIMING_RE, '')) ||
+      // A heal word gates only its own clause, and the heal itself ("the bearer regains 1 lost wound") is an
+      // action, not a trigger: read ability-wide it held Knights of Legend's Feel No Pain 6+ (2026-10-03). A
+      // heal named as the trigger ("Each time the bearer regains 1 lost wound, …") still is one.
+      HEAL_WORD_RE.test(HEAL_TRIGGER_RE.test(clause) ? clause : clause.replace(HEAL_ACTION_RE, '')) ||
+      // A weapon or attack qualifier the engine can't express ("Psychic weapons", "a Psychic Attack",
+      // "Torrent weapons", "Plasma weapon profiles", "this unit's Boltgun weapons") would apply the buff
+      // to every weapon (2026-10-03).
+      weaponQualified(clause)) ||
+    // A bulleted item takes its lead-in's trigger ("When your unit uses the Dark Pacts ability, your unit's
+    // ranged attacks have: ▪ [LETHAL HITS] . ▪ [SUSTAINED HITS 1] .").
+    (!condition && !!lead?.suspect);
   const add = (side, mod, summary, phaseOverride) => {
     const eff = { name, side, phase: phaseOverride || phase, condition, mods: mod };
     const sideScope = side === 'defender' ? scope.defender : scope.attacker;
@@ -927,6 +1034,8 @@ function mapClause(
     // gate a defence (detectScope doesn't carry it: scopeExcl only sees this side's unit), so without it
     // the defence would apply against every attacker: hold / gate it instead.
     if (suspect || (side === 'defender' && /\benemy\s+(?:units?|models?)\s*\(\s*(?:excluding|except)\b/i.test(clause))) eff._suspect = true;
+    if (keywordGateLost) UNRESOLVED_TIER.add(eff);
+    if (sg) STRENGTH_GATED.add(eff);
     effects.push(eff);
     matched.push({ phrase: summary, side, summary });
   };
@@ -942,7 +1051,17 @@ function mapClause(
   }
   for (const g of grantKeywordMods(clause)) add(g.side, g.mod, g.summary);
   for (const r of rerollMods(clause)) add(r.side, r.mod, r.summary);
-  return { effects, matched, ownScope: hasOwnScope ? ownScope : null, ownPhase, prev: { phase, condition, strength: sg?.subject || null, text: clause } };
+  // The "instead" tier on its head's gate (see insteadCandidate), now that its modifiers are known.
+  if (insteadCandidate && effects.some((e) => modKinds(e.mods).some((k) => (prev.kinds || []).includes(k)))) {
+    if (!holdUnresolved) return dropped;
+    for (const e of effects) {
+      e.condition = null;
+      e._suspect = true;
+      UNRESOLVED_TIER.add(e);
+    }
+  }
+  const kinds = [...new Set(effects.flatMap((e) => modKinds(e.mods)))];
+  return { effects, matched, ownScope: hasOwnScope ? ownScope : null, ownPhase, prev: { phase, condition, strength: sg?.subject || null, suspect, kinds, text: clause } };
 }
 
 // Gate wording the mapper has no condition for (2026-10-03 review): a clause carrying one is held for
@@ -950,9 +1069,74 @@ function mapClause(
 const UNRESOLVED_GATE_WORDS_RE =
   /\b(?:provided|during|in\s+the\s+(?:first|turn)|in\s+your\s+opponent'?s|on\s+the\s+turn|for\s+each|unless|until|after|whenever|when|once|as\s+long\s+as|so\s+long\s+as)\b/i;
 
+// Trigger vocabulary with no sim toggle (2026-10-03, grounded on the live catalogues and packs): a move
+// ("selected to make an Advance/Fall Back move", "selected to Advance"), a turn-scoped event ("In a turn a
+// friendly … unit made an ingress/charge move", "In a turn in which the bearer's unit chose to …"), using
+// an ability or a Stratagem ("uses its Mekaniak ability", "uses the Dark Pacts ability") and disembarking.
+// "Each time this unit is selected to shoot / fight" is the ordinary activation and is not matched.
+const EVENT_TRIGGER_RE =
+  /\bselected\s+to\s+(?:make\s+an?\s+[^.,;]{0,40}?\bmove\b|advance\b|fall\s*-?\s*back\b|disembark\b)|\bin\s+(?:a|any|the)\s+turn\b|\buses?\s+(?:its|the|their|this|that|your|an?)\b[^.,;]{0,40}?\b(?:abilit(?:y|ies)|stratagems?)\b|\bdisembark(?:s|ed)?\b/i;
+// A pack-PDF stratagem's WHEN / TARGET text, which sits in the same clause as its EFFECT (see the
+// SENTENCE note above splitClauses): everything from the first "WHEN:" or "TARGET:" up to "EFFECT:" (or the
+// clause end).
+const STRATAGEM_TIMING_RE = /\b(?:WHEN|TARGET):[\s\S]*?(?:\bEFFECT:|$)/;
+// A clause's stratagem EFFECT text without its timing lines and its opening duration ("EFFECT: Until the end
+// of the phase, each time …"); any other clause unchanged.
+function stratagemEffectText(clause) {
+  const t = String(clause);
+  const at = t.search(/\bEFFECT:/);
+  if (at < 0) return t.replace(STRATAGEM_TIMING_RE, '');
+  return t.slice(at + 'EFFECT:'.length).replace(/^\s*until\s+the\s+end\s+of\s+the\s+(?:phase|turn)\s*,\s*/i, '');
+}
+// The heal words, read per clause, and the heal ACTION removed before they are: "regains 1 lost wound",
+// "regains up to D3 lost wounds", "regains up to that many lost wounds". A heal after a trigger word in the
+// same phrase ("Each time the bearer regains 1 lost wound, …") is the trigger, so it is not removed.
+const HEAL_WORD_RE = /\bregains?\b|\blost wounds?\b/i;
+const HEAL_ACTION_RE = /\bregains?\s+(?:up\s+to\s+)?(?:\d+|d\d+(?:\+\d+)?|one|two|three|that\s+many)\s+(?:lost\s+)?wounds?\b/gi;
+const HEAL_TRIGGER_RE = /\b(?:each\s+time|whenever|when|after|if)\b[^,.;]*\bregains?\b/i;
+// A tier gated on the acting unit's own keyword ("If your unit has the Anhrathe keyword", "If it is a
+// Mounted unit"; see mapClause `keywordGateLost`). Case-sensitive on the keyword's capital.
+const OWN_KEYWORD_GATE_RE = /\b[Ii]f\s+(?:your|this|that|its|the\s+bearer's)\s+unit\s+has\s+the\b[^.,]{1,40}?\bkeywords?\b|\b[Ii]f\s+(?:it|your\s+unit|this\s+unit|that\s+unit)\s+is\s+an?\s+[A-Z][^.,]{0,40}?\bunit\b/;
+// Effects of a tier the condition slot can't tell apart from its head (mapClause), held by identity: the
+// ability-level gates must not fill their empty slot on the review path.
+const UNRESOLVED_TIER = new WeakSet();
+// Effects of a clause with a Starting Strength / Half-strength predicate: two "instead" tiers of a nested
+// strength rule share one toggle on purpose (see the delta pass in mapRuleText).
+const STRENGTH_GATED = new WeakSet();
+// Weapon and attack qualifiers the engine can't carry (it has no weapon-type or psychic flag on an effect).
+// An excluded class ("(excluding Torrent weapons)", "excluding Psychic Attacks") is not a qualifier: the buff
+// then misses only that class.
+const NEGATED_QUALIFIER_RE = /\((?:excluding|except)\b[^)]*\)|\b(?:excluding|except(?:\s+for)?|other\s+than|all\s+other)\s+[^,.;]*/gi;
+const WEAPON_QUALIFIER_RE =
+  /\bpsychic\s+(?:attacks?|weapons?)\b|\b(?:torrent|blast|heavy|pistol|melta|plasma|flamer|grenade|lance|hazardous|precision|conversion|indirect[\s-]+fire|rapid[\s-]+fire|twin-linked|one[\s-]+shot|close-quarters?)\s+weapons?(?:\s+profiles?)?\b(?!\s+(?:squads?|teams?|platforms?|batter(?:y|ies))\b)|\[[A-Za-z][A-Za-z0-9 +-]*\]\s+(?:ranged\s+|melee\s+)?(?:weapons?|attacks?)\b|\b(?:weapons?(?:\s+profiles?)?|attacks?)\s+(?:made\s+)?with\s+(?:a|an|the)\s+\[|\b(?:weapons?|attacks?)\b[^.,;]{0,40}?\bthat\s+ha(?:ve|s)\s+(?:the\s+)?\[|\bwith\s+'[^']+'\s+in\s+(?:its|their)\s+names?\b/i;
+// A named weapon after a possessive ("this unit's Snazzgun weapons", "this model's T'au Flamer weapons"):
+// case-sensitive, so it takes a capitalised NAME, never the ordinary "ranged" / "melee" weapons.
+const NAMED_WEAPON_RE = /'s\s+(?!(?:Ranged|Melee)\b)(?:[A-Z][A-Za-z'-]*\s+){1,4}weapons?\b/;
+function weaponQualified(clause) {
+  const t = String(clause).replace(NEGATED_QUALIFIER_RE, '');
+  return WEAPON_QUALIFIER_RE.test(t) || NAMED_WEAPON_RE.test(t);
+}
+
 // The ability-level gates mapRuleText applies to every conditionless effect (see there).
 const ABILITY_ONCE_RE = /\bonce per (?:battle|turn|game)\b/i;
 const ABILITY_WAAAGH_RE = /\bwaaa?gh!?\b[^.]{0,30}?\bactive\b|\bis active for your army\b/i;
+// The activation words read across clauses (mapRuleText's ability-level suspicion), and the target-range
+// phrase they ignore.
+const ACTIVATION_RE =
+  /\bselect\s+(?:one|a|an)\b|\bwithin\s+\d+\s*"|\broll\s+(?:one|a)\s+d(?:ice|6)\b|\bafter\s+(?:it|this\s+(?:unit|model))\s+(?:has|shoots|shot)\b|\bin\s+your\s+(?:command|movement|shooting|charge|fight)\s+phase\b/i;
+const TARGET_RANGE_RE = /\btargets?\s+(?:a|an|one)\s+unit\s+within\s+\d+\s*"/gi;
+// The mod keys the engine SUMS across effects (resolveEffects); the best-of keys (re-rolls, invulnerable
+// save, Feel No Pain) already give an "instead" tier its own value.
+const ADDITIVE_MOD_KEYS = new Set(['hitModifier', 'woundModifier', 'apBonus', 'damageBonus', 'strengthBonus', 'attackBonus', 'hitPenalty', 'damageReduction']);
+// The kinds of modifier an effect carries, a re-roll counted per roll ("reroll.hit"), so an "instead" tier is
+// paired with the head modifier it replaces.
+function modKinds(mods = {}) {
+  return Object.keys(mods || {}).flatMap((k) => (k === 'reroll' && mods.reroll && typeof mods.reroll === 'object' ? Object.keys(mods.reroll).map((r) => `reroll.${r}`) : [k]));
+}
+// The "instead" tiers mapRuleText stored as a delta over their head. Held by identity, never written onto
+// the effect: applyStructuredMods must not de-duplicate a delta against an enhancement's structured buff
+// (that buff is the HEAD's value; the delta is the extra on top of it).
+const INSTEAD_DELTA = new WeakSet();
 
 // A clause that continues the previous clause's attack as a second tier (see mapClause): an "If …"
 // clause that adds to or replaces the previous modifier ("as well" / "instead"), or restates the
@@ -1017,42 +1201,78 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   // it to cover rather than dropped.
   const abilityGated = ABILITY_ONCE_RE.test(mapText) || ABILITY_WAAAGH_RE.test(mapText);
   const clauses = splitClauses(mapText);
+  // The lead-in a bulleted item continues (the last unbulleted clause, when it ends with a colon).
+  let leadIn = null;
+  // The first clause carrying an activation word (see the ability-level suspicion below), and each
+  // effect's clause, so an activation only reaches the effects stated with or after it.
+  let activationAt = Infinity;
+  const clauseOf = new Map();
+  // "Instead" tiers whose modifier REPLACES a head modifier of the same kind (see INSTEAD_DELTA).
+  const insteadPairs = [];
+  let headEffects = [];
   for (const [ci, clause] of clauses.entries()) {
     const conjunct = clause.startsWith(CONJUNCT);
-    const conjunctHead = !!clauses[ci + 1]?.startsWith(CONJUNCT);
-    let body = conjunct ? clause.slice(CONJUNCT.length).trim() : clause;
-    // A heading that lands MID-clause (the paragraph before it had no full stop — a bulleted unit
-    // list) ends the current section from the NEXT clause on; this clause keeps its opening name.
-    // The heading LATEST in the clause wins.
-    let nextName = null;
+    const sentence = clause.startsWith(SENTENCE);
+    const bullet = clause.startsWith(BULLET);
+    let body = conjunct || sentence || bullet ? clause.slice(1).trim() : clause;
     if (headingRe) {
       let opener = null;
+      let cutAt = -1;
       for (const hm of body.matchAll(headingRe)) {
         if (hm.index === 0 && !opener) opener = hm;
-        else nextName = nameOf(hm[1]);
+        else if (cutAt < 0) cutAt = hm.index;
+      }
+      // A heading that lands MID-clause (the paragraph before it had no full stop: a bulleted list) starts a
+      // clause of its own, read as the next sub-rule when the loop reaches it. Read as one clause with the
+      // text before it (2026-10-03 review), the next sub-rule's lead-in was lost and its gate reached the
+      // item before the heading.
+      if (cutAt >= 0) {
+        clauses.splice(ci + 1, 0, body.slice(cutAt).trim());
+        body = body.slice(0, cutAt).trim();
       }
       if (opener) {
         effName = nameOf(opener[1]);
         body = body.slice(opener[0].length).trim();
         prev = null; // a new sub-rule is never a tier of the previous one
+        leadIn = null;
+        headEffects = [];
       }
-      if (!body) {
-        if (nextName) {
-          effName = nextName;
-          prev = null;
+      if (!body) continue;
+    }
+    const conjunctHead = !!clauses[ci + 1]?.startsWith(CONJUNCT);
+    const r = mapClause(body, { name: effName, source, nameCondition, inherited: carry, degradeAbility, prev, conjunct, conjunctHead, abilityGated, holdUnresolved, lead: bullet ? leadIn : null, sentence });
+    // An "instead" clause ("While the bearer's unit is Righteous, add 2 to the Attacks … instead") replaces
+    // the previous clause's modifier of the same kind: pair them so the tier can be stored as the delta.
+    if (r.effects.length && /\binstead\b(?!\s+of\b)/i.test(body)) {
+      for (const e of r.effects) {
+        for (const k of modKinds(e.mods)) {
+          const h = headEffects.find(
+            (x) =>
+              x.side === e.side &&
+              modKinds(x.mods).includes(k) &&
+              (x.phase === e.phase || x.phase === 'any' || e.phase === 'any') &&
+              JSON.stringify(x.scope || null) === JSON.stringify(e.scope || null),
+          );
+          // The values are read NOW, before any delta is stored: in a chain ("+1; +3 instead; +4 instead") each
+          // tier's delta is over the previous tier's own value.
+          if (h) insteadPairs.push({ head: h, tier: e, key: k, headVal: h.mods[k], tierVal: e.mods[k] });
         }
-        continue;
       }
     }
-    const r = mapClause(body, { name: effName, source, nameCondition, inherited: carry, degradeAbility, prev, conjunct, conjunctHead, abilityGated, holdUnresolved });
+    for (const e of r.effects) clauseOf.set(e, ci);
     effects.push(...r.effects);
     matched.push(...r.matched);
+    if (activationAt === Infinity && ACTIVATION_RE.test(body.replace(TARGET_RANGE_RE, 'targets a unit'))) activationAt = ci;
     if (r.ownScope) carry = { scope: r.ownScope, phase: r.ownPhase };
     prev = r.prev;
-    if (nextName) {
-      effName = nextName;
-      prev = null;
-    }
+    headEffects = r.effects;
+    // A clause ending with a colon opens a list; a bulleted item that ends with one opens a nested list
+    // ("- When a friendly SPEED FREEKS unit is selected to make an advance/fall-back move: - That unit's
+    // ranged attacks have [ASSAULT] …"), and its record already carries what it read from its own lead-in.
+    // Flat text can't show nesting, so the inner list's lead-in stays open until a clause that is not a
+    // bulleted item: an outer item after an inner list reads the inner lead-in (the safe direction).
+    if (/:\s*$/.test(body)) leadIn = r.prev;
+    else if (!bullet) leadIn = null;
   }
 
   // Rule-internal keyword grants (round-3 review): a scope naming a keyword this rule itself
@@ -1093,7 +1313,8 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   if (degradeAbility) for (const e of effects) e.condition = 'damaged';
 
   const abilityGate = ABILITY_ONCE_RE.test(mapText) ? 'oncePerBattle' : ABILITY_WAAAGH_RE.test(mapText) ? 'armyAbilityActive' : null;
-  if (abilityGate) for (const e of effects) if (!e.condition) e.condition = abilityGate;
+  // (A tier the slot can't tell apart from its head stays held: the ability gate would let it ride along.)
+  if (abilityGate) for (const e of effects) if (!e.condition && !UNRESOLVED_TIER.has(e)) e.condition = abilityGate;
 
   // Ability-LEVEL suspicion: an activation / aura / heal / phase trigger ANYWHERE in the ability
   // often sits in a DIFFERENT clause than the +effect it gates (Blessing of the Omnissiah: "In your
@@ -1103,12 +1324,14 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   // A TARGET-RANGE gate ("…attacks that target a unit within 6\"") is not an aura: mapClause already
   // exempts it and gates that clause on the target condition, so it must not flag the rule's other,
   // genuinely always-on clauses either (Bringers of Flame's [ASSAULT] grant).
-  const auraText = mapText.replace(/\btargets?\s+(?:a|an|one)\s+unit\s+within\s+\d+\s*"/gi, 'targets a unit');
-  const abilitySuspect =
-    /\bselect\s+(?:one|a|an)\b|\bwithin\s+\d+\s*"|\bregains?\b|\blost wounds?\b|\broll\s+(?:one|a)\s+d(?:ice|6)\b|\bafter\s+(?:it|this\s+(?:unit|model))\s+(?:has|shoots|shot)\b|\bin\s+your\s+(?:command|movement|shooting|charge|fight)\s+phase\b/i.test(
-      auraText,
-    ) || CHOICE_RE.test(mapText);
-  if (abilitySuspect) for (const e of effects) if (!e.condition) e._suspect = true;
+  // An activation gates what FOLLOWS it (2026-10-03): GW states the trigger first ("In your Command phase,
+  // select one friendly VEHICLE within 3\" … That model … adds 1 to the Hit roll"), so an effect stated
+  // BEFORE the first activation clause is not behind it. Read rule-wide, Intoxicating Elixir's later "select
+  // one enemy unit" held its Feel No Pain 5+, and Surprise Assault's Tunnel Marker distances its re-roll of
+  // hit rolls of 1. The heal words moved to the clause check (mapClause). A choice between listed options
+  // still flags every option wherever it sits (the "▪ Or:" bullet follows its first option).
+  const choice = CHOICE_RE.test(mapText);
+  for (const e of effects) if (!e.condition && (choice || clauseOf.get(e) >= activationAt)) e._suspect = true;
 
   // Without a review surface (every caller but captureUnitAbilities: pack rules, .rosz roster rules,
   // the typed-ability preview) an effect is stored and applied as it stands, so a held one used to
@@ -1122,6 +1345,44 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
       if (!e.condition) e.condition = RULE_TRIGGER;
     }
   }
+
+  // An "instead" tier REPLACES its head's modifier, but both are stored and the engine sums them, so
+  // Mark of Devotion's "+1 Attacks; while Righteous, +2 Attacks … instead" gave +3 under its toggle
+  // (2026-10-03). When the head applies whenever the tier does (it has no gate, or the same one), the
+  // tier stores the DIFFERENCE, so the toggle gives exactly the tier's value. A head behind a different
+  // gate keeps both absolute (one condition slot: "+2 instead if Battle-shocked" must not ride the charge
+  // toggle, see the two-gate tier rule above). A held datasheet effect counts as its own gate, and its delta
+  // is right when the ability is applied (Apply takes the whole ability). A tier ON the head's toggle can't be
+  // told apart from it (Arcane Might: both Psychic-qualified, both unread), so it is dropped (no review
+  // surface) or held, as mapClause does for an "If … instead" tier, unless both are strength tiers (a nested
+  // strength rule shares its toggle on purpose). A tier EQUAL to its head adds nothing ("add 1 to the Hit roll
+  // and add 1 to the Wound roll instead" repeats the +1 to Hit), so that modifier goes; one SMALLER than its
+  // head keeps its absolute value (no live case).
+  const gateOf = (e) => e.condition || (e._suspect ? '_held' : null);
+  const unresolved = new Set();
+  for (const { head, tier, key, headVal, tierVal } of insteadPairs) {
+    if (unresolved.has(head)) continue;
+    const hg = gateOf(head);
+    if (hg && hg !== '_held' && hg === gateOf(tier) && !(STRENGTH_GATED.has(head) && STRENGTH_GATED.has(tier))) {
+      unresolved.add(tier);
+      continue;
+    }
+    if (hg && hg !== gateOf(tier)) continue;
+    if (!ADDITIVE_MOD_KEYS.has(key) || typeof headVal !== 'number' || typeof tierVal !== 'number') continue;
+    const d = tierVal - headVal;
+    if (d && Math.sign(d) !== Math.sign(tierVal)) continue;
+    const { [key]: _repeated, ...rest } = tier.mods;
+    tier.mods = d ? { ...tier.mods, [key]: d } : rest;
+    if (!Object.keys(tier.mods).length) unresolved.add(tier);
+    else INSTEAD_DELTA.add(tier);
+  }
+  for (const e of unresolved) {
+    if (holdUnresolved && Object.keys(e.mods || {}).length) {
+      e.condition = null;
+      e._suspect = true;
+    } else effects.splice(effects.indexOf(e), 1);
+  }
+  if (effects.some((e) => INSTEAD_DELTA.has(e))) notes.push(INSTEAD_NOTE);
 
   const conditions = [...new Set(effects.map((e) => e.condition).filter(Boolean))];
   const hasSituational = effects.some((e) => e.condition && SITUATIONAL_CONDITIONS.has(e.condition));
@@ -1551,7 +1812,8 @@ function applyStructuredMods(plan, rawMods) {
       // Keep conditioned prose; nothing to strip if no weapon overlap. A `ruleTrigger` gate is not a
       // real condition (the prose's trigger was unreadable), so that prose is de-duplicated against the
       // structured buff exactly as before; kept, it would double the buff when the toggle is on.
-      if ((e.condition && e.condition !== RULE_TRIGGER) || !covered.size) return e;
+      // An "instead" tier stored as its delta over the head (INSTEAD_DELTA) is not a duplicate either.
+      if ((e.condition && e.condition !== RULE_TRIGGER) || !covered.size || INSTEAD_DELTA.has(e)) return e;
       const mods = { ...(e.mods || {}) };
       let changed = false;
       for (const [k, phases] of covered) {

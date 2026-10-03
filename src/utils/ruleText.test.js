@@ -2007,3 +2007,270 @@ describe('a rule naming both the Shooting and the Fight phase is any-phase (2026
     expect(one('Each time this unit is selected to fight, add 1 to the Hit roll.').phase).toBe('fight');
   });
 });
+
+describe('unread-trigger precision (mapper version 3, 2026-10-03)', () => {
+  const det = (rule, extra = {}) => ({ faction: 'F', armyRule: null, detachments: [{ name: 'D', rule, stratagems: [], enhancements: [], ...extra }] });
+  const cap = (text) => captureUnitAbilities([{ name: 'X', text }]);
+  const all = (text) => mapRuleText(text, { name: 'X' }).effects;
+  const G = ' � '; // a faction pack's full stop, as the PDF text layer delivers it
+  const strat = (when, effect) => `WHEN: ${when}${G}TARGET: One unit from your army${G}EFFECT: ${effect}${G}`;
+  const at = (effs, phase, activeConditions = []) => resolveEffects(effs, { phase, activeConditions }).attacker;
+
+  // 1. Trigger vocabulary.
+  it('BREAKING VARIANT: a move, turn, ability-use or disembark trigger gates its clause (it applied on every attack)', () => {
+    for (const text of [
+      "When a friendly BATTLELINE unit is selected to make an Advance or Fall Back move, that unit's attacks have the [SUSTAINED HITS 1] ability until the end of the turn.",
+      "In a turn a friendly FLY INFANTRY unit made a Deep Strike or Charge move, that unit's attacks can re-roll hit rolls of 1.",
+      "In a turn in which the bearer's unit chose to use its Doctrine, until the end of the turn, each time a model in this unit makes an attack, you can re-roll the Hit roll.",
+      'Each time the bearer uses its Tinker ability, until the start of your next Command phase, ranged weapons equipped by the selected VEHICLE model have the [RAPID FIRE 1] ability.',
+      "Each time a unit from your army disembarks from a Transport, until the end of the turn, that unit's melee weapons have the [LANCE] ability.",
+    ]) {
+      const effs = all(text);
+      expect(effs.length, text).toBeGreaterThan(0);
+      expect(effs.every((e) => e.condition === 'ruleTrigger'), text).toBe(true);
+      expect(cap(text).every((e) => e.captured), text).toBe(true);
+    }
+  });
+
+  it('the ordinary "selected to shoot / fight" activation is not a trigger', () => {
+    const [e] = all('Each time this unit is selected to shoot, ranged weapons equipped by models in this unit have the [LETHAL HITS] ability.');
+    expect([e.condition, e.phase]).toEqual([null, 'shooting']);
+    expect(cap('Each time this unit is selected to fight, add 1 to the Hit roll.')[0].captured).toBeUndefined();
+  });
+
+  it("a pack stratagem's own WHEN line is met when it is used, so it does not gate the effect", () => {
+    const [e] = all(strat('Your Movement phase, when a friendly unit is selected to make an Advance move', 'Until the end of the turn, ranged weapons equipped by models in your unit have the [LETHAL HITS] ability'));
+    expect(e.condition).toBeNull();
+  });
+
+  it('BREAKING VARIANT: a trigger inside the EFFECT gates every bulleted item, in the lead-in\'s phase', () => {
+    const effs = all(strat('Your Shooting phase', "When your unit uses the Pact ability, your unit's ranged attacks have: ▪ [LETHAL HITS] . ▪ [SUSTAINED HITS 1] ."));
+    expect(effs.map((e) => [e.mods.grantKeywords[0], e.phase, e.condition])).toEqual([
+      ['LETHAL HITS', 'shooting', 'ruleTrigger'],
+      ['SUSTAINED HITS 1', 'shooting', 'ruleTrigger'],
+    ]);
+  });
+
+  // 2. Cross-sentence suspicion.
+  it('BREAKING VARIANT: a heal does not hold an always-on save beside it, in another sentence or the same one', () => {
+    const rule = planPackRules(det({ name: 'Stalwart', text: 'KNIGHT models from your army have the Feel No Pain 6+ ability. In addition, at the start of your Command phase, each KNIGHT model from your army regains 1 lost wound.' })).detachments[0].rule;
+    expect(rule.effects.map((e) => [e.condition, e.mods.fnp])).toEqual([[null, 6]]);
+    const enh = planPackRules(det(null, { enhancements: [{ name: 'Old Spirit', text: 'VEHICLE model only. The bearer has a 5+ invulnerable save and, at the end of your Command phase, the bearer regains 1 lost wound.' }] })).detachments[0].enhancements[0];
+    expect(enh.effects.map((e) => [e.condition, e.mods.invuln])).toEqual([[null, 5]]);
+  });
+
+  it('a heal EVENT is still a trigger for its own clause', () => {
+    expect(cap('Each time this model regains a lost wound, until the end of the turn, add 1 to the Hit roll.')[0].captured).toBe(true);
+  });
+
+  it('BREAKING VARIANT: an activation gates what follows it, not an effect stated before it', () => {
+    const fnp = all('The bearer has the Feel No Pain 5+ ability. Each time the bearer fights, after it has resolved those attacks, select one enemy unit hit by them; that unit must take a Battle-shock test.');
+    expect(fnp.map((e) => [e.condition, e.mods.fnp])).toEqual([[null, 5]]);
+    const reroll = all('Each time a model from your army makes an attack, re-roll a Hit roll of 1. Each time a TUNNELLER unit from your army is set up from Reserves, place a marker within 1" of that unit.');
+    expect(reroll.map((e) => e.condition)).toEqual([null]);
+  });
+
+  it('an activation still gates the buff stated after it (the cross-sentence case the check exists for)', () => {
+    const text = 'In your Command phase, you can select one friendly VEHICLE model within 3" of this model. That model regains up to D3 lost wounds and, until the start of your next Command phase, each time that VEHICLE model makes an attack, add 1 to the Hit roll.';
+    expect(all(text).every((e) => e.condition === 'ruleTrigger')).toBe(true);
+    expect(cap(text).every((e) => e.captured)).toBe(true);
+  });
+
+  it('BREAKING VARIANT: a gated item no longer gates its unconditional sibling (the pack lost the stop between them)', () => {
+    const effs = all("PSYKER model only. This unit's ranged attacks have: ▪ [LETHAL HITS] ▪ If this unit has the Fire Discipline ability, [SUSTAINED HITS 1] .");
+    expect(effs.map((e) => [e.mods.grantKeywords[0], e.phase, e.condition])).toEqual([
+      ['LETHAL HITS', 'shooting', null],
+      ['SUSTAINED HITS 1', 'shooting', 'ruleTrigger'],
+    ]);
+  });
+
+  it('BREAKING VARIANT: every bulleted item reads its lead-in\'s gate, phase and subject, not only the first', () => {
+    const gate = all('Each time a model in this unit makes an attack that targets a unit within range of an objective marker, it can: ▪ Re-roll hit rolls of 1. ▪ Re-roll wound rolls of 1.');
+    expect(gate.map((e) => e.condition)).toEqual(['objectiveControl', 'objectiveControl']);
+    for (const text of ["This unit's ranged attacks have: ▪ [LETHAL HITS]. ▪ [SUSTAINED HITS 1].", "This unit's ranged attacks have: - [LETHAL HITS]. - [SUSTAINED HITS 1]."]) {
+      expect(all(text).map((e) => e.phase), text).toEqual(['shooting', 'shooting']);
+    }
+    const scope = all("Friendly MOUNTED have: ▪ This unit's ranged attacks have [LETHAL HITS]. ▪ This unit's melee attacks have [LANCE].");
+    expect(scope.map((e) => e.scope)).toEqual([['MOUNTED'], ['MOUNTED']]);
+  });
+
+  it('the items of an aura lead-in go with it; a dash that is not a list stays in its sentence', () => {
+    expect(all('While a friendly INFANTRY unit is within 6" of this model, that unit\'s ranged attacks have: ▪ +1 BS . ▪ [HEAVY] .')).toEqual([]);
+    const [e] = all('Grave Rot - Each time a model in this unit makes a melee attack, add 1 to the Wound roll.');
+    expect([e.phase, e.condition, e.mods.woundModifier]).toEqual(['fight', null, 1]);
+  });
+
+  // 3. "Instead" tiers.
+  it('BREAKING VARIANT: an "instead" tier stores its delta, so the toggle gives the tier value, not the sum', () => {
+    const enh = planPackRules(det(null, {
+      enhancements: [{ name: 'Brand of Zeal', text: "FAITHFUL model only. Add 1 to the Attacks characteristic of the bearer's melee weapons. While the bearer's unit is Devout, add 2 to the Attacks characteristic and add 1 to the Damage characteristic of the bearer's melee weapons instead." }],
+    })).detachments[0].enhancements[0];
+    expect([at(enh.effects, 'fight').attackBonus, at(enh.effects, 'fight').damageBonus]).toEqual([1, 0]);
+    expect([at(enh.effects, 'fight', ['ruleTrigger']).attackBonus, at(enh.effects, 'fight', ['ruleTrigger']).damageBonus]).toEqual([2, 1]);
+    expect(enh.notes.join(' ')).toMatch(/stored as the extra on top of the basic bonus/);
+  });
+
+  it('a readable gate gets the delta too, and the structured buff of a catalogue enhancement does not swallow it', () => {
+    const r = all("Add 1 to the Attacks characteristic of the bearer's melee weapons. While the bearer is Battle-shocked, add 2 to the Attacks characteristic of the bearer's melee weapons instead.");
+    expect(r.map((e) => [e.condition, e.mods.attackBonus])).toEqual([[null, 1], ['targetCondition', 1]]);
+    expect(at(r, 'fight', ['targetCondition']).attackBonus).toBe(2);
+    const enh = planPackRules(det(null, {
+      enhancements: [{
+        name: 'Brand of Zeal',
+        text: "FAITHFUL model only. Add 1 to the Attacks characteristic of the bearer's melee weapons. While the bearer's unit is Devout, add 2 to the Attacks characteristic and add 1 to the Damage characteristic of the bearer's melee weapons instead.",
+        wargearMods: [{ target: 'melee', op: 'add', stat: 'A', delta: 1 }],
+      }],
+    })).detachments[0].enhancements[0];
+    expect([at(enh.effects, 'fight').attackBonus, at(enh.effects, 'fight', ['ruleTrigger']).attackBonus, at(enh.effects, 'fight', ['ruleTrigger']).damageBonus]).toEqual([1, 2, 1]);
+  });
+
+  it('a held datasheet tier carries the delta, so applying both gives the tier value', () => {
+    const caps = cap("Add 1 to the Attacks characteristic of this model's melee weapons. While this model is Exalted, add 2 to the Attacks characteristic of this model's melee weapons instead.");
+    expect(caps.map((e) => [e.mods.attackBonus, e.captured])).toEqual([[1, true], [1, true]]);
+  });
+
+  // 4. Qualifiers the engine cannot carry.
+  it('BREAKING VARIANT: a weapon or attack qualifier gates the buff instead of applying it to every weapon', () => {
+    for (const text of [
+      'Each time a model from your army makes a Psychic Attack, re-roll a Wound roll of 1.',
+      "Add 1 to the Strength characteristic of Psychic weapons equipped by models in the bearer's unit.",
+      'Plasma weapon profiles have +1 S.',
+      "Add 1 to the Attacks characteristic of Torrent weapons equipped by models in the bearer's unit.",
+      "This unit's Shard Cannon weapons have +1 AP.",
+      "Your unit's [BLAST] ranged attacks have +1 AP.",
+    ]) {
+      const effs = all(text);
+      expect(effs.length, text).toBeGreaterThan(0);
+      expect(effs.every((e) => e.condition === 'ruleTrigger'), text).toBe(true);
+      expect(cap(text).every((e) => e.captured), text).toBe(true);
+    }
+  });
+
+  it('an excluded class, the ordinary melee / ranged weapons and a unit name are not qualifiers', () => {
+    for (const text of [
+      'Until the end of the phase, ranged weapons equipped by models in your unit (excluding Torrent weapons) have the [LETHAL HITS] ability.',
+      'Ranged weapons equipped by models in this unit have the [LETHAL HITS] ability.',
+      'Each time a model in a HEAVY WEAPONS SQUAD unit from your army makes an attack, add 1 to the Hit roll.',
+    ]) {
+      expect(all(text).map((e) => e.condition), text).toEqual([null]);
+    }
+  });
+
+  it('BREAKING VARIANT: Feel No Pain against mortal wounds or Psychic Attacks is not emitted; against melee attacks it pins the phase', () => {
+    expect(all('EFFECT: Your unit has Feel No Pain 5+ against mortal wounds until the end of the phase.')).toEqual([]);
+    expect(all('Models in this unit have the Feel No Pain 5+ ability against Psychic Attacks.')).toEqual([]);
+    const [melee] = all('Models in this unit have the Feel No Pain 5+ ability against melee attacks.');
+    expect([melee.phase, melee.mods.fnp]).toEqual(['fight', 5]);
+    const [plain] = all('Models in this unit have the Feel No Pain 6+ ability.');
+    expect([plain.phase, plain.condition, plain.mods.fnp]).toEqual(['any', null, 6]);
+  });
+
+  // 5. A pack sentence before a capitalised "If".
+  it('BREAKING VARIANT: a pack sentence before a capitalised "If" splits, so the tier gate no longer swallows the head', () => {
+    const head = 'Until the end of the phase, each time a model in your unit makes an attack, add 1 to the Hit roll';
+    const glyph = all(strat('Your Shooting phase or the Fight phase', `${head}${G}If your unit is below its Starting Strength, add 1 to the Wound roll as well`));
+    const lost = all(strat('Your Shooting phase or the Fight phase', `${head} If your unit is below its Starting Strength, add 1 to the Wound roll as well`));
+    for (const effs of [glyph, lost]) {
+      expect(effs.map((e) => [e.condition, e.mods])).toEqual([[null, { hitModifier: 1 }], ['belowStrength', { woundModifier: 1 }]]);
+    }
+  });
+
+  it('the split-off sentence keeps the stratagem phase; a lowercase "if" mid-sentence is not split', () => {
+    const r = all(strat('Fight phase', `Until the end of the phase, each time a model in your unit makes an attack, re-roll a Wound roll of 1${G}If your unit is Exalted, until the end of the phase, each time a model in your unit makes an attack, add 1 to the Hit roll`));
+    expect(r.map((e) => [e.phase, e.condition])).toEqual([['fight', null], ['fight', 'ruleTrigger']]);
+    expect(all('Each time a model in this unit makes an attack, add 1 to the Hit roll if this unit is below its Starting Strength.').map((e) => e.condition)).toEqual(['belowStrength']);
+  });
+});
+
+describe('unread-trigger precision: review pass 1 breaking variants (2026-10-03)', () => {
+  const cap = (text) => captureUnitAbilities([{ name: 'X', text }]);
+  const all = (text) => mapRuleText(text, { name: 'X' }).effects;
+  const held = (text) => mapRuleText(text, { name: 'X', holdUnresolved: true }).effects;
+  const G = ' � ';
+  const strat = (when, effect) => `WHEN: ${when}${G}TARGET: One unit from your army${G}EFFECT: ${effect}${G}`;
+  const sig = (e) => [e.condition, e.mods];
+
+  it('BREAKING VARIANT: an "instead" tier on its head\'s toggle is dropped (pack) or held (datasheet), not applied with it', () => {
+    // Two different target predicates, one target toggle: re-roll every wound against a healthy MONSTER.
+    const text = strat('Your Shooting phase', `Until the end of the phase, each time a model in your unit makes an attack that targets a MONSTER or VEHICLE unit, re-roll a Wound roll of 1${G}If the target unit is below its Starting Strength, you can re-roll the Wound roll instead`);
+    expect(all(text).map(sig)).toEqual([['targetCondition', { reroll: { wound: 'ones' } }]]);
+    expect(held(text).map((e) => [e.condition, e._suspect, e.mods.reroll.wound])).toEqual([['targetCondition', undefined, 'ones'], [null, true, 'all']]);
+    // A gate the reader can't see ("Battle - shocked" in a PDF) used to leave the tier riding the charge toggle.
+    const unread = 'Each time a unit from your army is selected to fight, if that unit made a Charge move this turn, add 1 to the Attacks characteristic of melee weapons equipped by models in that unit. If your unit is Battle - shocked, add 2 to the Attacks characteristic of melee weapons equipped by models in that unit instead.';
+    expect(all(unread).map(sig)).toEqual([['onCharge', { attackBonus: 1 }]]);
+  });
+
+  it('BREAKING VARIANT: a tier whose own-keyword gate loses the slot to another gate is dropped', () => {
+    const text = strat('The Fight phase', `Until the end of the phase, each time a model in your unit makes an attack, re-roll a Wound roll of 1${G}If your unit has the Corsair keyword, then until the end of the phase, each time a model in your unit makes an attack that targets an enemy unit within range of an objective marker, you can re-roll the Wound roll instead`);
+    expect(all(text).map(sig)).toEqual([[null, { reroll: { wound: 'ones' } }]]);
+  });
+
+  it('the old readings these rules keep: an "instead" that replaces no head modifier, and a nested strength rule', () => {
+    const gambit = all('Each time this unit ends a Charge move, you can declare a Gambit. If you do, until the end of the turn, this unit does not have the Fights First ability, but instead, each time a model in this unit makes an attack, you can re-roll the Hit roll.');
+    expect(gambit.map(sig)).toEqual([['onCharge', { reroll: { hit: 'all' } }]]);
+    const nested = all("Each time a model from your army makes a melee attack, re-roll a Wound roll of 1 if that model's unit is below Starting Strength; if that model's unit is Below Half-strength, you can re-roll the Wound roll instead.");
+    expect(nested.map(sig)).toEqual([['belowStrength', { reroll: { wound: 'ones' } }], ['belowStrength', { reroll: { wound: 'all' } }]]);
+  });
+
+  it('BREAKING VARIANT: an "instead" modifier equal to its head\'s is not counted twice', () => {
+    const r = all('Each time a model in this unit makes an attack that targets a unit that is below its Starting Strength, add 1 to the Attacks characteristic of its melee weapons. If that attack targets a unit that is Below Half-strength, add 1 to the Attacks characteristic of its melee weapons and add 1 to the Damage characteristic of its melee weapons instead.');
+    expect(r.map(sig)).toEqual([['targetCondition', { attackBonus: 1 }], ['targetCondition', { damageBonus: 1 }]]);
+  });
+
+  it('BREAKING VARIANT: an unread "instead" tier on the same unread toggle as its head, or under a once-per-battle gate, is dropped', () => {
+    const same = all("Add 1 to the Strength characteristic of Psychic weapons equipped by models in the bearer's unit. While the bearer's unit is Empowered, add 2 to the Strength characteristic of Psychic weapons equipped by models in that unit instead.");
+    expect(same.map(sig)).toEqual([['ruleTrigger', { strengthBonus: 1 }]]);
+    const chain = 'Once per battle, at the start of the Fight phase, add 1 to the Attacks characteristic of melee weapons equipped by the bearer. If the bearer has completed one or more Deeds, add 3 to the Attacks characteristic instead. If the bearer has completed two or more Deeds, add 4 to the Attacks characteristic instead.';
+    expect(all(chain).map(sig)).toEqual([['oncePerBattle', { attackBonus: 1 }]]);
+    expect(held(chain).map((e) => [e.condition, !!e._suspect])).toEqual([['oncePerBattle', false], [null, true], [null, true]]);
+  });
+
+  it('BREAKING VARIANT: a qualifier on one set of weapons does not gate the "all other" set', () => {
+    const r = all("FAITHFUL model only. While the bearer is leading a unit, add 1 to the Attacks characteristic of Torrent weapons equipped by models in that unit, and all other ranged weapons equipped by models in that unit have the [SUSTAINED HITS 1] ability.");
+    expect(r.map((e) => [e.phase, e.condition, e.mods])).toEqual([['shooting', 'ruleTrigger', { attackBonus: 1 }], ['shooting', null, { grantKeywords: ['SUSTAINED HITS 1'] }]]);
+  });
+
+  it('BREAKING VARIANT: a lead-in that selects a model in range keeps its items for review (it is an activation, not an aura)', () => {
+    const text = 'In your Movement phase, you can select one friendly VEHICLE model within 3" of this model: - That VEHICLE model heals D3 wounds. - That VEHICLE model\'s attacks have +1 to hit rolls until the start of your next Movement phase.';
+    expect(cap(text).map((e) => [e.mods.hitModifier, e.captured])).toEqual([[1, true]]);
+    expect(all(text).map((e) => e.condition)).toEqual(['ruleTrigger']);
+  });
+
+  it('BREAKING VARIANT: a stratagem\'s timing lines and opening duration are not gate words for the "targets an enemy unit" shape', () => {
+    const r = all(strat('Your Shooting phase or the Fight phase', `Until the end of the phase, each time a model in your unit makes an attack that targets an enemy unit, re-roll a Hit roll of 1${G}If that target is Scanned, re-roll a Wound roll of 1 as well`));
+    expect(r.map(sig)).toEqual([[null, { reroll: { hit: 'ones' } }], ['targetCondition', { reroll: { wound: 'ones' } }]]);
+    // …and a TARGET line split off from its WHEN line by a real full stop is still timing, not a trigger.
+    const [e] = all('WHEN: Your Shooting phase. TARGET: One unit from your army that disembarked from a Transport this turn. EFFECT: Until the end of the phase, ranged weapons equipped by models in your unit have the [LETHAL HITS] ability.');
+    expect(e.condition).toBeNull();
+  });
+
+  it('a heal named as the trigger still gates its clause', () => {
+    expect(all('Each time the bearer regains 1 lost wound, add 1 to the Hit roll until the end of the turn.').map((e) => e.condition)).toEqual(['ruleTrigger']);
+  });
+
+  it('BREAKING VARIANT: a sub-rule heading after an unpunctuated list starts its own clause, so its lead-in reaches its items', () => {
+    const r = all("Swift Hunt: Each time this unit is selected to shoot, its ranged attacks have:\n▪ [LETHAL HITS]\n▪ [SUSTAINED HITS 1]\nCharging Fury: When this unit is selected to fight, if it made a Charge move this turn, its melee attacks have:\n▪ [LETHAL HITS]\n▪ Add 1 to the Wound roll");
+    expect(r.map((e) => [e.name, e.phase, e.condition])).toEqual([
+      ['Swift Hunt', 'shooting', null],
+      ['Swift Hunt', 'shooting', null],
+      ['Charging Fury', 'fight', 'onCharge'],
+      ['Charging Fury', 'fight', 'onCharge'],
+    ]);
+  });
+
+  it('every Feel No Pain in a clause is read with its own qualifier; "In addition," after a bullet keeps the item in the list', () => {
+    const r = all('This unit has Feel No Pain 4+ against melee attacks and Feel No Pain 6+ against ranged attacks.');
+    expect(r.map((e) => [e.phase, e.mods.fnp])).toEqual([['fight', 4], ['shooting', 6]]);
+    const b = all("In the Fight phase, this unit's melee attacks have: ▪ [LETHAL HITS] . ▪ In addition, [SUSTAINED HITS 1] . ▪ [PRECISION] .");
+    expect(b.map((e) => e.phase)).toEqual(['fight', 'fight', 'fight']);
+  });
+
+  it('the qualifier reads "in its name" and "weapons that have the [X] ability" too', () => {
+    for (const text of [
+      "Each time a model in this unit makes an attack with a weapon with 'Plasma' in its name, add 1 to the Wound roll.",
+      'Ranged weapons equipped by models in this unit that have the [TORRENT] ability have the [LETHAL HITS] ability.',
+    ]) {
+      expect(all(text).every((e) => e.condition === 'ruleTrigger'), text).toBe(true);
+    }
+  });
+});
