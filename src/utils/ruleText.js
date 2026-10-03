@@ -170,8 +170,89 @@ function detectPhase(t) {
   return 'any';
 }
 
+// ---- Starting Strength / Half-strength gates (2026-10-03, the Kroot Hunting Pack report) --------
+// Ground truth: the 11e Core Rules appendix "Starting Strength and Half-strength" defines "below
+// starting strength", "at half-strength" and "below half-strength" (fewer models than the unit
+// started with / than half of it; for a one-model unit, fewer wounds than its W). Below Half-strength
+// therefore implies below Starting Strength. The sim tracks no casualties, so a rule gated on either
+// is a player toggle that defaults OFF — `targetCondition` when the TARGET is the weakened unit,
+// `belowStrength` when the acting unit is. Before this, only "this/that unit … is below" was
+// recognised, so the live phrasings "if the target of that attack is below its Starting Strength"
+// (Kroot Hunting Pack), "if that target is also Below Half-Strength" (Steeped in Suffering, Feeding
+// Frenzy, Silent Executioner), "attacks that target … a unit at or below half-strength" (Prey on the
+// Weak) and "while an ADEPTUS CUSTODES VEHICLE unit from your army is below Starting Strength"
+// (Auric Armour) were captured with NO condition and auto-applied every attack.
+//
+// Deliberate simplification (pinned): both tiers of a two-tier rule ("+1 to Hit if below Starting
+// Strength, and +1 to Wound as well if Below Half-strength") share ONE toggle, so turning it on
+// applies both. That matches every other target-state gate; finer tier toggles are a UI decision.
+// "below half its Starting Strength" is the long-hand of Below Half-strength (kept from the pre-2026-10
+// self regex, which accepted any "below half…").
+const STRENGTH_STATE_RE =
+  /\b(at\s+or\s+below|below|at)\s+(?:its\s+|their\s+)?(starting\s+strength|half[-\s]?strength|half\s+(?:of\s+)?(?:its|their|(?:this|that)\s+(?:unit|model)'s)\s+starting\s+strength)\b/gi;
+// A strength STATE CHANGE caused by the attack ("makes attacks that destroy a unit or cause it to
+// become Below Half-strength, … until the end of the turn, add 2 to the Strength…" — Cold Fervour)
+// is an event trigger, not a state the player can toggle per engagement. The clause is dropped
+// (under-apply) rather than auto-applied every attack.
+const STRENGTH_EVENT_RE =
+  /\b(?:becomes?|became|becoming|go(?:es)?|going|went|falls?|fell|falling|drops?|dropped|dropping)\s+(?:to\s+)?(?:below|at)\s+(?:its\s+)?(?:starting\s+strength|half[-\s]?strength)\b/i;
+// The subject of the strength predicate, read from the words before it. The LAST subject mention
+// wins ("each time a model in that unit makes a melee attack that targets a unit that is below…" —
+// the target). "a unit that is" is a relative clause and "if it is" a pronoun, so neither carries a
+// subject of its own: they resolve to the mention before them ("targets a unit, if it is below…" is
+// the target; "this model makes an attack, if it is below…" is the model). A TARGET mention is an
+// active "targets a/an/the…", "the/that target", "against a/the… unit" or the enemy / attacking unit —
+// never "this unit is targeted" or "an attack targets this unit" (the defending unit is the subject).
+const STRENGTH_SELF_RE =
+  /\b(?:this|that)\s+(?:unit|model)(?:'s\s+unit)?\b|\bthe\s+bearer(?:'s\s+unit)?\b|\bits\s+unit\b|\b(?:units?|models?)\s+from\s+your\s+army\b/gi;
+const STRENGTH_TARGET_RE =
+  /\btarget(?:s|ing)?\s+(?:a|an|one|the|that|those|units?|enemy)\b|\b(?:the|that)\s+target\b|\btargets\s+of\b|\benemy\s+units?\b|\bthe\s+attacking\s+(?:unit|model)\b|\bagainst\s+(?:a|an|the|that|those|enemy|units?)\b|\b(?:it|they)\s+(?:is|are)\s+(?:attacking|targeting)\b/gi;
+
+function lastIndexOfRe(text, re) {
+  let last = -1;
+  let lastText = '';
+  for (const m of text.matchAll(re)) {
+    last = m.index;
+    lastText = m[0];
+  }
+  return { at: last, text: lastText };
+}
+
+// Classify the first Starting Strength / Half-strength predicate in a clause. Returns null when the
+// clause has none, else { subject: 'target'|'self', negated }. `negated` is the full-strength reading
+// ("at its Starting Strength", "not below Half-strength"). `prevTarget` (the previous clause gated on
+// the TARGET's strength) resolves the "that unit" anaphor of a tier continuation to the target
+// ("…targets a unit that is below its Starting Strength, … If that unit is Below Half-strength, you
+// can re-roll the Wound roll as well" — Warp-sighted Butcher).
+function strengthGate(t, { prevTarget = false, headText = '' } = {}) {
+  STRENGTH_STATE_RE.lastIndex = 0;
+  const m = STRENGTH_STATE_RE.exec(t);
+  if (!m) return null;
+  const before = t.slice(0, m.index);
+  // A tier / conjunct tail reads its subject through the head it continues ("…targets a MONSTER unit,
+  // add 1 to the Wound roll, and if that unit is below Half-strength…").
+  const window = `${headText ? `${headText} ` : ''}${before}`.slice(-160);
+  const self = lastIndexOfRe(window, STRENGTH_SELF_RE);
+  const target = lastIndexOfRe(window, STRENGTH_TARGET_RE);
+  let subject = target.at > self.at ? 'target' : 'self';
+  if (subject === 'self' && /^that\s+unit$/i.test(self.text)) {
+    // "that unit" points back at the unit mentioned just before it: the target in "targets an enemy
+    // unit, if that unit is below…", the acting unit in "each time a model in that unit…, if that
+    // unit is below…".
+    const prior = window.slice(0, self.at);
+    const priorSelf = lastIndexOfRe(prior, STRENGTH_SELF_RE);
+    const priorTarget = lastIndexOfRe(prior, STRENGTH_TARGET_RE);
+    if (prevTarget || priorTarget.at > priorSelf.at) subject = 'target';
+  }
+  // Full strength = "at its Starting Strength" or "not below…"; "not at its Starting Strength" is below.
+  const fullForm = /^at$/i.test(m[1]) && /^starting/i.test(m[2]);
+  const negated = /\bnot\s+$/i.test(before) !== fullForm;
+  return { subject, negated };
+}
+
 // Detect a single condition id for a clause (the most specific wins). Returns null for none.
-function detectCondition(t) {
+// `ctx.prevTarget` — see strengthGate.
+function detectCondition(t, ctx = {}) {
   // Army-wide ability turn (Waaagh!, an Oath bonus): "while the Waaagh! is active", "while the
   // <X> is active for your army", "while your army's <X> is active". Checked FIRST so a buff
   // gated on it is situational (default OFF) rather than read as an always-on modifier.
@@ -184,10 +265,15 @@ function detectCondition(t) {
   if (/\bwithin half range\b/i.test(t)) return 'halfRange';
   if (/\bremain(?:ed|s)? stationary|did not move|has not moved\b/i.test(t)) return 'stationary';
   if (/\boath of moment|that is the target of|nominated .* target\b/i.test(t)) return 'targetMarked';
-  // The ATTACKING unit is below strength ("if this unit is below its Starting Strength / Below
-  // Half-strength") — the SELF subject ("this/that unit is below…"), distinct from a TARGET being
-  // weak (that falls to targetCondition below).
-  if (/\b(?:this|that)\s+(?:unit|model)\b[^.]{0,30}?\bis\s+below\s+(?:its\s+|their\s+)?(?:starting\s+strength|half)/i.test(t)) return 'belowStrength';
+  // A Starting Strength / Half-strength gate: the TARGET's strength -> targetCondition; the acting
+  // unit's own -> belowStrength. A full-strength SELF gate ("while this unit is at its Starting
+  // Strength") has no toggle, so it returns null and mapClause drops the clause (under-apply).
+  const sg = strengthGate(t, ctx);
+  if (sg) {
+    if (sg.subject === 'target') return 'targetCondition';
+    if (!sg.negated) return 'belowStrength';
+    return null;
+  }
   // A buff gated on the TARGET'S state — NOT "targets THIS unit" (defensive). Checked LAST so a more
   // specific gate above wins. Covers the real phrasings grounded across the live catalogues: "targets
   // a MONSTER or VEHICLE unit", "the closest eligible target", "when targeting … units", "(excluding …
@@ -198,6 +284,11 @@ function detectCondition(t) {
     /\b(?:closest|nearest)\s+eligible\s+target\b/i.test(t) || // "targets the closest eligible target"
     /\bwhen targeting\b|\bexcluding\b[^.]{0,40}?\btarget/i.test(t) || // "[X] when targeting … units" / "(excluding attacks that target …)"
     /\bis\s+battle-?shocked\b/i.test(t) || // target is Battle-shocked
+    // "If the target of that attack is a MONSTER or VEHICLE unit" / "If that target is TITANIC" — the
+    // target's own description (2026-10-03; was always-on: no target verb for the patterns above) —
+    // and the past tense "If that attack targeted an enemy PSYKER unit".
+    /\b(?:the|that)\s+target(?:\s+unit)?(?:\s+of\s+(?:that|the|this|each)\s+attacks?)?\s+(?:is|has|contains)\b/i.test(t) ||
+    /\battacks?\s+targeted\s+(?:a|an|one|the|that)\b/i.test(t) ||
     /\b(?:spotted|guided|observer)\s+unit\b|\bbenefit(?:ing|s)?\s+from\s+markerlight|\bmarkerlight token/i.test(t) || // Tau markerlight chain
     /\b(?:does not have|has)\s+the\b[^.]{0,40}?\bkeywords?\b/i.test(t) // "if the target does not have the IMPERIUM keyword"
   )
@@ -311,8 +402,12 @@ function detectScope(t) {
     // The target-object detection tolerates quantifier phrases ("targets ONE OR MORE Genestealer
     // Cults units from your army" — round-2 review, Blessed Visages): without them the run read as
     // a SUBJECT and a later enemy-attack clause inherited it backwards onto the player's own units.
+    // The description form "if the target (of that attack) is a DAEMON unit" is a target too
+    // (2026-10-03, Destroy the Daemonic): read as a subject, DAEMON scoped the wound re-roll onto
+    // Daemon units instead of gating it on a Daemon target.
     const isTarget =
-      /\b(?:targets?|targeting|against)\s+(?:one\s+or\s+more\s+|a\s+number\s+of\s+|\d+\s+or\s+more\s+)?(?:a|an|one|that|each|every|the|all)?\s*(?:enemy\s+)?(?:friendly\s+)?(?:other\s+)?$/i.test(pre);
+      /\b(?:targets?|targeting|targeted|against)\s+(?:one\s+or\s+more\s+|a\s+number\s+of\s+|\d+\s+or\s+more\s+)?(?:a|an|one|that|each|every|the|all)?\s*(?:enemy\s+)?(?:friendly\s+)?(?:other\s+)?$/i.test(pre) ||
+      /\b(?:the|that)\s+target(?:\s+unit)?(?:\s+of\s+(?:that|the|this|each)\s+attacks?)?\s+is\s+(?:not\s+)?(?:a|an)?\s*(?:enemy\s+)?$/i.test(pre);
     const isFriendly =
       /\bfriendly\s+$/i.test(pre) ||
       /^\s*friendly\b/i.test(m[1]) ||
@@ -382,14 +477,60 @@ const ARMY_COMP_CONDITIONAL = /\bif (?:you are using\b|your army (?:includes|doe
 // separately-gated modifier in ONE sentence ("…have the [ASSAULT] ability, and each time an attack
 // made with such a weapon targets a unit within 6\", add 1 to the Strength…" — Bringers of Flame),
 // and a single condition read would wrongly gate the grant too.
+// The inline gated CONJUNCT also splits (2026-10-03): "re-roll a Hit roll of 1 and, if the target is a
+// DAEMON unit, re-roll a Wound roll of 1 as well" (Destroy the Daemonic) is an unconditional modifier
+// plus a gated one; read as one clause, the tail's gate swallowed the head's unconditional re-roll.
+// The tail is marked (CONJUNCT) so mapRuleText treats it as a continuation of the head: it inherits
+// the head's phase, and the head's gate when it resolves none of its own — never always-on.
+const CONJUNCT = '\u0001';
 function splitClauses(text) {
   return String(text || '')
     .replace(/■/g, '.')
     .replace(/\b(?:in addition|additionally|furthermore),/gi, '. ')
     .replace(/,\s*and (each time)\b/gi, '. $1')
+    .replace(/(?:,?\s+|\s*\(\s*)and,?\s+(?=if\b)/gi, `. ${CONJUNCT}`)
     .split(/[.;]+/)
     .map((c) => c.trim())
     .filter(Boolean);
+}
+
+// A sub-rule label opening a clause: "Skirmish Fighters: Kroot models from your army have…". Strict
+// on purpose (grounded on every live 11e rule text, 2026-10-03): 1-6 words, each Title Case or a
+// lowercase joiner, an optional "(Aura)"-style suffix — so prose ending in a colon ("Friendly PHOBOS
+// units have the following ability:") is never a label. Stratagem/structure headings (WHEN / TARGET /
+// EFFECT from a PDF pack, the battle-size and designer's-note headings) are never sub-rules.
+const LABEL_RE = /^((?:[A-Z][A-Za-z'’-]*)(?:\s+(?:[A-Z][A-Za-z'’-]*|of|the|and|in|to|for|a|an|on|from|with))*?(?:\s+\([A-Z][A-Za-z ]*\))?)\s*:\s*(.*)$/;
+const NON_SECTION_LABELS = new Set([
+  'WHEN', 'TARGET', 'EFFECT', 'RESTRICTION', 'RESTRICTIONS', 'COST', 'EXAMPLE', 'NOTE', "DESIGNER'S NOTE", 'DESIGNERS NOTE',
+  'KEYWORDS', 'RULES ADAPTIONS', 'RULES ADAPTATIONS', 'INCURSION', 'STRIKE FORCE', 'ONSLAUGHT', 'OR',
+  // Field headings inside a sub-rule (the Drukhari contracts: "Contract: One CHARACTER unit." /
+  // "Ability: Each time…") — the sub-rule's NAME is the colon-less line above them.
+  'CONTRACT', 'ABILITY', 'ABILITIES', 'TRIGGER', 'REWARD', 'REQUIREMENT', 'REQUIREMENTS', 'BONUS',
+]);
+// A structural heading still ENDS the previous sub-rule (`structural: true`): the text after
+// "Rules Adaptions:" belongs to the rule itself, not to the "Mustering A Boarding Patrol" section
+// before it (Kroot Raiding Party).
+function clauseLabel(clause) {
+  const colon = String(clause).indexOf(':');
+  if (colon < 1 || colon > 80) return null; // a heading is short; skips the regex on long prose lines
+  const m = String(clause).match(LABEL_RE);
+  if (!m) return null;
+  const label = m[1].trim();
+  if (label.split(/\s+/).length > 6) return null;
+  const structural = NON_SECTION_LABELS.has(label.replace(/’/g, "'").toUpperCase());
+  return { label, body: m[2].trim(), structural };
+}
+// The sub-rule labels that OPEN A LINE of the raw text (a heading is its own paragraph; a colon
+// inside running prose is not a heading). Section naming applies only when a rule carries TWO OR
+// MORE distinct sub-rule labels — a single label is just the rule's own name restated, and leaves
+// every effect named as before. Returns the labels in text order, or null.
+function sectionLabels(rawText) {
+  const found = [];
+  for (const line of String(rawText || '').split(/\n/)) {
+    const l = clauseLabel(cleanRuleText(line));
+    if (l && !found.some((f) => f.label === l.label)) found.push(l);
+  }
+  return found.filter((l) => !l.structural).length >= 2 ? found : null;
 }
 
 // A re-roll qualifier from the wording: "of 1" -> ones, "failed" -> failed, else all.
@@ -481,9 +622,11 @@ const MOD_PATTERNS = [
   // 1 from the Hit roll"), so test the WHOLE clause, not just the tail. Else an attacker self-penalty.
   {
     re: new RegExp(`subtracts? ${NUM} from (?:the )?hit rolls?`, 'i'),
-    build: (m, clause = '') => {
+    build: (m, clause = '', sideCtx = clause) => {
       const n = numFrom(m[1]);
-      const against = /\b(?:attack|attacks)\b[^.]*?\btargets?\s+this\s+unit\b|\bmade\s+against\s+this\s+unit\b|\bagainst\s+this\s+unit\b|\btargeting\s+this\s+unit\b/i.test(clause);
+      // sideCtx: a tier / conjunct tail is read with its head ("Each time an attack targets this unit,
+      // subtract 1 from the Hit roll, and if this unit is below Half-strength, subtract 1 … again").
+      const against = /\b(?:attack|attacks)\b[^.]*?\btargets?\s+this\s+unit\b|\bmade\s+against\s+this\s+unit\b|\bagainst\s+this\s+unit\b|\btargeting\s+this\s+unit\b/i.test(sideCtx);
       return against
         ? { side: 'defender', mod: { hitPenalty: n }, summary: `−${n} to be Hit` }
         : { side: 'attacker', mod: { hitModifier: -n }, summary: `−${n} to Hit` };
@@ -495,11 +638,31 @@ const MOD_PATTERNS = [
     re: new RegExp(`adds? ${NUM} to (?:the )?wound rolls?`, 'i'),
     build: (m) => ({ side: 'attacker', mod: { woundModifier: numFrom(m[1]) }, summary: `+${numFrom(m[1])} to Wound` }),
   },
-  // X+ invulnerable save (defensive). A phase qualifier ("against melee/ranged attacks") IS
-  // modellable via the effect phase; other qualifiers are handled by classify() (situational).
+  // X+ invulnerable save (defensive). EVERY occurrence is read, each with the qualifier that follows
+  // it (2026-10-03): "a 6+ invulnerable save against melee attacks and a 5+ invulnerable save against
+  // ranged attacks" (Skirmish Fighters, Veil of Medrengard) is two saves in two phases — reading the
+  // first only dropped the second AND took the clause-wide phase, which was the wrong one for Veil's
+  // 4+ (ranged) save. "against melee/ranged attacks" pins the phase; "against that attack" (the attack
+  // the clause already named — Green Tide) keeps the clause phase; any other "against …" qualifier
+  // (Psychic Attacks, attacks made by DAEMON models) can't be expressed, so that save is not emitted.
   {
     re: /(\d)\+\s*invulnerable save/i,
-    build: (m) => ({ side: 'defender', mod: { invuln: parseInt(m[1], 10) }, summary: `${m[1]}+ Invuln` }),
+    each: true,
+    build: (m, clause = '') => {
+      const after = clause.slice(m.index + m[0].length);
+      const q = after.match(/^\s*(?:against|vs\.?)\s+([^,.;]*)/i);
+      let phase;
+      if (q) {
+        const qual = q[1].trim();
+        if (/^melee\s+attacks?\b/i.test(qual)) phase = 'fight';
+        else if (/^ranged\s+attacks?\b/i.test(qual)) phase = 'shooting';
+        else if (!/^(?:that|this|the|those|such)\s+attacks?\b(?!\s+(?:made|with|from|by|that|which|of)\b)|^(?:it|them)\b/i.test(qual)) return null;
+      } else if (/invulnerable save\s+(?:against|vs\.?)\s+(?:melee|ranged)\s+attacks?/i.test(clause)) {
+        // An unqualified save beside a melee- or ranged-qualified one is NOT that save's phase.
+        phase = 'any';
+      }
+      return { side: 'defender', mod: { invuln: parseInt(m[1], 10) }, summary: `${m[1]}+ Invuln`, phase };
+    },
   },
   // Feel No Pain X+ (defensive)
   {
@@ -581,7 +744,21 @@ function grantKeywordMods(t) {
 // "such/that weapon" anaphor also inherits the subject clause's PHASE (the weapon type was named
 // there — "Ranged weapons … have [ASSAULT], and each time an attack made with such a weapon…").
 // Returns { effects, matched, ownScope, ownPhase } so the caller can track the inheritance.
-function mapClause(clause, { name, source, nameCondition, inherited = null, degradeAbility = false }) {
+function mapClause(
+  clause,
+  {
+    name,
+    source,
+    nameCondition,
+    inherited = null,
+    degradeAbility = false,
+    prev = null,
+    conjunct = false,
+    conjunctHead = false,
+    abilityGated = false,
+    holdUnresolved = false,
+  },
+) {
   // A DEGRADE BRACKET clause ("While this model has 1-9 wounds remaining, …") is GATED, not dropped
   // (F2.1, 2026-07-30): it maps normally and every effect it emits is force-gated on the `damaged`
   // condition, which defaults OFF — so a healthy model never inherits its damaged penalty (the
@@ -596,7 +773,26 @@ function mapClause(clause, { name, source, nameCondition, inherited = null, degr
   // attack, not an aura — detectCondition reads it as targetCondition (off by default), so keeping
   // the clause never over-applies (the Hernkyn / Bringers of Flame / T'au Battlesuit shapes).
   const targetRange = /\btargets?\s+(?:a|an|one)\s+unit\s+within\b/i.test(clause);
-  if ((DEGRADING_RE.test(clause) && !degradeGated) || (AURA_RE.test(clause) && !targetRange)) return { effects: [], matched: [] };
+  // A TIER CONTINUATION ("If that target is also Below Half-strength, add 1 to the Wound roll as
+  // well" / "If that attack targets a unit at its Starting Strength, you can re-roll the Hit roll
+  // instead") is a second tier of the SAME attack the previous clause described (2026-10-03). It reads
+  // its subject and side through that clause (`headText`), inherits its phase when it names none
+  // (Feeding Frenzy's wound tier is still a melee attack), and is never always-on:
+  //   - no gate of its own -> the head's gate (see `condition` below for the two-gate case);
+  //   - no gate it can resolve and none to inherit -> DROPPED ("If the bearer's unit has achieved one
+  //     or more Boasts, add 1 to the Damage characteristic as well" was always-on), unless an
+  //     ability-level gate (once per battle / Waaagh!) will still cover it;
+  //   - a tier of a DROPPED clause is dropped with it ("…wholly within 6" of the bearer, add 2 to the
+  //     Attacks… If the bearer's unit has achieved one or more Boasts, add 3 … instead" — Hordeslayer).
+  const tier = !!prev && (conjunct || TIER_CONT_RE.test(clause));
+  const headText = tier ? prev.text || '' : '';
+  const gateCtx = { prevTarget: tier && prev.strength === 'target', headText };
+  // A strength EVENT trigger ("cause it to become Below Half-strength") and a full-strength SELF gate
+  // ("while this unit is at its Starting Strength") have no sim toggle — drop, never auto-apply.
+  const sg = strengthGate(clause, gateCtx);
+  const strengthUntoggleable = STRENGTH_EVENT_RE.test(clause) || (sg && sg.subject === 'self' && sg.negated);
+  const dropped = { effects: [], matched: [], prev: { phase: detectPhase(clause), condition: null, strength: sg?.subject || null, dropped: true, text: clause } };
+  if ((DEGRADING_RE.test(clause) && !degradeGated) || (AURA_RE.test(clause) && !targetRange) || strengthUntoggleable || (tier && prev.dropped)) return dropped;
 
   const effects = [];
   const matched = [];
@@ -605,12 +801,31 @@ function mapClause(clause, { name, source, nameCondition, inherited = null, degr
   const phase =
     ownPhase === 'any' && inherited?.phase && inherited.phase !== 'any' && /\b(?:such|that) (?:a )?weapons?\b/i.test(clause)
       ? inherited.phase
-      : ownPhase;
+      : ownPhase === 'any' && tier && prev.phase && prev.phase !== 'any'
+        ? prev.phase
+        : ownPhase;
   // The degrade bracket is the dominant gate on its own clause — it wins over any other condition
   // the text would suggest, and over a name-derived one (F2.1).
-  const condition = degradeGated ? 'damaged' : detectCondition(clause) || nameCondition || null;
+  // A CONJUNCT tail takes the gate its unsplit clause had (head + tail read together, first gate
+  // wins: "While the Waaagh! is active … and, if the target is a VEHICLE, add 1 to the Wound roll as
+  // well" keeps the Waaagh! toggle; "re-roll a Hit roll of 1 and, if the target is a DAEMON unit, …"
+  // gets the target gate). A separate-sentence tier keeps its OWN gate and inherits the head's only
+  // when it has none — an effect has one condition slot, so a two-gate tier keeps the narrower,
+  // specific one ("If your unit is Battle-shocked, add 2 … instead" must not ride the charge toggle).
+  const condition = degradeGated
+    ? 'damaged'
+    : conjunct && tier
+      ? detectCondition(`${headText} ${clause}`, gateCtx) || prev.condition || nameCondition || null
+      : detectCondition(clause, gateCtx) || (tier ? prev.condition : null) || nameCondition || null;
+  // With a review surface (datasheet abilities, `holdUnresolved`), the gate-less tier is kept and HELD
+  // (`_suspect` below) so the player can still see and apply it; without one (pack rules, whose
+  // effects apply as stored) it is dropped.
+  if (tier && !condition && !abilityGated && !holdUnresolved) return dropped;
   const ownScope = detectScope(clause);
-  const hasOwnScope = ownScope.attacker.length > 0 || ownScope.defender.length > 0;
+  // A CONJUNCT tail ("…improve the Ballistic Skill by 1 and, if the Spotted unit was marked by an
+  // Observer unit, that attack has [IGNORES COVER]") shares the head's subject: the units it names
+  // are objects of its condition, never the acting unit, so it always inherits the carried scope.
+  const hasOwnScope = !(conjunct && inherited?.scope) && (ownScope.attacker.length > 0 || ownScope.defender.length > 0);
   // A subject-less clause inherits the carried scope; its OWN exclusions still union in (a
   // continuation can add a carve-out without restating the subject).
   const scope =
@@ -628,7 +843,15 @@ function mapClause(clause, { name, source, nameCondition, inherited = null, degr
   const suspect =
     !condition &&
     (/\bif\b/i.test(clause) ||
-      /\btargets?\s+(?:a|an|one|the\s+closest)\b/i.test(clause) ||
+      // "…makes an attack that targets an enemy unit, re-roll a Hit roll of 1" is every attack, not a
+      // trigger (Armoured Spearhead, 2026-10-03): only the bare "an enemy unit," followed DIRECTLY by
+      // the modifier is exempt — "…an enemy unit, excluding CHARACTER units, …" and "the closest enemy
+      // unit" stay suspect.
+      /\btargets?\s+(?:(?:a|an|one)\b(?!\s+enemy\s+unit\s*,\s*(?:add|subtract|re-?roll|improve|worsen|you\s+can\s+re-?roll)\b)|the\s+closest\b)/i.test(clause) ||
+      // …and the exempt shape, like a conjunct HEAD ("…add 1 to the Hit roll, and if …", which lost
+      // the tail's "if" in the split), stays held when another gate word the mapper can't resolve
+      // sits anywhere in it ("Until the end of the phase, …", "Unless this unit is Engaged, …").
+      ((conjunctHead || /\btargets?\s+(?:a|an|one)\s+enemy\s+unit\s*,/i.test(clause)) && UNRESOLVED_GATE_WORDS_RE.test(clause)) ||
       /\bagainst\s+(?:a|an|one|each|enemy)\b/i.test(clause) ||
       (/\bwhile\b/i.test(clause) && !/\bleading\b/i.test(clause)) ||
       // Activation / per-phase / random triggers that don't map to a sim toggle — a positive buff
@@ -647,16 +870,34 @@ function mapClause(clause, { name, source, nameCondition, inherited = null, degr
     matched.push({ phrase: summary, side, summary });
   };
   for (const p of MOD_PATTERNS) {
-    const m = clause.match(p.re);
-    if (m) {
-      const r = p.build(m, clause);
+    // An `each` pattern reads EVERY occurrence in the clause (two invulnerable saves with different
+    // qualifiers); the rest read the first.
+    const ms = p.each ? [...clause.matchAll(new RegExp(p.re.source, `${p.re.flags.replace('g', '')}g`))] : [clause.match(p.re)];
+    for (const m of ms) {
+      if (!m) continue;
+      const r = p.build(m, clause, headText ? `${headText} ${clause}` : clause);
       if (r && r.mod) add(r.side, r.mod, r.summary, r.phase);
     }
   }
   for (const g of grantKeywordMods(clause)) add(g.side, g.mod, g.summary);
   for (const r of rerollMods(clause)) add(r.side, r.mod, r.summary);
-  return { effects, matched, ownScope: hasOwnScope ? ownScope : null, ownPhase };
+  return { effects, matched, ownScope: hasOwnScope ? ownScope : null, ownPhase, prev: { phase, condition, strength: sg?.subject || null, text: clause } };
 }
+
+// Gate wording the mapper has no condition for (2026-10-03 review): a clause carrying one is held for
+// review rather than auto-applied when nothing else would flag it (see mapClause `suspect`).
+const UNRESOLVED_GATE_WORDS_RE =
+  /\b(?:provided|during|in\s+the\s+(?:first|turn)|in\s+your\s+opponent'?s|on\s+the\s+turn|for\s+each|unless|until|after|whenever|when|once|as\s+long\s+as|so\s+long\s+as)\b/i;
+
+// The ability-level gates mapRuleText applies to every conditionless effect (see there).
+const ABILITY_ONCE_RE = /\bonce per (?:battle|turn|game)\b/i;
+const ABILITY_WAAAGH_RE = /\bwaaa?gh!?\b[^.]{0,30}?\bactive\b|\bis active for your army\b/i;
+
+// A clause that continues the previous clause's attack as a second tier (see mapClause): an "If …"
+// clause that adds to or replaces the previous modifier ("as well" / "instead"), or restates the
+// previous predicate one tier further ("If that target is also Below Half-strength"). A bare "also"
+// elsewhere ("If the bearer is a CHARACTER, models in its unit also have…") is a new rule, not a tier.
+const TIER_CONT_RE = /^if\b[^.]*\b(?:as well|instead)\b|^if\b[^,.]*\b(?:is|are)\s+also\s+(?:below|at\s+or\s+below)\b/i;
 
 /**
  * Map one rule's text into Effects + a classification. The text is mapped CLAUSE BY CLAUSE, and
@@ -667,7 +908,9 @@ function mapClause(clause, { name, source, nameCondition, inherited = null, degr
  * cover. Safer to under-apply a conditional than to mis-apply it.
  * @returns { effects, classification, matched, unmapped, notes, conditions }
  */
-export function mapRuleText(text, { name = 'Rule', source } = {}) {
+// `holdUnresolved`: the caller has a review surface (captureUnitAbilities), so a tier whose gate can't
+// be resolved is kept as a held (`_suspect`) effect instead of being dropped.
+export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = false } = {}) {
   const raw = cleanRuleText(text);
   const notes = [];
   if (!raw) {
@@ -690,11 +933,65 @@ export function mapRuleText(text, { name = 'Rule', source } = {}) {
   // so it is decided once, before the clauses, and handed to every clause — otherwise a clause that
   // lost the "while … wounds remaining" opener in the split would be dropped or read as always-on.
   const degradeAbility = DEGRADE_GATE_RE.test(mapText) || DEGRADE_NAME_RE.test(name || '');
-  for (const clause of splitClauses(mapText)) {
-    const r = mapClause(clause, { name, source, nameCondition, inherited: carry, degradeAbility });
+  // The previous clause's phase / condition / strength subject, for a tier continuation (mapClause).
+  let prev = null;
+  // Named sub-rules: a detachment rule can carry several ("Hunter's Instincts: … Skirmish Fighters:
+  // Kroot models from your army have…"), so each clause's effects take the label of the section it
+  // sits in. Only the NAME changes — scope inheritance and gates run across sections exactly as before.
+  const sections = sectionLabels(text);
+  // Every known heading, longest first so "Berserk Fury:" is never read as "Fury:".
+  const headingRe = sections
+    ? new RegExp(
+        `(?:^|\\s)(${[...sections]
+          .map((l) => l.label)
+          .sort((a, b) => b.length - a.length)
+          .map((l) => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .join('|')}):`,
+        'g',
+      )
+    : null;
+  const nameOf = (label) => (sections.find((l) => l.label === label)?.structural ? name : label);
+  let effName = name;
+  // The ability-level gate (see below) is known up front so a tier with no gate of its own is left for
+  // it to cover rather than dropped.
+  const abilityGated = ABILITY_ONCE_RE.test(mapText) || ABILITY_WAAAGH_RE.test(mapText);
+  const clauses = splitClauses(mapText);
+  for (const [ci, clause] of clauses.entries()) {
+    const conjunct = clause.startsWith(CONJUNCT);
+    const conjunctHead = !!clauses[ci + 1]?.startsWith(CONJUNCT);
+    let body = conjunct ? clause.slice(CONJUNCT.length).trim() : clause;
+    // A heading that lands MID-clause (the paragraph before it had no full stop — a bulleted unit
+    // list) ends the current section from the NEXT clause on; this clause keeps its opening name.
+    // The heading LATEST in the clause wins.
+    let nextName = null;
+    if (headingRe) {
+      let opener = null;
+      for (const hm of body.matchAll(headingRe)) {
+        if (hm.index === 0 && !opener) opener = hm;
+        else nextName = nameOf(hm[1]);
+      }
+      if (opener) {
+        effName = nameOf(opener[1]);
+        body = body.slice(opener[0].length).trim();
+        prev = null; // a new sub-rule is never a tier of the previous one
+      }
+      if (!body) {
+        if (nextName) {
+          effName = nextName;
+          prev = null;
+        }
+        continue;
+      }
+    }
+    const r = mapClause(body, { name: effName, source, nameCondition, inherited: carry, degradeAbility, prev, conjunct, conjunctHead, abilityGated, holdUnresolved });
     effects.push(...r.effects);
     matched.push(...r.matched);
     if (r.ownScope) carry = { scope: r.ownScope, phase: r.ownPhase };
+    prev = r.prev;
+    if (nextName) {
+      effName = nextName;
+      prev = null;
+    }
   }
 
   // Rule-internal keyword grants (round-3 review): a scope naming a keyword this rule itself
@@ -734,11 +1031,7 @@ export function mapRuleText(text, { name = 'Rule', source } = {}) {
   // under-gate a genuinely always-on clause.
   if (degradeAbility) for (const e of effects) e.condition = 'damaged';
 
-  const abilityGate = /\bonce per (?:battle|turn|game)\b/i.test(mapText)
-    ? 'oncePerBattle'
-    : /\bwaaa?gh!?\b[^.]{0,30}?\bactive\b|\bis active for your army\b/i.test(mapText)
-      ? 'armyAbilityActive'
-      : null;
+  const abilityGate = ABILITY_ONCE_RE.test(mapText) ? 'oncePerBattle' : ABILITY_WAAAGH_RE.test(mapText) ? 'armyAbilityActive' : null;
   if (abilityGate) for (const e of effects) if (!e.condition) e.condition = abilityGate;
 
   // Ability-LEVEL suspicion: an activation / aura / heal / phase trigger ANYWHERE in the ability
@@ -802,7 +1095,7 @@ export function captureUnitAbilities(items = []) {
   for (const item of items || []) {
     const text = item?.text;
     if (!text || !String(text).trim()) continue;
-    const r = mapRuleText(text, { name: item.name });
+    const r = mapRuleText(text, { name: item.name, holdUnresolved: true });
     if (!r.effects.length) continue; // not-simulatable / no combat clause
     // The ABILITY'S OWN VERBATIM TEXT (B7): the mapper reduces the prose to a small modelled mod
     // ("+2 Attacks"), dropping the weapon scope / target restriction it can't express, so the modelled
@@ -859,7 +1152,10 @@ export function captureUnitAbilities(items = []) {
         m.reroll?.hit === 'ones' ||
         m.reroll?.wound === 'ones';
       const apply = conditioned || (safeAlwaysOn && !negAtk && !isChoice && !_suspect);
-      const base = { ...clean, source: 'ability', text: abilityText };
+      // The ABILITY's name, never a sub-rule label the mapper read inside it: the datasheet view, the
+      // abilities editor and the matrix toggles all join a captured effect to its ability BY NAME
+      // (2026-10-03 review: "Carmine Wrath" orphaned the "Legacy of the Angel" card).
+      const base = { ...clean, name: item.name || clean.name, source: 'ability', text: abilityText };
       out.push(apply ? base : { ...base, captured: true });
     }
   }

@@ -810,16 +810,22 @@ describe('captureUnitAbilities — the confidence split (P2)', () => {
   });
 
   it('REVIEWS a clause with an unresolved conditional trigger (always-on), but APPLIES the safe part', () => {
-    // Macro-extinction shape: the "vs MONSTER/VEHICLE" hit is gated; a 2nd-clause "if TITANIC" wound leaks
-    // always-on -> reviewed; a plain leader +1 hit stays applied.
+    // A 2nd-clause trigger the mapper can't resolve ("if this unit completed a Deed") leaks always-on ->
+    // reviewed; the gated "vs MONSTER/VEHICLE" hit stays applied.
     const eff = captureUnitAbilities([
-      { name: 'Macro', text: 'Each time this model makes an attack that targets a MONSTER or VEHICLE unit, add 1 to the Hit roll. If that target is TITANIC, add 1 to the Wound roll.' },
+      { name: 'Macro', text: 'Each time this model makes an attack that targets a MONSTER or VEHICLE unit, add 1 to the Hit roll. If this unit completed a Deed this turn, add 1 to the Wound roll.' },
     ]);
     const hit = eff.find((e) => e.mods.hitModifier);
     const wound = eff.find((e) => e.mods.woundModifier);
     expect(hit.condition).toBe('targetCondition'); // gated, applied
     expect(hit.captured).toBeUndefined();
-    expect(wound.captured).toBe(true); // unresolved "if … TITANIC" -> reviewed
+    expect(wound.captured).toBe(true); // unresolved "if … Deed" -> reviewed
+    // The Macro-extinction shape itself ("If that target is TITANIC") is a TARGET gate since 2026-10-03:
+    // gated on targetCondition and applied, no longer held as unresolved.
+    const macro = captureUnitAbilities([
+      { name: 'Macro', text: 'Each time this model makes an attack that targets a MONSTER or VEHICLE unit, add 1 to the Hit roll. If that target is TITANIC, add 1 to the Wound roll.' },
+    ]).find((e) => e.mods.woundModifier);
+    expect([macro.condition, macro.captured]).toEqual(['targetCondition', undefined]);
   });
 
   it('drops a pure-statline invuln/FNP ability (already read onto INV/FNP) and empty text', () => {
@@ -1283,5 +1289,461 @@ describe('F2.1 — degrade brackets that the real catalogue writes awkwardly', (
     const text =
       "While this model has 1-8 wounds remaining, subtract 4 from its Objective Control characteristic and you can only select one of the C'tan Powers weapons in your Shooting phase, instead of two.";
     expect(mapRuleText(text, { name: 'Damaged: 1-8 wounds remaining' }).effects).toHaveLength(0);
+  });
+});
+
+// 2026-10-03 — Starting Strength / Half-strength gates, tier continuations, per-save invuln phases
+// and named sub-rules (the Kroot Hunting Pack report). Ground truth: the 11e Core Rules appendix
+// "Starting Strength and Half-strength" (Below Half-strength implies below Starting Strength), plus
+// a sweep of every live 11e catalogue at the pinned SHA that found the same shapes on ~25 rules and
+// datasheet abilities. The texts below are genericised phrasings of those real shapes.
+describe('strength-state gates (the Kroot Hunting Pack class)', () => {
+  const conds = (text, name) => mapRuleText(text, { name }).effects.map((e) => e.condition);
+
+  it('BREAKING VARIANT: "if the target of that attack is below its Starting Strength" gates both tiers on targetCondition', () => {
+    const text =
+      'Rite One: Each time a PACK model from your army makes an attack, add 1 to the Hit roll if the target of that attack is below its Starting Strength, and add 1 to the Wound roll as well if the target of that attack is Below Half-strength.\n\nRite Two: PACK models from your army have a 6+ invulnerable save against melee attacks and a 5+ invulnerable save against ranged attacks.';
+    const r = mapRuleText(text, { name: 'Rite One', source: 'detachment' });
+    const hit = r.effects.find((e) => e.mods.hitModifier);
+    const wound = r.effects.find((e) => e.mods.woundModifier);
+    // Before the fix both were condition null: an always-on +1 Hit / +1 Wound for every attack.
+    expect(hit.condition).toBe('targetCondition');
+    expect(wound.condition).toBe('targetCondition');
+    expect(r.effects.filter((e) => e.side === 'attacker').every((e) => e.condition)).toBe(true);
+    expect(hit.scope).toEqual(['PACK']);
+    // Default OFF: no attacker bonus resolves until the player sets the target-state toggle.
+    expect(resolveEffects(r.effects, { phase: 'shooting' }).attacker.hitModifier).toBe(0);
+    expect(resolveEffects(r.effects, { phase: 'shooting', activeConditions: ['targetCondition'] }).attacker.hitModifier).toBe(1);
+  });
+
+  it('BREAKING VARIANT: two invulnerable saves in one clause each keep their own phase (the ranged half was dropped)', () => {
+    const r = mapRuleText('PACK models from your army have a 6+ invulnerable save against melee attacks and a 5+ invulnerable save against ranged attacks.');
+    const inv = r.effects.filter((e) => e.mods.invuln).map((e) => [e.mods.invuln, e.phase]);
+    expect(inv).toEqual([
+      [6, 'fight'],
+      [5, 'shooting'],
+    ]);
+    expect(resolveEffects(r.effects, { phase: 'shooting' }).defender.invuln).toBe(5);
+    expect(resolveEffects(r.effects, { phase: 'fight' }).defender.invuln).toBe(6);
+  });
+
+  it('BREAKING VARIANT: the ranged-first order is not read off the clause-wide phase (Veil of Medrengard shape)', () => {
+    // The old reader took the FIRST save and the clause-wide phase ("melee" wins): a 4+ in melee.
+    const r = mapRuleText('The bearer has a 4+ invulnerable save against ranged attacks, and a 5+ invulnerable save against melee attacks.');
+    expect(r.effects.map((e) => [e.mods.invuln, e.phase])).toEqual([
+      [4, 'shooting'],
+      [5, 'fight'],
+    ]);
+  });
+
+  it('an invuln qualified by something the sim cannot express is not emitted; an unqualified one is kept', () => {
+    const r = mapRuleText(
+      'While this model is leading a unit, models in that unit have a 6+ invulnerable save, and 4+ invulnerable save against Psychic Attacks and attacks made by DAEMON models.',
+    );
+    expect(r.effects.map((e) => e.mods.invuln)).toEqual([6]);
+    // "against that attack" names the attack the clause already described: kept (Green Tide shape).
+    expect(
+      mapRuleText('Each time an attack targets a BOYZ unit from your army, models in that unit have a 6+ invulnerable save against that attack.').effects,
+    ).toHaveLength(1);
+  });
+
+  it('named sub-rules label their own effects (two or more line-start labels)', () => {
+    const text =
+      'Rite One: Each time a PACK model from your army makes an attack that targets a unit that is Below Half-strength, add 1 to the Hit roll.\n\nRite Two: PACK models from your army have a 5+ invulnerable save.';
+    const r = mapRuleText(text, { name: 'Rite One' });
+    expect(r.effects.map((e) => e.name)).toEqual(['Rite One', 'Rite Two']);
+  });
+
+  it('a single label, a mid-prose colon, or a stratagem heading never renames', () => {
+    expect(mapRuleText('Rite One: Each time a PACK model makes an attack, add 1 to the Hit roll.', { name: 'Pack Rule' }).effects[0].name).toBe('Pack Rule');
+    const strat = mapRuleText('WHEN: Your Shooting phase.\nTARGET: One PACK unit from your army.\nEFFECT: Until the end of the phase, add 1 to the Hit roll.', {
+      name: 'Volley',
+    });
+    expect(strat.effects.map((e) => e.name)).toEqual(['Volley']);
+    const prose = mapRuleText(
+      'Friendly PACK units have the following ability:\nKeen Eyes: Each time a model in this unit makes a ranged attack, add 1 to the Hit roll.',
+      { name: 'Pack Rule' },
+    );
+    expect(prose.effects.map((e) => e.name)).toEqual(['Pack Rule']);
+  });
+
+  it('BREAKING VARIANT: a structural heading after an unpunctuated list ends the previous section', () => {
+    // Boarding Patrol shape: the unit list has no full stop, so "Rules Adaptions:" lands mid-clause.
+    const text =
+      'Ambush Doctrine: Each time an enemy unit is selected to fire Overwatch, roll one D6.\n\nMustering A Patrol: You can include up to one of the following units:\n- PACK HOUNDS (5 models)\n\nRules Adaptions: - PACK units lose the Scout ability.\n- PACK units from your army have a 5+ invulnerable save.';
+    const r = mapRuleText(text, { name: 'Ambush Doctrine' });
+    expect(r.effects.map((e) => e.name)).toEqual(['Ambush Doctrine']); // not "Mustering A Patrol"
+  });
+
+  it('BREAKING VARIANT: a tier continuation inherits the attack phase and the target gate ("If that target is also…")', () => {
+    const r = mapRuleText(
+      'Each time this model makes a melee attack that targets a unit that is below its Starting Strength, add 1 to the Hit roll. If that target is also Below Half strength, add 1 to the Wound roll as well.',
+    );
+    const wound = r.effects.find((e) => e.mods.woundModifier);
+    expect(wound.condition).toBe('targetCondition'); // was null (held / auto-applied)
+    expect(wound.phase).toBe('fight'); // was 'any': the wound tier is the same melee attack
+  });
+
+  it('BREAKING VARIANT: "If that unit is Below Half-strength" after a target gate is the TARGET, not the attacker', () => {
+    const r = mapRuleText(
+      'While this model is leading a unit, each time a model in that unit makes a melee attack that targets a unit that is below its Starting Strength, you can re-roll the Hit roll. If that unit is Below Half-strength, you can re-roll the Wound roll as well.',
+    );
+    const wound = r.effects.find((e) => e.mods.reroll?.wound);
+    expect(wound.condition).toBe('targetCondition'); // was belowStrength (the wrong toggle)
+    expect(wound.phase).toBe('fight');
+  });
+
+  it('a tier continuation with an unresolved gate inherits the previous gate (never always-on)', () => {
+    const r = mapRuleText(
+      'Each time this model makes an attack that targets a MONSTER or VEHICLE unit, add 1 to the Hit roll. If that target is TITANIC, add 1 to the Wound roll as well.',
+    );
+    expect(r.effects.map((e) => e.condition)).toEqual(['targetCondition', 'targetCondition']);
+    // …and an ungated head leaves an ungated tier alone (phase still inherited).
+    const t = mapRuleText(
+      'Each time a model in this unit makes a ranged attack, re-roll a Hit roll of 1. If the target of that attack is the closest eligible target, you can re-roll the Hit roll instead.',
+    );
+    expect(t.effects.map((e) => [e.condition, e.phase])).toEqual([
+      [null, 'shooting'],
+      ['targetCondition', 'shooting'],
+    ]);
+  });
+
+  it('the other live target phrasings gate on targetCondition', () => {
+    expect(
+      conds(
+        "Each time a model in the bearer's unit makes an attack that targets an enemy unit below its Starting Strength, add 1 to the Hit roll. If that target is also Below Half-Strength, add 1 to the Wound roll as well.",
+      ),
+    ).toEqual(['targetCondition', 'targetCondition']);
+    expect(conds("Friendly PACK INFANTRY units' attacks that target a battle-shocked unit or a unit at or below half-strength can re-roll hit rolls of 1.")).toEqual([
+      'targetCondition',
+    ]);
+    expect(
+      conds(
+        'Each time a model in this unit makes an attack that targets an enemy unit that is below its Starting Strength, add 1 to the Hit roll. If that enemy unit is Below Half-strength, add 1 to the Wound roll as well.',
+      ),
+    ).toEqual(['targetCondition', 'targetCondition']);
+    expect(conds('Each time this model makes an attack that targets a unit Below Half-strength, add 1 to the Hit roll.')).toEqual(['targetCondition']);
+    // A full-strength TARGET ("not below" / "at its Starting Strength") is still a target-state gate.
+    expect(conds('Each time this model makes an attack that targets an enemy unit that is not below Half-strength, add 1 to the Hit roll.')).toEqual(['targetCondition']);
+    expect(conds('Each time this model makes an attack that targets an enemy unit that is at its Starting Strength, you can re-roll the Hit roll.')).toEqual([
+      'targetCondition',
+    ]);
+    // A defensive rule gated on the ENEMY attacker's state is a target-state gate too.
+    const d = mapRuleText('Each time an attack targets this unit, if the attacking unit is Below Half-strength, subtract 1 from the Hit roll.');
+    expect([d.effects[0].side, d.effects[0].condition]).toEqual(['defender', 'targetCondition']);
+  });
+
+  it("BREAKING VARIANT: the acting unit's own strength gates on belowStrength, whatever the subject wording", () => {
+    expect(
+      conds('While a PACK VEHICLE unit from your army is below Starting Strength, each time a model in that unit makes an attack, re-roll a Hit roll of 1.'),
+    ).toEqual(['belowStrength']);
+    expect(
+      conds(
+        'Each time this model makes an attack, if it is below its Starting Strength, add 1 to the Hit roll. If this model is also Below Half-Strength, add 1 to the Wound roll as well.',
+      ),
+    ).toEqual(['belowStrength', 'belowStrength']);
+    expect(conds("Each time a PACK model from your army makes an attack, add 1 to the Hit roll if that model's unit is below its Starting Strength.")).toEqual([
+      'belowStrength',
+    ]);
+    // "targets" earlier in the clause does not make the defending unit's own state a target gate.
+    const d = mapRuleText('Each time an attack targets this unit, if this unit is Below Half-strength, models in this unit have the Feel No Pain 5+ ability.');
+    expect([d.effects[0].side, d.effects[0].condition]).toEqual(['defender', 'belowStrength']);
+  });
+
+  it('BREAKING VARIANT: an untoggleable strength state drops the clause rather than auto-applying it', () => {
+    // Full strength on the acting unit has no toggle (belowStrength would be the INVERSE).
+    expect(
+      mapRuleText('While this unit is at its Starting Strength, each time a model in this unit makes an attack, add 1 to the Hit roll.').effects,
+    ).toHaveLength(0);
+    // A state CHANGE caused by the attack is an event trigger (Cold Fervour shape): drop it, keep the
+    // unconditional clause beside it.
+    const r = mapRuleText(
+      '- Add 2 to the Strength characteristic of weapons equipped by PACK models from your army. - The first time each turn that a PACK unit from your army makes attacks that destroy a unit or cause it to become Below Half-strength, until the end of the turn, add 2 to the Strength characteristic of weapons equipped by friendly HUNTER models.',
+    );
+    expect(r.effects).toHaveLength(1);
+    expect(r.effects[0].scope).toEqual(['PACK']);
+  });
+
+  it('the strength toggles stay default-OFF situational conditions the sim can show', () => {
+    const ids = CONDITIONS.map((c) => c.id);
+    expect(ids).toContain('targetCondition');
+    expect(ids).toContain('belowStrength');
+    expect(mapRuleText('Each time this model makes an attack that targets a unit that is Below Half-strength, add 1 to the Hit roll.').classification).toBe('situational');
+  });
+});
+
+// Review pass 1 on the strength-gate change (2026-10-03): each case below is a finder's traced input.
+describe('strength-state gates — review pass 1 breaking variants', () => {
+  const conds = (text) => mapRuleText(text, { name: 'X' }).effects.map((e) => e.condition);
+
+  it('BREAKING VARIANT: "below half its Starting Strength" is still a self gate (the old regex accepted it)', () => {
+    expect(conds('While this unit is below half its Starting Strength, each time a model in this unit makes an attack, add 1 to the Hit roll.')).toEqual(['belowStrength']);
+    expect(conds('If this unit is below half of its Starting Strength, add 1 to the Hit roll.')).toEqual(['belowStrength']);
+  });
+
+  it('BREAKING VARIANT: "against a unit that is below…" and "targets a unit, if it is below…" are TARGET gates', () => {
+    expect(conds('Each time a model in this unit makes a melee attack against a unit that is below its Starting Strength, add 1 to the Hit roll.')).toEqual(['targetCondition']);
+    expect(conds('Add 1 to the Wound roll of attacks made by this unit against units that are Below Half-strength.')).toEqual(['targetCondition']);
+    expect(conds('Each time a model in this unit makes an attack that targets a unit, if it is below its Starting Strength, add 1 to the Hit roll.')).toEqual(['targetCondition']);
+    expect(conds('Each time this model makes an attack, if the enemy unit it is attacking is Below Half-strength, add 1 to the Hit roll.')).toEqual(['targetCondition']);
+  });
+
+  it('…while the defending unit stays the subject when IT is the one targeted', () => {
+    const d = mapRuleText('Each time an attack targets this unit, if it is Below Half-strength, models in this unit have the Feel No Pain 5+ ability.');
+    expect([d.effects[0].side, d.effects[0].condition]).toEqual(['defender', 'belowStrength']);
+  });
+
+  it('"not at its Starting Strength" is below strength; "falls below Half-strength" is an event (dropped)', () => {
+    expect(conds('While this unit is not at its Starting Strength, each time a model in this unit makes an attack, add 1 to the Hit roll.')).toEqual(['belowStrength']);
+    expect(conds('Each time this model destroys an enemy unit or causes it to fall below its Starting Strength, until the end of the turn, add 1 to the Hit roll.')).toEqual([]);
+  });
+
+  it('BREAKING VARIANT: a tier of a DROPPED clause is dropped with it (was an always-on stronger value)', () => {
+    // Hordeslayer shape: the aura-gated parent is dropped; its "instead" tier was +3 Attacks always-on.
+    const text =
+      'At the start of the Fight phase, if there are more enemy models than friendly models wholly within 6" of the bearer, until the end of the phase, add 2 to the Attacks characteristic of melee weapons equipped by the bearer. If the bearer\'s unit has completed one or more Deeds, add 3 to the Attacks characteristic instead.';
+    expect(mapRuleText(text, { name: 'X' }).effects).toEqual([]);
+  });
+
+  it('BREAKING VARIANT: "If the target of that attack is a MONSTER or VEHICLE unit … as well" is a target gate', () => {
+    const r = mapRuleText('Each time this model makes a melee attack, you can re-roll the Hit roll. If the target of that attack is a MONSTER or VEHICLE unit, you can re-roll the Wound roll as well.');
+    const wound = r.effects.find((e) => e.mods.reroll?.wound);
+    expect([wound.condition, wound.phase]).toEqual(['targetCondition', 'fight']);
+  });
+
+  it('a bare "also" is not a tier: it inherits neither phase nor gate', () => {
+    const r = mapRuleText('Each time a model in this unit makes a ranged attack, add 1 to the Hit roll. If the bearer is a CHARACTER, models in its unit also have the [LETHAL HITS] ability.');
+    const lethal = r.effects.find((e) => e.mods.grantKeywords);
+    expect(lethal.phase).toBe('any');
+  });
+
+  it('an invuln "against that attack" with trailing words is kept; an unqualified save beside a qualified one is phase-free', () => {
+    expect(mapRuleText('Models in that unit have a 4+ invulnerable save against that attack until the end of the phase.').effects.map((e) => e.mods.invuln)).toEqual([4]);
+    expect(mapRuleText('Models in that unit have a 4+ invulnerable save against the attacks made by DAEMON models.').effects).toEqual([]);
+    const two = mapRuleText('This model has a 4+ invulnerable save against melee attacks and a 5+ invulnerable save.').effects;
+    expect(two.map((e) => [e.mods.invuln, e.phase])).toEqual([
+      [4, 'fight'],
+      [5, 'any'],
+    ]);
+  });
+
+  it('BREAKING VARIANT: field headings ("Contract:" / "Ability:") never name effects', () => {
+    const text =
+      'Trophy Run\nContract: One CHARACTER unit.\nAbility: Each time a PACK model in this unit makes an attack that targets the Contract unit, add 1 to the Hit roll.\n\nCull the Weak\nContract: One INFANTRY unit.\nAbility: Each time a PACK model in this unit makes an attack that targets that unit, add 1 to the Wound roll.';
+    expect(new Set(mapRuleText(text, { name: 'Contracts' }).effects.map((e) => e.name))).toEqual(new Set(['Contracts']));
+  });
+
+  it('BREAKING VARIANT: a heading that is a suffix of another never steals its section; the latest mid-clause heading wins', () => {
+    const text =
+      'Fury: Each time a model in this unit makes a ranged attack, add 1 to the Hit roll.\nBerserk Fury: Each time a model in this unit makes a melee attack, add 1 to the Wound roll. Models in this unit have the [LETHAL HITS] ability';
+    expect(mapRuleText(text, { name: 'X' }).effects.map((e) => e.name)).toEqual(['Fury', 'Berserk Fury', 'Berserk Fury']);
+  });
+
+  it('a tier never crosses into the next sub-rule', () => {
+    const text =
+      'Alpha Rite: Each time a model in this unit makes a melee attack that targets a unit that is below its Starting Strength, add 1 to the Hit roll.\nBeta Rite: If this unit is led by a CHAMPION, add 1 to the Wound roll as well.';
+    const beta = mapRuleText(text, { name: 'X' }).effects.find((e) => e.name === 'Beta Rite');
+    expect([beta.condition, beta.phase]).toEqual([null, 'any']);
+  });
+
+  it('BREAKING VARIANT: a captured datasheet ability keeps the ABILITY name even with sub-rule headings inside', () => {
+    // The datasheet view joins captured effects to the ability card by name; a sub-rule name orphaned it.
+    const text =
+      'At the start of the first battle round, select two of the abilities below.\n\nSwift Wrath: Each time a model in this unit makes an attack, re-roll a Hit roll of 1.\n\nIron Will: Each time a model in this unit makes an attack, re-roll a Wound roll of 1.';
+    const caps = captureUnitAbilities([{ name: 'Legacy Rite', text }]);
+    expect(caps.length).toBeGreaterThan(0);
+    expect(caps.every((e) => e.name === 'Legacy Rite')).toBe(true);
+    // The rule-plan path (no join on effect name) still names the sub-rules.
+    expect(mapRuleText(text, { name: 'Legacy Rite' }).effects.map((e) => e.name)).toEqual(['Swift Wrath', 'Iron Will']);
+  });
+});
+
+describe('the inline gated conjunct ("<modifier> and, if <gate>, <modifier> as well")', () => {
+  it('BREAKING VARIANT: the unconditional head keeps no gate; the tail is gated (Destroy the Daemonic shape)', () => {
+    const r = mapRuleText(
+      'Each time a HUNTER model from your army makes an attack, re-roll a Hit roll of 1 and, if the target is a DAEMON unit, re-roll a Wound roll of 1 as well.',
+      { name: 'X' },
+    );
+    const hit = r.effects.find((e) => e.mods.reroll?.hit);
+    const wound = r.effects.find((e) => e.mods.reroll?.wound);
+    expect(hit.condition).toBeNull(); // the 1s re-roll is unconditional in the rule
+    expect(hit._suspect).toBeUndefined();
+    expect(wound.condition).toBe('targetCondition');
+    expect(wound.scope).toEqual(hit.scope); // the tail inherits the head's subject, not the target's keyword
+  });
+
+  it('a conjunct tail with no gate of its own inherits the head gate and phase (never always-on)', () => {
+    const r = mapRuleText('Each time a model in this unit makes a melee attack while on an objective marker you control, add 1 to the Hit roll and, if it is a CHAMPION, add 1 to the Wound roll as well.');
+    expect(r.effects.map((e) => [e.condition, e.phase])).toEqual([
+      ['objectiveControl', 'fight'],
+      ['objectiveControl', 'fight'],
+    ]);
+  });
+
+  it('two-tier target gates in one sentence still both gate (Savage Exaltation shape)', () => {
+    const r = mapRuleText(
+      'Each time this model makes a melee attack that targets an enemy unit that is below its Starting Strength, add 1 to the Hit roll and, if that attack targets an enemy unit that is Below Half-Strength, add 1 to the Wound roll as well.',
+    );
+    expect(r.effects.map((e) => [e.condition, e.phase])).toEqual([
+      ['targetCondition', 'fight'],
+      ['targetCondition', 'fight'],
+    ]);
+  });
+});
+
+describe('conjunct tails keep the head subject', () => {
+  it('BREAKING VARIANT: units named inside the tail condition never replace the acting unit scope', () => {
+    const r = mapRuleText(
+      'Each time a model in a HUNTER unit makes an attack that targets a QUARRY unit, add 1 to the Hit roll and, if the QUARRY unit was marked by a SPOTTER unit, that attack has the [IGNORES COVER] ability.',
+      { name: 'X' },
+    );
+    const grant = r.effects.find((e) => e.mods.grantKeywords);
+    expect(grant.scope).toEqual(['HUNTER']); // was [QUARRY, SPOTTER]: the objects of the tail's condition
+    expect(grant.condition).toBe('targetCondition');
+  });
+});
+
+describe('universal target phrasing is not a trigger', () => {
+  it('BREAKING VARIANT: "targets an enemy unit, re-roll a Hit roll of 1" applies; its objective tier is gated (Armoured Spearhead shape)', () => {
+    const caps = captureUnitAbilities([
+      {
+        name: 'Spearhead',
+        text: 'Each time this model makes an attack that targets an enemy unit, re-roll a Hit roll of 1 and, if that unit is within range of an objective marker, you can re-roll the Hit roll instead.',
+      },
+    ]);
+    const ones = caps.find((e) => e.mods.reroll?.hit === 'ones');
+    const all = caps.find((e) => e.mods.reroll?.hit === 'all');
+    expect([ones.condition, ones.captured]).toEqual([null, undefined]); // was gated on the objective toggle
+    expect(all.condition).toBe('objectiveControl'); // the "instead" tier was not captured at all
+  });
+});
+
+// Review pass 2 (2026-10-03): each case is a finder's traced input against the pass-1 machinery.
+describe('strength-state gates — review pass 2 breaking variants', () => {
+  const cap = (text) => captureUnitAbilities([{ name: 'X', text }]);
+  const conds = (text) => mapRuleText(text, { name: 'X' }).effects.map((e) => e.condition);
+
+  it('BREAKING VARIANT: only the bare "targets an enemy unit, <modifier>" is exempt from review', () => {
+    // A qualifier after the comma, or "the closest", is a restriction the mapper cannot gate: held.
+    expect(cap('Each time a model in this unit makes an attack that targets an enemy unit, excluding CHARACTER units, add 1 to the Wound roll.')[0].captured).toBe(true);
+    expect(cap('Each time a model in this unit makes a ranged attack that targets the closest enemy unit, re-roll a Hit roll of 1.')[0].captured).toBe(true);
+    expect(cap('Each time a model in this unit makes an attack that targets an enemy unit, on a 4+, add 1 to the Wound roll.')[0].captured).toBe(true);
+    expect(cap('Each time this model makes an attack that targets an enemy unit, re-roll a Hit roll of 1.')[0].captured).toBeUndefined();
+  });
+
+  it('BREAKING VARIANT: a tail with its own gate keeps the HEAD gate (the outer activation)', () => {
+    expect(
+      conds('While the Waaagh! is active for your army, each time a model in this unit makes an attack, add 1 to the Hit roll, and if the target is below Half-strength, add 1 to the Wound roll.'),
+    ).toEqual(['armyAbilityActive', 'armyAbilityActive']);
+    expect(
+      conds('Each time a model in this unit makes an attack after making a Charge move, add 1 to the Hit roll, and if the target is below Half-strength, add 1 to the Wound roll.'),
+    ).toEqual(['onCharge', 'onCharge']);
+  });
+
+  it('BREAKING VARIANT: a defensive head keeps its tail defensive (never an attacker self-penalty)', () => {
+    const r = mapRuleText('Each time a ranged attack targets this unit, subtract 1 from the Hit roll, and if this unit is below Half-strength, subtract 1 from the Hit roll again.');
+    expect(r.effects.every((e) => e.side === 'defender' && e.mods.hitPenalty === 1)).toBe(true);
+    const s = mapRuleText('Each time an attack targets this unit, subtract 1 from the Hit roll. If this unit is Below Half-strength, subtract 1 from the Hit roll as well.');
+    expect(s.effects.map((e) => [e.side, e.condition])).toEqual([
+      ['defender', null],
+      ['defender', 'belowStrength'],
+    ]);
+  });
+
+  it('BREAKING VARIANT: a conjunct head with an unresolved gate word stays held for review', () => {
+    for (const head of ['in the turn it arrives from Reserves', 'during the first battle round', 'provided this unit Advanced']) {
+      const caps = cap(`Each time a model in this unit makes an attack ${head}, add 1 to the Hit roll, and if the target is below Half-strength, add 1 to the Wound roll.`);
+      expect(caps.find((e) => e.mods.hitModifier).captured).toBe(true);
+    }
+  });
+
+  it('BREAKING VARIANT: a tier with a gate the sim cannot resolve, after an ungated head, is dropped (not stacked always-on)', () => {
+    // "+1 Attacks; +2 instead if wounded" stacked to an always-on +3.
+    const r = mapRuleText("Add 1 to the Attacks characteristic of the bearer's melee weapons. If the bearer has lost one or more wounds, add 2 to the Attacks characteristic of the bearer's melee weapons instead.");
+    expect(r.effects.map((e) => e.mods.attackBonus)).toEqual([1]);
+    const rr = mapRuleText("Each time a model in the bearer's unit makes an attack, re-roll a Hit roll of 1. If the bearer's unit was set up on the battlefield this turn, you can re-roll the Hit roll instead.");
+    expect(rr.effects.map((e) => e.mods.reroll?.hit)).toEqual(['ones']);
+    // An ability-level gate still covers such a tier, so it is kept under that gate.
+    const once = mapRuleText('Once per battle, at the start of the Fight phase, this unit can use this ability. If it does, add 1 to the Hit roll. If this unit completed a Deed, add 1 to the Wound roll as well.');
+    expect(once.effects.map((e) => e.condition)).toEqual(['oncePerBattle', 'oncePerBattle']);
+  });
+
+  it('BREAKING VARIANT: "If that attack targeted an enemy PSYKER unit" is a target gate, not a PSYKER attacker scope', () => {
+    const r = mapRuleText('While the bearer is leading a unit, each time a model in that unit makes an attack, add 1 to the Hit roll. If that attack targeted an enemy PSYKER unit, add 1 to the Wound roll as well.');
+    const wound = r.effects.find((e) => e.mods.woundModifier);
+    expect(wound.condition).toBe('targetCondition');
+    expect(wound.scope).toBeUndefined();
+  });
+
+  it('"that unit" points back at the unit named just before it', () => {
+    expect(conds('Each time a model in this unit makes an attack that targets an enemy unit, if that unit is below its Starting Strength, add 1 to the Hit roll.')).toEqual(['targetCondition']);
+    expect(
+      conds('Each time a model in this unit makes an attack that targets a MONSTER or VEHICLE unit, add 1 to the Wound roll, and if that unit is below Half-strength, add 1 to the Hit roll.'),
+    ).toEqual(['targetCondition', 'targetCondition']);
+    // …and the acting unit in a leader rule.
+    expect(conds('While the bearer is leading a unit, each time a model in that unit makes an attack, add 1 to the Hit roll if that unit is below its Starting Strength.')).toEqual(['belowStrength']);
+    // A NEW sentence is not a tier: its "that unit" is not resolved through the previous target gate.
+    expect(
+      conds(
+        'Each time a model in this unit makes a melee attack that targets a unit that is below its Starting Strength, add 1 to the Hit roll. Each time a model in that unit makes an attack, if that unit is below Half-strength, add 1 to the Wound roll.',
+      ),
+    ).toEqual(['targetCondition', 'belowStrength']);
+  });
+
+  it('a bare "is also" is not a tier; a parenthesised conjunct splits', () => {
+    const r = mapRuleText('Each time a model in this unit makes a melee attack, add 1 to the Wound roll. If this model is also leading a unit, you can re-roll the Hit roll.');
+    expect(r.effects.find((e) => e.mods.reroll?.hit).phase).toBe('any');
+    const p = mapRuleText('Each time a model in this unit makes an attack, add 1 to the Hit roll (and, if the target is below Half-strength, add 1 to the Wound roll).');
+    expect(p.effects.map((e) => e.condition)).toEqual([null, 'targetCondition']);
+  });
+});
+
+describe('two-gate tiers keep the old single-slot choice (review pass 2 verification)', () => {
+  it('a separate-sentence tier keeps its OWN gate; an "instead" bonus never rides the head toggle', () => {
+    // Maddened Ferocity shape: +1 Attacks on the charge; +2 instead if Battle-shocked. Riding the
+    // charge toggle would stack +3 Attacks on every charge.
+    const r = mapRuleText(
+      'Each time a unit from your army is selected to fight, if that unit made a Charge move this turn, until the end of the phase, add 1 to the Attacks characteristic of melee weapons equipped by models in that unit. If your unit is Battle-shocked, add 2 to the Attacks characteristic of melee weapons equipped by models in that unit instead.',
+    );
+    expect(r.effects.map((e) => e.mods.attackBonus)).toEqual([1, 2]);
+    expect(r.effects[0].condition).toBe('onCharge');
+    // Gated, and NOT on the charge toggle. (Its own-unit Battle-shock gate currently reads as the
+    // generic target toggle, a known pre-existing label limit; the property pinned here is the gate.)
+    expect(r.effects[1].condition).toBeTruthy();
+    expect(r.effects[1].condition).not.toBe('onCharge');
+  });
+});
+
+// Review pass 3 (2026-10-03, the regression gate): traced inputs against the pass-2 fixes.
+describe('strength-state gates — review pass 3 breaking variants', () => {
+  const cap = (text) => captureUnitAbilities([{ name: 'X', text }]);
+
+  it('BREAKING VARIANT: the "targets an enemy unit, <modifier>" exemption never un-holds another gate word', () => {
+    for (const text of [
+      'Until the end of the phase, each time a model in this unit makes an attack that targets an enemy unit, add 1 to the Hit roll.',
+      'In the first battle round, each time this model makes an attack that targets an enemy unit, re-roll a Hit roll of 1.',
+      'Unless this unit is Engaged, each time this model makes an attack that targets an enemy unit, add 1 to the Hit roll.',
+      "In your opponent's turn, each time a model in this unit makes an attack that targets an enemy unit, re-roll a Hit roll of 1.",
+    ]) {
+      expect(cap(text)[0].captured).toBe(true);
+    }
+  });
+
+  it('a conjunct head gated by "as long as" / "whenever" stays held', () => {
+    for (const gate of ['as long as this unit is Engaged', 'whenever this unit is in cover']) {
+      const caps = cap(`Each time a model in this unit makes an attack, add 1 to the Hit roll ${gate}, and if the target is a VEHICLE, add 1 to the Wound roll as well.`);
+      expect(caps.find((e) => e.mods.hitModifier).captured).toBe(true);
+    }
+  });
+
+  it('BREAKING VARIANT: an unresolvable tier is HELD on a datasheet (reviewable) but dropped from a pack rule', () => {
+    const text = 'Each time this model makes an attack, add 1 to the Hit roll. If that attack is a melee attack, add 1 to the Wound roll as well.';
+    const wound = cap(text).find((e) => e.mods.woundModifier);
+    expect([wound.captured, wound.phase]).toEqual([true, 'fight']);
+    expect(mapRuleText(text, { name: 'X' }).effects.map((e) => Object.keys(e.mods)[0])).toEqual(['hitModifier']);
+  });
+
+  it('"below half this unit\'s Starting Strength" is a self gate', () => {
+    expect(mapRuleText("Each time a model in this unit makes an attack, add 1 to the Hit roll while this unit is below half this unit's Starting Strength.").effects[0].condition).toBe('belowStrength');
   });
 });
