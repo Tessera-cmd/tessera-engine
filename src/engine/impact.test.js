@@ -16,6 +16,10 @@ const COSTED_DETACHMENT = {
   stratagems: [
     { id: 'test-strat-cp', name: 'Paid For', phase: 'shooting', effects: [], cp: 2 },
     { id: 'test-strat-free', name: 'No Cost Given', phase: 'shooting', effects: [] },
+    // Every effect waits on a toggle (2026-10-03): leaving it out changes nothing while the toggle is off.
+    { id: 'test-strat-gated', name: 'Gated', phase: 'shooting', cp: 1, effects: [{ name: 'Gated', side: 'attacker', phase: 'any', condition: 'ruleTrigger', mods: { hitModifier: 1 } }] },
+    { id: 'test-strat-mixed', name: 'Mixed', phase: 'shooting', effects: [{ name: 'Mixed', side: 'attacker', phase: 'any', condition: 'ruleTrigger', mods: { hitModifier: 1 } }, { name: 'Mixed', side: 'attacker', phase: 'any', condition: null, mods: { apBonus: 1 } }] },
+    { id: 'test-strat-def', name: 'Defensive', phase: 'shooting', effects: [{ name: 'Defensive', side: 'defender', phase: 'any', condition: 'ruleTrigger', mods: { fnp: 5 } }] },
   ],
   enhancements: [],
 };
@@ -172,5 +176,38 @@ describe('stratagem variant carries its CP cost', () => {
     // the example library stratagem (no cost) keeps the pre-CP variant shape exactly
     const ex = planFor(1).variants.find((v) => v.key === 'attacker:strat:ex-strat-fury');
     expect(Object.keys(ex).sort()).toEqual(['defender', 'key', 'kind', 'label', 'options', 'side']);
+  });
+});
+
+describe('a ticked rule waiting on an OFF toggle names it (2026-10-03)', () => {
+  const plan = (conditions) =>
+    buildImpactPlan({
+      attackerAbilities: [],
+      defenderAbilities: [],
+      atkRules: { armyRuleId: '', detachmentId: 'test-det-cp', stratagems: ['test-strat-gated', 'test-strat-cp'], enhancements: [] },
+      defRules: emptyRules,
+      conditions,
+      baseOptions: { phase: 'all' },
+      baseDefender: defender(1),
+      phase: 'shooting',
+    });
+  it('BREAKING VARIANT: a stratagem whose only effect is gated on an off toggle is tagged with that toggle, not left to read as worthless', () => {
+    const v = plan([]).variants.find((x) => x.key === 'attacker:strat:test-strat-gated');
+    expect(v.waitingOn).toEqual(['Rule trigger met (unconfirmed)']);
+    expect(v.cp).toBe(1);
+  });
+  it('is untagged once the toggle is on, and a stratagem with no gated effects is never tagged', () => {
+    const p = plan(['ruleTrigger']);
+    expect('waitingOn' in p.variants.find((x) => x.key === 'attacker:strat:test-strat-gated')).toBe(false);
+    expect('waitingOn' in plan([]).variants.find((x) => x.key === 'attacker:strat:test-strat-cp')).toBe(false);
+  });
+  it('a rule that still changes something (one ungated effect) is not tagged; a defender tick reads its defensive half only', () => {
+    const mixed = buildImpactPlan({ attackerAbilities: [], defenderAbilities: [], atkRules: { armyRuleId: '', detachmentId: 'test-det-cp', stratagems: ['test-strat-mixed'], enhancements: [] }, defRules: emptyRules, conditions: [], baseOptions: { phase: 'all' }, baseDefender: defender(1), phase: 'shooting' });
+    expect('waitingOn' in mixed.variants.find((x) => x.key === 'attacker:strat:test-strat-mixed')).toBe(false);
+    const def = buildImpactPlan({ attackerAbilities: [], defenderAbilities: [], atkRules: emptyRules, defRules: { armyRuleId: '', detachmentId: 'test-det-cp', stratagems: ['test-strat-def'], enhancements: [] }, conditions: [], baseOptions: { phase: 'all' }, baseDefender: defender(1), phase: 'shooting' });
+    expect(def.variants.find((x) => x.key === 'defender:strat:test-strat-def').waitingOn).toEqual(['Rule trigger met (unconfirmed)']);
+    // the same defensive stratagem ticked on the ATTACKER side contributes nothing there, so nothing to wait on
+    const atk = buildImpactPlan({ attackerAbilities: [], defenderAbilities: [], atkRules: { armyRuleId: '', detachmentId: 'test-det-cp', stratagems: ['test-strat-def'], enhancements: [] }, defRules: emptyRules, conditions: [], baseOptions: { phase: 'all' }, baseDefender: defender(1), phase: 'shooting' });
+    expect('waitingOn' in atk.variants.find((x) => x.key === 'attacker:strat:test-strat-def')).toBe(false);
   });
 });

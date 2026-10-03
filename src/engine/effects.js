@@ -71,6 +71,11 @@ export const CONDITIONS = [
   // toggle the player sets for the round it applies — and it defaults OFF, so a healthy model
   // never inherits its damaged penalty.
   { id: 'damaged', label: 'Damaged (wound bracket)' },
+  // An imported rule whose trigger the text mapper could not read ("if …", "select one …", "in your
+  // Shooting phase", a choice between listed options) on a path with no review step: pack rules,
+  // .rosz roster rules (2026-10-03, owner ruling). Defaults OFF so the effect is never applied to
+  // every attack; turning it on applies EVERY such effect, both halves of a choose-one included.
+  { id: 'ruleTrigger', label: 'Rule trigger met (unconfirmed)' },
 ];
 
 // ---- model-type scope (Session 17; keyword phrases 2026-07-14) --------------

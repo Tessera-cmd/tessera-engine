@@ -25,7 +25,17 @@ const MODELLABLE_CONDITIONS = new Set(['onCharge', 'halfRange', 'stationary', 't
 // Conditions gated on board/game state the sim does NOT model — a rule using one of these is
 // 'situational' (the effect is emitted but its toggle defaults OFF). These ids are also added
 // to engine/effects.js CONDITIONS so they appear as toggles in the sim.
-const SITUATIONAL_CONDITIONS = new Set(['objectiveControl', 'oncePerBattle', 'armyAbilityActive', 'targetCondition', 'belowStrength', 'damaged']);
+const SITUATIONAL_CONDITIONS = new Set(['objectiveControl', 'oncePerBattle', 'armyAbilityActive', 'targetCondition', 'belowStrength', 'damaged', 'ruleTrigger']);
+// The generic gate for an effect whose trigger the mapper could not read, on every path WITHOUT a
+// review surface (pack rules, .rosz roster rules, the typed-ability preview; see mapRuleText).
+const RULE_TRIGGER = 'ruleTrigger';
+const RULE_TRIGGER_NOTE = 'Part of this rule depends on a trigger the sim can\'t read, so that part is off by default. Turn on "Rule trigger met" for the round it applies.';
+const NON_COMBAT_NOTE = 'Mapped the combat part; an action or movement part is ignored (the sim only resolves the attack).';
+// A CHOICE between listed options ("select one of the following", "select two of the … abilities
+// listed below", "select up to three of the following", "select which augmentations are active",
+// "select either the [LETHAL HITS] or [SUSTAINED HITS 1] ability", and the bulleted alternative
+// "▪ [CLEAVE 1]. ▪ Or: +1 AP."). The mapper emits EVERY option, so none of them can apply unattended.
+const CHOICE_RE = /\b(?:select|choose|pick)\s+(?:(?:up\s+to\s+)?(?:one|two|three|four|five|\d+)\s+of\s+the\b[^.]*?\b(?:following|below)\b|which\b[^.]*?\bare\s+active\b|either\s+the\b[^.]*?\bor\b)|(?:^|[▪■▫•>-]|\.)\s*or\s*:/i;
 
 // Clauses that gate a buff on state the sim genuinely CANNOT represent, so a modifier inside one is
 // DROPPED (never captured as always-on) — under-applying is safe, silently over-applying is not
@@ -460,6 +470,11 @@ function detectScope(t) {
     let rm;
     while ((rm = runRe.exec(exclSpan[1]))) excl.push(...splitRunPhrases(rm[1]));
     excl = [...new Set(excl)].filter((p) => !/^(?:UNITS?|MODELS?)$/.test(p));
+    // A carve-out on the ENEMY ("…targets an enemy unit (excluding units that can FLY)", "each time an
+    // enemy unit (excluding TITANIC units) …") describes the target or the attacker, never this side's
+    // own unit, and scopeExcl can only be checked against this side's unit: carried, it switched an
+    // aircraft's own anti-ground buff off (2026-10-03). The clause's condition covers it instead.
+    if (/\benemy\s+(?:units?|models?)\s*\(\s*$/i.test(t.slice(0, exclSpan.index))) excl = [];
     const drop = (p) => new RegExp(`\\b${p.replace(/[-/+*?^$()[\]{}|\\]/g, '\\$&')}\\b`, 'i').test(exclSpan[1]);
     return { attacker: attacker.filter((p) => !drop(p)), defender: defender.filter((p) => !drop(p)), excl };
   }
@@ -626,7 +641,20 @@ const MOD_PATTERNS = [
       const n = numFrom(m[1]);
       // sideCtx: a tier / conjunct tail is read with its head ("Each time an attack targets this unit,
       // subtract 1 from the Hit roll, and if this unit is below Half-strength, subtract 1 … again").
-      const against = /\b(?:attack|attacks)\b[^.]*?\btargets?\s+this\s+unit\b|\bmade\s+against\s+this\s+unit\b|\bagainst\s+this\s+unit\b|\btargeting\s+this\s+unit\b/i.test(sideCtx);
+      // The target can also be named "this model", "your unit", "that unit" (a led unit), "the bearer
+      // ('s unit)" or "a … unit from your army" (Nightmare Hunt), and the attacker can be named as the
+      // enemy ("each time a model in that enemy unit / in that unit makes an attack", a suppressed or
+      // tested enemy): all are the enemy's attacks, so the penalty is this side's DEFENCE. Read as an
+      // attacker -1 they penalised the bearer's own attacks (every one of the 24 live pack-rule
+      // instances, 2026-10-03). "an attack targets" must be adjacent, so "a model in your unit makes an
+      // attack that targets that unit" stays an attacker modifier.
+      const against =
+        /\b(?:attack|attacks)\b[^.]*?\btargets?\s+this\s+unit\b|\bmade\s+against\s+this\s+unit\b|\bagainst\s+this\s+unit\b|\btargeting\s+this\s+unit\b/i.test(sideCtx) ||
+        /\battacks?\s+targets?\s+(?:this\s+model|that\s+(?:unit|model)|your\s+unit|the\s+bearer\b|(?:a|an|one)\s+(?![^.,]*\benemy\b)[^.,]*?\bunits?\s+from\s+your\s+army\b)|\bmodel\s+in\s+(?:that|an?|the)\s+enemy\s+unit\b|\bmodel\s+in\s+that\s+unit\s+makes\b/i.test(sideCtx);
+      // A penalty only against PSYCHIC attacks can't be expressed (the engine has no psychic-attack
+      // flag), so it is not emitted, like the invulnerable save's same qualifier: as a plain "-1 to be
+      // Hit" it would apply against every attack.
+      if (against && /\bpsychic\s+attacks?\s+targets?\b|\bmakes?\s+an?\s+psychic\s+attack\b/i.test(sideCtx)) return null;
       return against
         ? { side: 'defender', mod: { hitPenalty: n }, summary: `−${n} to be Hit` }
         : { side: 'attacker', mod: { hitModifier: -n }, summary: `−${n} to Hit` };
@@ -865,7 +893,10 @@ function mapClause(
     if (sideScope.length) eff.scope = sideScope;
     if (scope.excl?.length) eff.scopeExcl = scope.excl;
     if (source) eff.source = source;
-    if (suspect) eff._suspect = true;
+    // An exclusion on the ATTACKING enemy ("each time an enemy unit (excluding TITANIC units) …") can't
+    // gate a defence (detectScope doesn't carry it: scopeExcl only sees this side's unit), so without it
+    // the defence would apply against every attacker: hold / gate it instead.
+    if (suspect || (side === 'defender' && /\benemy\s+(?:units?|models?)\s*\(\s*(?:excluding|except)\b/i.test(clause))) eff._suspect = true;
     effects.push(eff);
     matched.push({ phrase: summary, side, summary });
   };
@@ -1039,11 +1070,28 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   // Command phase … select one friendly VEHICLE within 3" … That model … adds 1 to the Hit roll" —
   // the +Hit clause has no trigger of its own). A per-clause check can't see it, so flag a
   // conditionless effect for review when the whole ability is an activation/aura/heal/phase ability.
+  // A TARGET-RANGE gate ("…attacks that target a unit within 6\"") is not an aura: mapClause already
+  // exempts it and gates that clause on the target condition, so it must not flag the rule's other,
+  // genuinely always-on clauses either (Bringers of Flame's [ASSAULT] grant).
+  const auraText = mapText.replace(/\btargets?\s+(?:a|an|one)\s+unit\s+within\s+\d+\s*"/gi, 'targets a unit');
   const abilitySuspect =
     /\bselect\s+(?:one|a|an)\b|\bwithin\s+\d+\s*"|\bregains?\b|\blost wounds?\b|\broll\s+(?:one|a)\s+d(?:ice|6)\b|\bafter\s+(?:it|this\s+(?:unit|model))\s+(?:has|shoots|shot)\b|\bin\s+your\s+(?:command|movement|shooting|charge|fight)\s+phase\b/i.test(
-      mapText,
-    );
+      auraText,
+    ) || CHOICE_RE.test(mapText);
   if (abilitySuspect) for (const e of effects) if (!e.condition) e._suspect = true;
+
+  // Without a review surface (every caller but captureUnitAbilities: pack rules, .rosz roster rules,
+  // the typed-ability preview) an effect is stored and applied as it stands, so a held one used to
+  // apply on EVERY attack: the silent over-apply. It is gated on the generic `ruleTrigger` toggle
+  // instead (owner ruling 2026-10-03, stratagems included): off by default, the player turns it on
+  // for the round the rule's trigger is met. `_suspect` is a capture-time signal and stops here.
+  if (!holdUnresolved) {
+    for (const e of effects) {
+      if (!e._suspect) continue;
+      delete e._suspect;
+      if (!e.condition) e.condition = RULE_TRIGGER;
+    }
+  }
 
   const conditions = [...new Set(effects.map((e) => e.condition).filter(Boolean))];
   const hasSituational = effects.some((e) => e.condition && SITUATIONAL_CONDITIONS.has(e.condition));
@@ -1070,9 +1118,17 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
     if (conditions.includes('oncePerBattle')) notes.push('A once-per-battle effect — off by default so it isn\'t counted every round; turn it on for the round it applies.');
   } else if (hasNonCombat || hasNotSim) {
     classification = 'partial';
-    notes.push('Mapped the combat part; an action or movement part is ignored (the sim only resolves the attack).');
+    notes.push(NON_COMBAT_NOTE);
   } else {
     classification = 'mapped';
+  }
+  if (conditions.includes(RULE_TRIGGER)) {
+    notes.push(RULE_TRIGGER_NOTE);
+    // A choice gates EVERY option on the one toggle (owner ruling): say so where the player reads it.
+    if (CHOICE_RE.test(mapText)) notes.push('This rule is a choice between options, and the toggle turns all of them on at once.');
+    // The gate makes the rule 'situational', which outranks 'partial': keep the note that its action or
+    // movement part is ignored, which it would otherwise lose.
+    if (classification === 'situational' && (hasNonCombat || hasNotSim)) notes.push(NON_COMBAT_NOTE);
   }
 
   return { effects, classification, matched, unmapped: [], notes, conditions };
@@ -1121,7 +1177,7 @@ export function captureUnitAbilities(items = []) {
     if (onlyStatline) continue; // the INV/FNP (+ any save-reroll rider) is already on the statline
     // A "select/choose one of the following" ability is a per-phase CHOICE; the mapper grants EVERY
     // option, so none can be auto-applied (the player picks one) — route them all to review.
-    const isChoice = /\b(?:select|choose|pick)\s+one\s+of\s+the\s+following\b/i.test(text);
+    const isChoice = CHOICE_RE.test(text);
     for (const e of r.effects) {
       // CONFIDENCE SPLIT (the capture-safety design, grounded across 5 live catalogues). An effect is
       // SAFE TO AUTO-APPLY (no `captured` flag) when EITHER:
@@ -1451,7 +1507,10 @@ function applyStructuredMods(plan, rawMods) {
   const covered = structuredCoveredKeys(rawMods);
   const prose = (plan.effects || [])
     .map((e) => {
-      if (e.condition || !covered.size) return e; // keep conditioned prose; nothing to strip if no weapon overlap
+      // Keep conditioned prose; nothing to strip if no weapon overlap. A `ruleTrigger` gate is not a
+      // real condition (the prose's trigger was unreadable), so that prose is de-duplicated against the
+      // structured buff exactly as before; kept, it would double the buff when the toggle is on.
+      if ((e.condition && e.condition !== RULE_TRIGGER) || !covered.size) return e;
       const mods = { ...(e.mods || {}) };
       let changed = false;
       for (const [k, phases] of covered) {
@@ -1464,10 +1523,19 @@ function applyStructuredMods(plan, rawMods) {
       }
       return changed ? { ...e, mods } : e;
     })
-    .filter((e) => e.condition || Object.keys(e.mods || {}).length); // drop a now-empty unconditioned effect
+    .filter((e) => Object.keys(e.mods || {}).length || (e.condition && e.condition !== RULE_TRIGGER)); // drop a now-empty unconditioned effect
   const effects = [...prose, ...structured];
-  const classification = plan.classification === 'not-simulatable' ? 'mapped' : plan.classification;
-  return { ...plan, effects, classification };
+  let classification = plan.classification === 'not-simulatable' ? 'mapped' : plan.classification;
+  let notes = plan.notes;
+  // De-duplication can remove the only rule-trigger-gated prose effect: then its toggle note no longer
+  // applies, and a rule that was 'situational' only because of it is plain 'mapped' again.
+  if ((plan.notes || []).includes(RULE_TRIGGER_NOTE) && !effects.some((e) => e.condition === RULE_TRIGGER)) {
+    notes = plan.notes.filter((n) => n !== RULE_TRIGGER_NOTE);
+    if (classification === 'situational' && !effects.some((e) => e.condition && SITUATIONAL_CONDITIONS.has(e.condition))) {
+      classification = notes.includes(NON_COMBAT_NOTE) ? 'partial' : 'mapped';
+    }
+  }
+  return { ...plan, effects, classification, notes };
 }
 
 // ---- plan a faction PACK's extracted rules (MFM loader P3) ------------------

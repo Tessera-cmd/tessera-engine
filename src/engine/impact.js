@@ -104,12 +104,29 @@ export function buildImpactPlan(ctx) {
   const push = (key, label, kind, side, plan) =>
     variants.push({ key, label, kind, side, options: plan.options, defender: plan.defender });
 
+  // The OFF toggles a ticked rule is waiting on (2026-10-03): when every effect of it that could apply
+  // here (this side's half, this phase, in scope) is gated on a condition that is not active, leaving it
+  // out changes nothing, and the hint must name the toggle rather than call the rule worthless ("likely
+  // not worth the 2 CP" for a stratagem that is only waiting on "Rule trigger met"). Absent otherwise.
+  const tagWaiting = (side, effects) => {
+    const keywords = side === 'defender' ? ctx.defenderKeywords : ctx.attackerKeywords;
+    const faction = side === 'defender' ? ctx.defenderFaction : ctx.attackerFaction;
+    const live = filterEffectsForUnit(
+      (effects || []).filter((e) => e && e.mods && ((e.side || 'attacker') === 'defender') === (side === 'defender') && ((e.phase || 'any') === 'any' || e.phase === ctx.phase)),
+      keywords,
+      faction,
+    );
+    const off = live.map((e) => (e.condition && e.condition !== 'always' && !conditions.includes(e.condition) ? e.condition : null));
+    if (live.length && off.every(Boolean)) variants[variants.length - 1].waitingOn = [...new Set(off)].map((c) => CONDITION_LABEL[c] || c);
+  };
+
   // For each side, drop each active army rule / stratagem / enhancement in turn.
   const forSide = (side, sel, withSel) => {
     if (sel.armyRuleId) {
       const ar = ARMY_RULES_BY_ID[sel.armyRuleId];
       const { a, d } = withSel({ ...sel, armyRuleId: '' });
       push(`${side}:army:${sel.armyRuleId}`, ar?.name || 'Army rule', 'armyRule', side, resolveSelection(ctx, a, d, conditions));
+      tagWaiting(side, ar?.effects);
     }
     const det = detachmentForSelection(sel);
     for (const sId of sel.stratagems || []) {
@@ -119,11 +136,13 @@ export function buildImpactPlan(ctx) {
       // The stratagem's Command-point cost, when the library carries one (display-only: the hint names
       // it). Additive: absent keeps the variant's shape unchanged.
       if (Number.isInteger(strat?.cp) && strat.cp >= 0) variants[variants.length - 1].cp = strat.cp;
+      tagWaiting(side, strat?.effects);
     }
     for (const eId of sel.enhancements || []) {
       const enh = det?.enhancements?.find((e) => e.id === eId);
       const { a, d } = withSel({ ...sel, enhancements: sel.enhancements.filter((x) => x !== eId) });
       push(`${side}:enh:${eId}`, enh?.name || 'Enhancement', 'enhancement', side, resolveSelection(ctx, a, d, conditions));
+      tagWaiting(side, enh?.effects);
     }
   };
   forSide('attacker', atkRules, (ns) => ({ a: ns, d: defRules }));

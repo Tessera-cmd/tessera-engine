@@ -416,11 +416,13 @@ describe('mapRuleText — keyword-phrase scope + the 2026-07-14 pattern batch (l
       'Each time an enemy unit declares a charge that targets one or more Genestealer Cults units from your army, that enemy unit must take a Leadership test. If failed, until the end of the turn, each time a model in that enemy unit makes an attack, subtract 1 from the Hit roll.',
       { name: 'Blessed Visages' },
     );
-    const pen = r.effects.find((e) => e.mods.hitModifier === -1);
-    expect(pen).toBeTruthy();
-    // The -1 is (pre-existing mis-side aside) an ATTACKER-side effect — it must NOT carry the
-    // player's own GENESTEALER CULTS as scope: that would penalise the player's own units.
-    expect(pen.scope).toBeUndefined();
+    // The -1 is the ENEMY's penalty ("a model in that enemy unit makes an attack"), so it is this side's
+    // defence (2026-10-03: it used to be mis-sided onto the player's own attacks). It must never become
+    // an attacker modifier scoped to the player's own GENESTEALER CULTS: that penalised their own units.
+    expect(r.effects.find((e) => e.mods.hitModifier === -1)).toBeUndefined();
+    const pen = r.effects.find((e) => e.mods.hitPenalty === 1);
+    expect(pen.side).toBe('defender');
+    expect(pen.condition).toBe('ruleTrigger'); // "If failed" (the Leadership test) is unreadable: off by default
   });
 
   it('an ally-proximity condition ("within Engagement Range of one or more other X units") never joins the subject scope (Saga of the Hunter, round-2 review)', () => {
@@ -1543,7 +1545,9 @@ describe('strength-state gates — review pass 1 breaking variants', () => {
     const text =
       'Alpha Rite: Each time a model in this unit makes a melee attack that targets a unit that is below its Starting Strength, add 1 to the Hit roll.\nBeta Rite: If this unit is led by a CHAMPION, add 1 to the Wound roll as well.';
     const beta = mapRuleText(text, { name: 'X' }).effects.find((e) => e.name === 'Beta Rite');
-    expect([beta.condition, beta.phase]).toEqual([null, 'any']);
+    // Never Alpha's target gate or melee phase. Its own "If … led by" trigger is unreadable, so on this
+    // no-review path it takes the generic rule-trigger gate (2026-10-03; it used to apply always-on).
+    expect([beta.condition, beta.phase]).toEqual(['ruleTrigger', 'any']);
   });
 
   it('BREAKING VARIANT: a captured datasheet ability keeps the ABILITY name even with sub-rule headings inside', () => {
@@ -1745,5 +1749,231 @@ describe('strength-state gates — review pass 3 breaking variants', () => {
 
   it('"below half this unit\'s Starting Strength" is a self gate', () => {
     expect(mapRuleText("Each time a model in this unit makes an attack, add 1 to the Hit roll while this unit is below half this unit's Starting Strength.").effects[0].condition).toBe('belowStrength');
+  });
+});
+
+describe('unread rule triggers on the no-review paths (the ruleTrigger gate, 2026-10-03)', () => {
+  // Owner ruling: an effect whose trigger the mapper can't read ("if …", "select one …", a choice between
+  // listed options) used to be flagged `_suspect` and then applied on EVERY attack by every path but the
+  // datasheet capture. On those paths it is now gated on the generic `ruleTrigger` toggle, off by default.
+  const det = (rule, extra = {}) => ({ faction: 'F', armyRule: null, detachments: [{ name: 'D', rule, stratagems: [], enhancements: [], ...extra }] });
+  const cap = (text) => captureUnitAbilities([{ name: 'X', text }]);
+
+  it('ruleTrigger is a sim toggle, off by default', () => {
+    expect(CONDITIONS.map((c) => c.id)).toContain('ruleTrigger');
+    const e = { side: 'attacker', phase: 'any', condition: 'ruleTrigger', mods: { damageBonus: 1 } };
+    expect(resolveEffects([e], { phase: 'fight' }).attacker.damageBonus).toBe(0);
+    expect(resolveEffects([e], { phase: 'fight', activeConditions: ['ruleTrigger'] }).attacker.damageBonus).toBe(1);
+  });
+
+  it('BREAKING VARIANT: a detachment rule with an unreadable "if" trigger is gated, not always-on', () => {
+    const plan = planPackRules(det({
+      name: 'Oathsworn',
+      text: 'Each time a model from your army makes a melee attack, if its unit has sworn an Oath this battle, add 1 to the Damage characteristic of that attack.',
+    }));
+    const rule = plan.detachments[0].rule;
+    expect(rule.effects.map((e) => [e.condition, e.mods.damageBonus])).toEqual([['ruleTrigger', 1]]);
+    expect(rule.effects.some((e) => '_suspect' in e)).toBe(false); // the capture-time flag never leaves the mapper here
+    expect(rule.classification).toBe('situational');
+    expect(rule.notes.join(' ')).toMatch(/Rule trigger met/);
+  });
+
+  it('BREAKING VARIANT: both halves of a choose-one enhancement are gated (neither applies unattended)', () => {
+    const plan = planPackRules(det(null, {
+      enhancements: [{ name: 'Warded Hide', text: 'When this model is set up, select one of the following: the bearer has a 5+ invulnerable save; or the bearer has the Feel No Pain 6+ ability.' }],
+    }));
+    const effs = plan.detachments[0].enhancements[0].effects;
+    expect(effs.length).toBeGreaterThan(0);
+    expect(effs.every((e) => e.condition === 'ruleTrigger')).toBe(true);
+  });
+
+  it('BREAKING VARIANT: a stratagem\'s inner condition takes the same gate (owner ruling: stratagems included)', () => {
+    const plan = planPackRules(det(null, {
+      stratagems: [{ name: 'Disembark Fury', cp: 1, text: 'WHEN: Your Shooting phase. TARGET: One unit from your army. EFFECT: Until the end of the phase, each time a model in your unit makes an attack, if your unit disembarked from a Transport this turn, you can re-roll the Wound roll.' }],
+    }));
+    const s = plan.detachments[0].stratagems[0];
+    expect(s.effects.map((e) => [e.condition, e.mods.reroll?.wound])).toEqual([['ruleTrigger', 'all']]);
+    expect(s.cp).toBe(1);
+  });
+
+  it('BREAKING VARIANT: the .rosz roster plan gates the same way', () => {
+    const plan = planRosterRules({ armyRule: { name: 'Oathsworn', text: 'Each time a model from your army makes a melee attack, if its unit has sworn an Oath this battle, add 1 to the Damage characteristic of that attack.' } });
+    expect(plan.armyRule.effects.map((e) => e.condition)).toEqual(['ruleTrigger']);
+  });
+
+  it('a readable trigger keeps its own condition (the gate only fills an EMPTY slot)', () => {
+    const r = mapRuleText('Each time a model in this unit makes an attack, if this unit made a Charge move this turn, add 1 to the Wound roll.');
+    expect(r.effects.map((e) => e.condition)).toEqual(['onCharge']);
+  });
+
+  it('the datasheet capture still HOLDS for review instead of gating', () => {
+    const [e] = cap('Each time a model in this unit makes a melee attack, if its unit has sworn an Oath this battle, add 1 to the Damage characteristic of that attack.');
+    expect([e.captured, e.condition]).toEqual([true, null]);
+  });
+
+  it('BREAKING VARIANT: a gated prose duplicate of a structured buff is still de-duplicated (no double when the toggle is on)', () => {
+    const plan = planPackRules(det(null, {
+      enhancements: [{
+        name: 'Blade of Wrath',
+        text: 'Add 1 to the Strength characteristic of melee weapons equipped by the bearer. In your Command phase, the bearer regains 1 lost wound.',
+        wargearMods: [{ target: 'melee', op: 'add', stat: 'S', delta: 1 }],
+      }],
+    }));
+    const str = plan.detachments[0].enhancements[0].effects.filter((e) => e.mods.strengthBonus);
+    expect(str).toHaveLength(1);
+    expect(str[0].condition).toBeNull(); // the structured buff, always-on
+  });
+
+  it('BREAKING VARIANT: the wider choice idiom (two / up to three / which) is caught on both paths', () => {
+    const texts = [
+      'At the start of the first battle round, select two of the Legacy abilities listed below. Swift Wrath: Each time a model in this unit makes an attack, re-roll a Hit roll of 1.',
+      'Once this unit is set up, select up to three of the following abilities. Keen Edge: Each time a model in this unit makes an attack, add 1 to the Wound roll.',
+      'At the start of the battle, select which augmentations are active for INFANTRY models from your army. Brute Graft: Add 1 to the Attacks characteristic of melee weapons equipped by those models.',
+    ];
+    for (const text of texts) {
+      const r = mapRuleText(text, { name: 'X' });
+      expect(r.effects.length).toBeGreaterThan(0);
+      expect(r.effects.every((e) => e.condition === 'ruleTrigger')).toBe(true);
+      expect(cap(text).every((e) => e.captured)).toBe(true);
+    }
+  });
+
+  it('a target-range gate elsewhere in the rule does not flag an always-on grant (datasheet capture applies it)', () => {
+    const caps = cap('Ranged weapons equipped by models in this unit have the [ASSAULT] ability, and each time an attack made with such a weapon targets a unit within 6", add 1 to the Strength characteristic of that attack.');
+    const grant = caps.find((e) => (e.mods.grantKeywords || []).includes('ASSAULT'));
+    expect([grant.captured, grant.condition]).toEqual([undefined, null]);
+    expect(caps.find((e) => e.mods.strengthBonus).condition).toBe('targetCondition');
+  });
+});
+
+describe('"subtract 1 from the Hit roll" side detection: the enemy\'s attacks are this side\'s defence (2026-10-03)', () => {
+  const pen = (text) => mapRuleText(text, { name: 'X' }).effects.filter((e) => e.mods.hitPenalty || e.mods.hitModifier);
+
+  it('BREAKING VARIANT: every friendly target referent reads as a defender penalty, never the bearer\'s own -1 to Hit', () => {
+    for (const text of [
+      'Each time an attack targets the bearer\'s unit, subtract 1 from the Hit roll.',
+      'Each time a melee attack targets the bearer, subtract 1 from the Hit roll.',
+      'Each time an attack targets this model, subtract 1 from the Hit roll.',
+      'While the bearer is leading a unit, each time an attack targets that unit, subtract 1 from the Hit roll.',
+      'Until the end of the phase, each time an attack targets your unit, subtract 1 from the Hit roll.',
+      'Each time an attack targets a WARBAND unit from your army, if the attacking model is Battle-shocked, subtract 1 from the Hit roll.',
+      'Until the end of the turn, each time a model in that enemy unit makes an attack, subtract 1 from the Hit roll.',
+      'While a unit is suppressed, each time a model in that unit makes an attack, subtract 1 from the Hit roll.',
+    ]) {
+      const [e, ...rest] = pen(text);
+      expect(rest, text).toEqual([]);
+      expect([e.side, e.mods.hitPenalty, e.mods.hitModifier], text).toEqual(['defender', 1, undefined]);
+    }
+  });
+
+  it('the melee qualifier still pins the phase', () => {
+    expect(pen('Each time a melee attack targets the bearer, subtract 1 from the Hit roll.')[0].phase).toBe('fight');
+  });
+
+  it('a self-penalty and an attack made BY this unit stay attacker modifiers', () => {
+    for (const text of [
+      'Each time a model in this unit makes an attack, subtract 1 from the Hit roll.',
+      'Each time a model in this unit makes an attack that targets that unit, subtract 1 from the Hit roll.',
+    ]) {
+      const [e] = pen(text);
+      expect([e.side, e.mods.hitModifier], text).toEqual(['attacker', -1]);
+    }
+  });
+
+  it('BREAKING VARIANT: "a unit from your army" next to an ENEMY target is not a friendly target', () => {
+    const [e] = pen('Each time an attack targets an enemy unit that is engaged with one or more units from your army, subtract 1 from the Hit roll.');
+    expect(e.side).toBe('attacker');
+  });
+
+  it('BREAKING VARIANT: a penalty only against Psychic attacks is not emitted (it would apply to every attack)', () => {
+    expect(pen('While this model is leading a unit, each time a Psychic Attack targets that unit, subtract 1 from the Hit roll.')).toEqual([]);
+  });
+});
+
+describe('unread rule triggers: review pass 1 breaking variants (2026-10-03)', () => {
+  const det = (rule, extra = {}) => ({ faction: 'F', armyRule: null, detachments: [{ name: 'D', rule, stratagems: [], enhancements: [], ...extra }] });
+  const cap = (text) => captureUnitAbilities([{ name: 'X', text }]);
+
+  it('BREAKING VARIANT: "select either the [A] or [B] ability" is a choice, so neither grant applies unattended', () => {
+    const text = 'Each time the bearer is selected to shoot, select either the [LETHAL HITS] or [SUSTAINED HITS 1] ability. Until those attacks are resolved, ranged weapons equipped by the bearer have that ability.';
+    const r = mapRuleText(text, { name: 'X' });
+    expect(r.effects.map((e) => [e.condition, e.mods.grantKeywords?.[0]])).toEqual([['ruleTrigger', 'LETHAL HITS'], ['ruleTrigger', 'SUSTAINED HITS 1']]);
+    expect(cap(text).every((e) => e.captured)).toBe(true);
+  });
+
+  it('BREAKING VARIANT: a penalty on the enemy\'s Psychic Attacks is not emitted either', () => {
+    expect(mapRuleText('While a unit is stunned, each time a model in that unit makes a Psychic Attack, subtract 1 from the Hit roll.', { name: 'X' }).effects.filter((e) => e.mods.hitPenalty || e.mods.hitModifier)).toEqual([]);
+  });
+
+  it('BREAKING VARIANT: an exclusion that names the ENEMY can\'t gate a defence, so it is held / gated, never applied', () => {
+    const text = 'Each time an enemy unit (excluding TITANIC units) within Engagement Range of this unit is selected to fight, until the end of the phase, each time a model in that enemy unit makes a melee attack, subtract 1 from the Hit roll.';
+    const [held] = cap(text);
+    expect([held.side, held.mods.hitPenalty, held.captured]).toEqual(['defender', 1, true]);
+    const [gated] = mapRuleText(text, { name: 'X' }).effects;
+    expect([gated.side, gated.condition]).toEqual(['defender', 'ruleTrigger']);
+  });
+
+  it('an exclusion on this side\'s OWN units still scopes an always-on defence', () => {
+    const [e] = cap('Each time an attack targets this unit (excluding EPIC HERO models), subtract 1 from the Hit roll.');
+    expect([e.side, e.captured]).toEqual(['defender', undefined]);
+  });
+
+  it('BREAKING VARIANT: when de-duplication removes the only gated prose effect, the toggle note and "situational" go too', () => {
+    const plan = planPackRules(det(null, {
+      enhancements: [{
+        name: 'Forge Edge',
+        text: 'In your Shooting phase, add 1 to the Strength characteristic of ranged weapons equipped by the bearer.',
+        wargearMods: [{ target: 'ranged', op: 'add', stat: 'S', delta: 1 }],
+      }],
+    }));
+    const enh = plan.detachments[0].enhancements[0];
+    expect(enh.effects.map((e) => [e.condition, e.mods.strengthBonus])).toEqual([[null, 1]]);
+    expect(enh.notes.join(' ')).not.toMatch(/Rule trigger met/);
+    expect(enh.classification).toBe('mapped');
+  });
+
+  it('a gated rule with an action part keeps the note that the action part is ignored', () => {
+    const r = mapRuleText('Each time a model in this unit makes an attack, if this unit has sworn an Oath, add 1 to the Hit roll. In your Movement phase, this unit can Advance and charge.', { name: 'X' });
+    expect(r.classification).toBe('situational');
+    expect(r.notes.join(' ')).toMatch(/Rule trigger met/);
+    expect(r.notes.join(' ')).toMatch(/action or movement part is ignored/);
+  });
+
+  it('DELIBERATE: a "while this model is leading a unit" defence applies like every other leader aura (the sim has no leading gate)', () => {
+    // 375 leader-aura datasheet effects already applied this way before 2026-10-03; the side fix adds the
+    // "-1 to be hit" ones. A standalone character defending alone also gets it: a known simplification.
+    const [e] = cap('While this model is leading a unit, each time an attack targets that unit, subtract 1 from the Hit roll.');
+    expect([e.side, e.mods.hitPenalty, e.condition, e.captured]).toEqual(['defender', 1, null, undefined]);
+  });
+});
+
+describe("enemy carve-outs are not this side's exclusions (review pass 2, 2026-10-03)", () => {
+  it("BREAKING VARIANT: 'targets an enemy unit (excluding units that can FLY)' no longer switches an aircraft's own buff off", () => {
+    const [e] = mapRuleText('Each time a model in this unit makes a ranged attack that targets an enemy unit (excluding units that can FLY), add 1 to the Hit roll.', { name: 'X' }).effects;
+    expect([e.side, e.mods.hitModifier, e.condition, e.scopeExcl]).toEqual(['attacker', 1, 'targetCondition', undefined]);
+    expect(effectAppliesToUnit(e, ['AIRCRAFT', 'FLY', 'VEHICLE'], 'F')).toBe(true);
+  });
+  it("an exclusion on this side's own units is still carried", () => {
+    const [e] = mapRuleText('Each time a CHAMPION model from your army (excluding EPIC HERO models) makes an attack, add 1 to the Hit roll.', { name: 'X' }).effects;
+    expect(e.scopeExcl).toEqual(['EPIC HERO']);
+  });
+  it('the held enemy-excluded defence carries no own-unit exclusion either', () => {
+    const [held] = captureUnitAbilities([{ name: 'X', text: 'Each time an enemy unit (excluding TITANIC units) within Engagement Range of this unit is selected to fight, until the end of the phase, each time a model in that enemy unit makes a melee attack, subtract 1 from the Hit roll.' }]);
+    expect([held.side, held.captured, held.scopeExcl]).toEqual(['defender', true, undefined]);
+  });
+});
+
+describe("the bulleted alternative is a choice too (review pass 2, 2026-10-03)", () => {
+  it("BREAKING VARIANT: \"▪ [A]. ▪ Or: [B].\" gates both options on the pack path and holds them on a datasheet", () => {
+    const text = "When this unit is selected to fight, its melee attacks have: ▪ [LETHAL HITS]. ▪ Or: [SUSTAINED HITS 1].";
+    const r = mapRuleText(text, { name: "X" });
+    expect(r.effects.map((e) => [e.condition, e.mods.grantKeywords?.[0]])).toEqual([["ruleTrigger", "LETHAL HITS"], ["ruleTrigger", "SUSTAINED HITS 1"]]);
+    expect(captureUnitAbilities([{ name: "X", text }]).every((e) => e.captured)).toBe(true);
+    expect(r.notes.join(" ")).toMatch(/choice between options, and the toggle turns all of them on/);
+  });
+  it("the dash and upper-case forms count", () => {
+    for (const text of ["Its melee attacks can have: - [CLEAVE 1]. - Or: +1 AP.", "Your unit's attacks have: ▪ [LETHAL HITS] . ▪ OR: [SUSTAINED HITS 1] ."]) {
+      expect(mapRuleText(text, { name: "X" }).effects.every((e) => e.condition === "ruleTrigger"), text).toBe(true);
+    }
   });
 });

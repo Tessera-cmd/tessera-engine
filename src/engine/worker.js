@@ -40,6 +40,8 @@ function computeImpacts(attacker, defender, options, variants, iterations, seed)
       damageDelta: +(full.woundsDealt.mean - r.woundsDealt.mean).toFixed(2),
       // a stratagem's Command-point cost, carried from the plan for the hint wording (absent = none)
       ...(Number.isInteger(v.cp) ? { cp: v.cp } : {}),
+      // the OFF toggles a ticked rule is waiting on (labels), so the hint names them (absent = none)
+      ...(Array.isArray(v.waitingOn) && v.waitingOn.length ? { waitingOn: v.waitingOn } : {}),
     };
   });
 }
