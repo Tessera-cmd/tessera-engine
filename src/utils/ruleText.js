@@ -34,7 +34,9 @@
 // 1 = every reading up to and including 2.93.6 (the Starting/Half-strength gates of 2.93.2 and the
 //     rule-trigger gate of 2.93.5 among them). The first change to the mapper's output after that
 //     makes it 2, and so on: one bump per release that changes a reading is enough.
-export const MAPPER_VERSION = 1;
+// 2 = 2.93.8: a rule naming both the Shooting and the Fight phase (a stratagem WHEN line, or
+//     "selected to shoot or fight") reads as phase 'any' unless its effect pins melee or ranged.
+export const MAPPER_VERSION = 2;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -191,7 +193,18 @@ const NUM = '(\\d+|one|two|three|four|five|six)';
 // Detect the phase a clause applies in, from weapon-type / phase wording. Defaults to 'any'.
 // "selected to shoot/fight" is GW's standard per-phase ACTIVATION wording (Target Elimination,
 // Combat Doctrines), so it pins the phase even when no weapon-type word is present (B7 accuracy win).
+// A clause naming BOTH phases ("WHEN: Your opponent's Shooting phase or the Fight phase …", "selected
+// to shoot or fight") is usable in either, so it is 'any' unless a melee or ranged weapon word pins it
+// (2026-10-03). The fight test used to win, so a pack stratagem (one clause, its full stops lost in the
+// PDF) stored 'fight' and its -1 to be hit never applied against shooting.
 function detectPhase(t) {
+  const either = /\b(?:shoot(?:ing)?\s+or\s+(?:the\s+)?fight|fight\s+or\s+(?:the\s+)?shoot(?:ing)?)\b/i.test(t);
+  if (either || (/\b(fight phase|selected to fight)\b/i.test(t) && /\b(shooting phase|selected to shoot)\b/i.test(t))) {
+    const melee = /\b(melee weapons?|melee attacks?|made with melee)\b/i.test(t);
+    const ranged = /\b(ranged weapons?|ranged attacks?|made with ranged)\b/i.test(t);
+    if (!melee && !ranged) return 'any';
+    if (melee !== ranged) return melee ? 'fight' : 'shooting';
+  }
   if (/\b(melee weapons?|melee attacks?|fight phase|in the fight phase|made with melee|selected to fight)\b/i.test(t)) return 'fight';
   if (/\b(ranged weapons?|ranged attacks?|shooting phase|in the shooting phase|made with ranged|selected to shoot)\b/i.test(t)) return 'shooting';
   return 'any';

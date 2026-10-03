@@ -1977,3 +1977,33 @@ describe("the bulleted alternative is a choice too (review pass 2, 2026-10-03)",
     }
   });
 });
+
+describe('a rule naming both the Shooting and the Fight phase is any-phase (2026-10-03)', () => {
+  // A pack stratagem arrives as ONE clause (the PDF loses its full stops), so its WHEN line's phase
+  // words sit beside the effect. The fight test used to win, so a -1 to be hit usable in either phase
+  // never applied against shooting.
+  const G = ' � ';
+  const strat = (when, effect) => `WHEN: ${when}${G}TARGET: One unit from your army${G}EFFECT: ${effect}${G}`;
+  const one = (text) => mapRuleText(text, { name: 'X' }).effects[0];
+  it('BREAKING VARIANT: an either-phase defensive stratagem applies against shooting AND melee', () => {
+    const e = one(strat("Your opponent's Shooting phase or the Fight phase, just after an enemy unit has selected its targets", 'Until the end of the phase, each time an attack targets your unit, subtract 1 from the Hit roll'));
+    expect([e.side, e.phase, e.mods.hitPenalty]).toEqual(['defender', 'any', 1]);
+    for (const phase of ['shooting', 'fight']) expect(resolveEffects([e], { phase }).defender.hitPenalty, phase).toBe(1);
+  });
+  it('an either-phase attack buff, "Shooting or the Fight phase" and the "selected to shoot or fight" activation are any-phase too', () => {
+    const a = one(strat('Your Shooting phase or the Fight phase', 'Until the end of the phase, each time a model in your unit makes an attack, add 1 to the Wound roll'));
+    expect([a.phase, a.mods.woundModifier]).toEqual(['any', 1]);
+    expect(one('In your Shooting or the Fight phase, each time a model in this unit makes an attack, add 1 to the Wound roll.').phase).toBe('any');
+    const b = one('When this unit is selected to shoot or fight, weapons equipped by models in this unit have the [LETHAL HITS] ability.');
+    expect([b.phase, b.mods.grantKeywords]).toEqual(['any', ['LETHAL HITS']]);
+  });
+  it('a melee or ranged word in the effect still pins the phase', () => {
+    expect(one(strat('Your Shooting phase or the Fight phase', 'Until the end of the phase, each time a model in your unit makes a melee attack, add 1 to the Wound roll')).phase).toBe('fight');
+    expect(one(strat('Your Shooting phase or the Fight phase', 'Until the end of the phase, ranged weapons equipped by models in your unit have the [LETHAL HITS] ability')).phase).toBe('shooting');
+  });
+  it('a single-phase rule keeps its phase (the case the old reading handled)', () => {
+    const buff = 'Until the end of the phase, each time a model in your unit makes an attack, add 1 to the Hit roll';
+    expect([one(strat('Your Shooting phase', buff)).phase, one(strat('Fight phase', buff)).phase]).toEqual(['shooting', 'fight']);
+    expect(one('Each time this unit is selected to fight, add 1 to the Hit roll.').phase).toBe('fight');
+  });
+});
