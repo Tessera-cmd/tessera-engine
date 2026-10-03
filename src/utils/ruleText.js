@@ -19,6 +19,23 @@
 //   'not-simulatable' — detected, but the engine can't express it; shown so the user knows it
 //                       is NOT applied (e.g. heal/return-models mechanics), never faked.
 
+// The version of THIS mapper's output (2026-10-03). Saved data keeps the effects it was imported
+// with, so a mapper fix would otherwise never reach an existing user's rules or units. Stored rules
+// and unit abilities are stamped with the version that mapped them, and anything stamped older is
+// re-mapped from its own stored text on load (utils/customRules.js replanLibraryStore and
+// utils/rulesReplan.js replanUnitAbilities), keeping ids, user edits and Apply choices.
+// BUMP THIS whenever a change alters the output of mapRuleText, captureUnitAbilities or
+// planPackRules for the same input text (a new pattern, a new gate, a changed classification).
+// A change that leaves every output identical (a refactor, a comment) must NOT bump it.
+// What is stored to re-map from: a library rule keeps its text with line breaks (`sourceText`, see
+// sourceTextOf) plus an enhancement's structured catalogue modifiers; a unit keeps its datasheet
+// abilities' text FLATTENED (datasheetAbilitiesFrom). So if a change makes datasheet-ability mapping
+// depend on line breaks, store the lines there first, or a unit re-map will not match a fresh import.
+// 1 = every reading up to and including 2.93.6 (the Starting/Half-strength gates of 2.93.2 and the
+//     rule-trigger gate of 2.93.5 among them). The first change to the mapper's output after that
+//     makes it 2, and so on: one bump per release that changes a reading is enough.
+export const MAPPER_VERSION = 1;
+
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
 const MODELLABLE_CONDITIONS = new Set(['onCharge', 'halfRange', 'stationary', 'targetMarked']);
@@ -1134,6 +1151,17 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   return { effects, classification, matched, unmapped: [], notes, conditions };
 }
 
+// The rule's text with its LINE BREAKS kept (each line cleaned), as `{ sourceText }`, or {} for a
+// one-line rule. The mapper reads named sub-rules from the line structure (sectionLabels), which the
+// stored display text (cleanRuleText) flattens; a stored rule keeps this so it can be re-mapped
+// exactly after a mapper fix (customRules replanLibraryStore). Grounded 2026-10-03 across every 11e
+// catalogue: mapping the kept-lines text equals mapping the raw text for all 1,887 rule entries,
+// while the flattened text loses the sub-rule names of 12 of them.
+function sourceTextOf(text) {
+  const lines = String(text || '').split(/\n/).map(cleanRuleText).filter(Boolean);
+  return lines.length > 1 ? { sourceText: lines.join('\n') } : {};
+}
+
 // ---- capture a unit's DATASHEET abilities (Session 37, P2) ------------------
 // Turn a unit's datasheet ability profiles (each { name, text }) into the intrinsic Effect[] the
 // sim consumes (engine/effects.js, applied via CombatSim.gatherAll). The same clause-aware mapper
@@ -1394,7 +1422,7 @@ export function enhancementRestriction(enh) {
 export function planRosterRules(raw = {}) {
   const planOne = (entry, source) =>
     entry && (entry.text || entry.name)
-      ? { name: entry.name || 'Rule', text: cleanRuleText(entry.text), ...mapRuleText(entry.text, { name: entry.name, source }) }
+      ? { name: entry.name || 'Rule', text: cleanRuleText(entry.text), ...sourceTextOf(entry.text), ...mapRuleText(entry.text, { name: entry.name, source }) }
       : null;
 
   const armyRule = planOne(raw.armyRule, 'army');
@@ -1549,7 +1577,7 @@ function applyStructuredMods(plan, rawMods) {
 export function planPackRules(raw = {}) {
   const planOne = (entry, source) =>
     entry && (entry.text || entry.name)
-      ? { name: entry.name || 'Rule', text: cleanRuleText(entry.text), ...mapRuleText(entry.text, { name: entry.name, source }) }
+      ? { name: entry.name || 'Rule', text: cleanRuleText(entry.text), ...sourceTextOf(entry.text), ...mapRuleText(entry.text, { name: entry.name, source }) }
       : null;
 
   // An enhancement may carry a points cost (from a catalogue parse — bsdataRules); preserve it on the
@@ -1563,7 +1591,10 @@ export function planPackRules(raw = {}) {
     // The source catalogue entry id (bsdataRules) — kept so the linked .rosz export can write the
     // enhancement selection; absent on PDF/AI-sourced packs (they resolve by name instead).
     if (e?.bsId) p = { ...p, bsId: e.bsId };
-    if (Array.isArray(e?.wargearMods) && e.wargearMods.length) p = applyStructuredMods(p, e.wargearMods);
+    // The raw structured modifiers ride on the planned entry too, so a stored enhancement can be
+    // re-mapped exactly after a mapper fix (customRules replanLibraryStore): its effects depend on
+    // them as well as on its text.
+    if (Array.isArray(e?.wargearMods) && e.wargearMods.length) p = { ...applyStructuredMods(p, e.wargearMods), wargearMods: e.wargearMods };
     return p;
   };
   // A stratagem may carry its Command-point cost (the PDF heading, a rules pack, the AI transcription);
