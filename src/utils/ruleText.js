@@ -41,7 +41,10 @@
 //     own clause and an activation only what follows it; bulleted items read their lead-in's phase and gate;
 //     a pack sentence before a capitalised "If" splits; an "instead" tier stores its delta over the head; a
 //     Feel No Pain "against mortal wounds / Psychic Attacks" is not emitted.
-export const MAPPER_VERSION = 3;
+// 4 = an "If …, … as well / instead" tier whose trigger can't be read goes behind the `ruleTrigger` toggle on
+//     the pack path instead of being dropped (an "instead" tier sharing that toggle with its head stores its
+//     delta); a marked keyword name with a lowercase word ("Blades for Hire") scopes as the whole keyword.
+export const MAPPER_VERSION = 4;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -172,6 +175,19 @@ const NOT_SIM_RE = /\b(reanimat|resurrect|return .* (?:destroyed|slain)|regain .
 // Unicode punctuation is folded to ASCII (2026-07-14): the live 11e catalogues write "re‑roll"
 // with a NON-BREAKING HYPHEN (U+2011) and "units’" with a curly apostrophe — the ASCII-only
 // patterns below silently missed every such rule (a dozen live detachment rules unlocked).
+// The catalogues mark each keyword with ^^…^^ and write it in Title Case ("^^**Blades for Hire**^^"),
+// so a keyword NAME with a lowercase word inside it broke the capitalised run detectScope reads: Kabalite
+// Cartel's "Kabal or Blades for Hire model" scoped to "HIRE", which no unit has (mapper 4). Inside a marked
+// span, a lowercase word between two capitalised words is part of the name and is upper-cased before the
+// markup is stripped. The run connectors stay as written: "of" and "the" already join a run, and "and" /
+// "or" separate the keywords of a span that lists several ("^^Magus, Primus or Acolyte Iconward^^").
+// Pack-PDF text prints keywords in capitals and carries no markup, so it is unchanged.
+const KEYWORD_SPAN_RE = /\^\^([^^\n]{1,80}?)\^\^/g;
+const KEYWORD_INFIX_RE = /(?<=[A-ZÀ-Þ][A-Za-zÀ-þ0-9'’-]*\s+)(?!(?:of|and|or|the)\b)[a-z][a-z'’-]*(?=\s+(?:\*\*)?[A-ZÀ-Þ])/g;
+function keywordCase(text) {
+  return String(text || '').replace(KEYWORD_SPAN_RE, (span, inner) => `^^${inner.replace(KEYWORD_INFIX_RE, (w) => w.toUpperCase())}^^`);
+}
+
 export function cleanRuleText(text) {
   return String(text || '')
     .replace(/\^\^/g, '')
@@ -959,11 +975,17 @@ function mapClause(
     !(sg && prev.strength && sg.subject === prev.strength);
   const keywordGateLost = tier && !degradeGated && OWN_KEYWORD_GATE_RE.test(clause) && !!detectCondition(clause.replace(OWN_KEYWORD_GATE_RE, ''), gateCtx);
   const condition = keywordGateLost ? null : readCondition;
-  // With a review surface (datasheet abilities, `holdUnresolved`), the gate-less tier is kept and HELD
-  // (`_suspect` below) so the player can still see and apply it; without one (pack rules, whose
-  // effects apply as stored) it is dropped.
-  // An ability-level gate covers a gate-less tier, but not one the slot can't tell apart from its head.
-  if (tier && !condition && (!abilityGated || keywordGateLost) && !holdUnresolved) return dropped;
+  // A gate-less tier is a trigger the mapper can't read ("If your unit is Righteous, … as well", "If you
+  // spend 1YP, … as well"), so it is neither dropped nor applied (owner ruling, mapper 4): it is flagged
+  // (`unreadTier` below) and, like any unread trigger, HELD with a review surface (datasheet abilities,
+  // `holdUnresolved`) or gated on the `ruleTrigger` toggle without one (pack rules, stratagems included).
+  // Its head applies whenever it does, or is behind that same toggle, so an "instead" tier is stored as
+  // its delta over the head (the pass at the end of mapRuleText) and the toggle never stacks the two.
+  // An ability-level gate covers a gate-less tier. A tier whose own keyword gate lost the slot to another
+  // gate (`keywordGateLost`) has TWO gates: the toggle alone would apply it without the other one, so it
+  // stays dropped (pack) or held (datasheets).
+  if (tier && !condition && keywordGateLost && !holdUnresolved) return dropped;
+  const unreadTier = tier && !condition && !abilityGated && !keywordGateLost;
   // A bulleted item with no subject of its own reads it through its lead-in, as the first item always did
   // when it shared the lead-in's clause ("Friendly ADEPTUS ASTARTES MOUNTED have: ▪ This unit's ranged
   // attacks have [ASSAULT]" scopes to MOUNTED only through the item's "unit").
@@ -1033,7 +1055,7 @@ function mapClause(
     // An exclusion on the ATTACKING enemy ("each time an enemy unit (excluding TITANIC units) …") can't
     // gate a defence (detectScope doesn't carry it: scopeExcl only sees this side's unit), so without it
     // the defence would apply against every attacker: hold / gate it instead.
-    if (suspect || (side === 'defender' && /\benemy\s+(?:units?|models?)\s*\(\s*(?:excluding|except)\b/i.test(clause))) eff._suspect = true;
+    if (suspect || unreadTier || (side === 'defender' && /\benemy\s+(?:units?|models?)\s*\(\s*(?:excluding|except)\b/i.test(clause))) eff._suspect = true;
     if (keywordGateLost) UNRESOLVED_TIER.add(eff);
     if (sg) STRENGTH_GATED.add(eff);
     effects.push(eff);
@@ -1133,6 +1155,29 @@ const ADDITIVE_MOD_KEYS = new Set(['hitModifier', 'woundModifier', 'apBonus', 'd
 function modKinds(mods = {}) {
   return Object.keys(mods || {}).flatMap((k) => (k === 'reroll' && mods.reroll && typeof mods.reroll === 'object' ? Object.keys(mods.reroll).map((r) => `reroll.${r}`) : [k]));
 }
+// Does an "instead" tier restate every modifier of this head effect, at least as strongly, so the two on one
+// toggle never stack into more than the tier gives (see the delta pass in mapRuleText)? An additive modifier is
+// covered by its delta; a re-roll needs the tier's to be at least the head's; a granted keyword needs the tier
+// to grant the same ability (its best instance is taken: [SUSTAINED HITS 2] over [SUSTAINED HITS 1]).
+const REROLL_RANK = { ones: 1, failed: 2, all: 3 };
+const kwBase = (k) => String(k).toUpperCase().replace(/\s+(?:D?\d+\+?)$/, '').trim();
+function insteadCovers(head, tiers) {
+  const sameAttack = (t) => t.side === head.side && (t.phase === head.phase || t.phase === 'any' || head.phase === 'any');
+  return modKinds(head.mods).every((k) =>
+    tiers.some((t) => {
+      if (!sameAttack(t) || !modKinds(t.mods).includes(k)) return false;
+      if (k.startsWith('reroll.')) {
+        const r = k.slice('reroll.'.length);
+        return (REROLL_RANK[t.mods.reroll[r]] || 0) >= (REROLL_RANK[head.mods.reroll[r]] || 0);
+      }
+      if (k === 'grantKeywords') {
+        const have = new Set((t.mods.grantKeywords || []).map(kwBase));
+        return (head.mods.grantKeywords || []).every((g) => have.has(kwBase(g)));
+      }
+      return true;
+    }),
+  );
+}
 // The "instead" tiers mapRuleText stored as a delta over their head. Held by identity, never written onto
 // the effect: applyStructuredMods must not de-duplicate a delta against an enhancement's structured buff
 // (that buff is the HEAD's value; the delta is the extra on top of it).
@@ -1156,6 +1201,7 @@ const TIER_CONT_RE = /^if\b[^.]*\b(?:as well|instead)\b|^if\b[^,.]*\b(?:is|are)\
 // `holdUnresolved`: the caller has a review surface (captureUnitAbilities), so a tier whose gate can't
 // be resolved is kept as a held (`_suspect`) effect instead of being dropped.
 export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = false } = {}) {
+  text = keywordCase(text); // a marked keyword name keeps its lowercase words in the run (see keywordCase)
   const raw = cleanRuleText(text);
   const notes = [];
   if (!raw) {
@@ -1209,6 +1255,8 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   const clauseOf = new Map();
   // "Instead" tiers whose modifier REPLACES a head modifier of the same kind (see INSTEAD_DELTA).
   const insteadPairs = [];
+  // Each "instead" clause with the head clause it follows (both effect lists), for the stacking check.
+  const insteadClauses = [];
   let headEffects = [];
   for (const [ci, clause] of clauses.entries()) {
     const conjunct = clause.startsWith(CONJUNCT);
@@ -1244,6 +1292,7 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
     // An "instead" clause ("While the bearer's unit is Righteous, add 2 to the Attacks … instead") replaces
     // the previous clause's modifier of the same kind: pair them so the tier can be stored as the delta.
     if (r.effects.length && /\binstead\b(?!\s+of\b)/i.test(body)) {
+      insteadClauses.push({ head: headEffects, tier: r.effects });
       for (const e of r.effects) {
         for (const k of modKinds(e.mods)) {
           const h = headEffects.find(
@@ -1360,17 +1409,53 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   // head keeps its absolute value (no live case).
   const gateOf = (e) => e.condition || (e._suspect ? '_held' : null);
   const unresolved = new Set();
+  // An "instead" tier behind the `ruleTrigger` toggle (mapper 4; pack rules, no review surface) whose head
+  // applies whenever it does (no gate, or that same toggle). The toggle means every trigger the rule names is
+  // met, so the tier wins and the pair must give exactly the tier's reading:
+  //   - an additive modifier is stored as its delta over the head, whatever its sign (the two are on together);
+  //   - a re-roll, save or keyword the engine takes the best of needs no delta, when the tier's is at least the
+  //     head's (a re-roll of all Hit rolls over a re-roll of 1s; [SUSTAINED HITS 2] over [SUSTAINED HITS 1]);
+  //   - a head modifier the tier does NOT restate would stack with it, though "instead" replaces it ("re-roll a
+  //     Wound roll of 1 … If …, add 1 to the Wound roll instead"): the one slot can't switch the head off when the
+  //     toggle is on, so the tier can't be expressed without over-applying and is dropped. Read through the toggle
+  //     it is the safe under-apply: ticked, the head's reading stands.
+  const unreadTier = (tier, hg) => !holdUnresolved && gateOf(tier) === RULE_TRIGGER && (!hg || hg === RULE_TRIGGER);
+  for (const { head, tier } of insteadClauses) {
+    const live = tier.filter((t) => effects.includes(t));
+    if (!live.length || !live.every((t) => unreadTier(t, null))) continue;
+    const heads = head.filter((h) => effects.includes(h) && unreadTier(live[0], gateOf(h)));
+    // A modifier of the same kind stated EARLIER than the head clause (or with a head clause that read nothing)
+    // is not paired with the tier, so the two would stack: the tier is dropped then too.
+    // (An earlier tier of the same chain, "+1; +3 instead; +4 instead", is paired through its own head.)
+    const chain = new Set(head);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const p of insteadPairs) {
+        if (chain.has(p.tier) && !chain.has(p.head)) {
+          chain.add(p.head);
+          grew = true;
+        }
+      }
+    }
+    const kinds = new Set(live.flatMap((t) => modKinds(t.mods).map((k) => `${t.side}|${k}`)));
+    const at = clauseOf.get(live[0]);
+    const unpaired = effects.some(
+      (e) => !chain.has(e) && !live.includes(e) && e.name === live[0].name && clauseOf.get(e) < at && unreadTier(live[0], gateOf(e)) && modKinds(e.mods).some((k) => kinds.has(`${e.side}|${k}`)),
+    );
+    if (unpaired || !heads.every((h) => insteadCovers(h, live))) for (const t of live) unresolved.add(t);
+  }
   for (const { head, tier, key, headVal, tierVal } of insteadPairs) {
-    if (unresolved.has(head)) continue;
+    if (unresolved.has(head) || unresolved.has(tier)) continue;
     const hg = gateOf(head);
-    if (hg && hg !== '_held' && hg === gateOf(tier) && !(STRENGTH_GATED.has(head) && STRENGTH_GATED.has(tier))) {
+    const sharedUnread = unreadTier(tier, hg);
+    if (hg && !sharedUnread && hg !== '_held' && hg === gateOf(tier) && !(STRENGTH_GATED.has(head) && STRENGTH_GATED.has(tier))) {
       unresolved.add(tier);
       continue;
     }
     if (hg && hg !== gateOf(tier)) continue;
     if (!ADDITIVE_MOD_KEYS.has(key) || typeof headVal !== 'number' || typeof tierVal !== 'number') continue;
     const d = tierVal - headVal;
-    if (d && Math.sign(d) !== Math.sign(tierVal)) continue;
+    if (d && !sharedUnread && Math.sign(d) !== Math.sign(tierVal)) continue;
     const { [key]: _repeated, ...rest } = tier.mods;
     tier.mods = d ? { ...tier.mods, [key]: d } : rest;
     if (!Object.keys(tier.mods).length) unresolved.add(tier);
@@ -1431,9 +1516,12 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
 // exactly after a mapper fix (customRules replanLibraryStore). Grounded 2026-10-03 across every 11e
 // catalogue: mapping the kept-lines text equals mapping the raw text for all 1,887 rule entries,
 // while the flattened text loses the sub-rule names of 12 of them.
+// A marked keyword name the mapper upper-cases (keywordCase) is kept that way here, and the text is kept even
+// on one line when that changed it: the display text loses the markup, so it could not re-map the same.
 function sourceTextOf(text) {
-  const lines = String(text || '').split(/\n/).map(cleanRuleText).filter(Boolean);
-  return lines.length > 1 ? { sourceText: lines.join('\n') } : {};
+  const lines = keywordCase(text).split(/\n/).map(cleanRuleText).filter(Boolean);
+  const kept = lines.join('\n');
+  return lines.length > 1 || kept !== cleanRuleText(text) ? { sourceText: kept } : {};
 }
 
 // ---- capture a unit's DATASHEET abilities (Session 37, P2) ------------------

@@ -1661,12 +1661,13 @@ describe('strength-state gates — review pass 2 breaking variants', () => {
     }
   });
 
-  it('BREAKING VARIANT: a tier with a gate the sim cannot resolve, after an ungated head, is dropped (not stacked always-on)', () => {
-    // "+1 Attacks; +2 instead if wounded" stacked to an always-on +3.
+  it('BREAKING VARIANT: a tier with a gate the sim cannot resolve, after an ungated head, is never stacked always-on', () => {
+    // "+1 Attacks; +2 instead if wounded" stacked to an always-on +3. Since mapper 4 (owner ruling) the tier is
+    // behind the rule-trigger toggle as its delta, so the toggle gives exactly +2 (it was dropped before).
     const r = mapRuleText("Add 1 to the Attacks characteristic of the bearer's melee weapons. If the bearer has lost one or more wounds, add 2 to the Attacks characteristic of the bearer's melee weapons instead.");
-    expect(r.effects.map((e) => e.mods.attackBonus)).toEqual([1]);
+    expect(r.effects.map((e) => [e.condition, e.mods.attackBonus])).toEqual([[null, 1], ['ruleTrigger', 1]]);
     const rr = mapRuleText("Each time a model in the bearer's unit makes an attack, re-roll a Hit roll of 1. If the bearer's unit was set up on the battlefield this turn, you can re-roll the Hit roll instead.");
-    expect(rr.effects.map((e) => e.mods.reroll?.hit)).toEqual(['ones']);
+    expect(rr.effects.map((e) => [e.condition, e.mods.reroll?.hit])).toEqual([[null, 'ones'], ['ruleTrigger', 'all']]);
     // An ability-level gate still covers such a tier, so it is kept under that gate.
     const once = mapRuleText('Once per battle, at the start of the Fight phase, this unit can use this ability. If it does, add 1 to the Hit roll. If this unit completed a Deed, add 1 to the Wound roll as well.');
     expect(once.effects.map((e) => e.condition)).toEqual(['oncePerBattle', 'oncePerBattle']);
@@ -1740,11 +1741,11 @@ describe('strength-state gates — review pass 3 breaking variants', () => {
     }
   });
 
-  it('BREAKING VARIANT: an unresolvable tier is HELD on a datasheet (reviewable) but dropped from a pack rule', () => {
+  it('BREAKING VARIANT: an unresolvable tier is HELD on a datasheet (reviewable) and behind the rule-trigger toggle in a pack rule', () => {
     const text = 'Each time this model makes an attack, add 1 to the Hit roll. If that attack is a melee attack, add 1 to the Wound roll as well.';
     const wound = cap(text).find((e) => e.mods.woundModifier);
     expect([wound.captured, wound.phase]).toEqual([true, 'fight']);
-    expect(mapRuleText(text, { name: 'X' }).effects.map((e) => Object.keys(e.mods)[0])).toEqual(['hitModifier']);
+    expect(mapRuleText(text, { name: 'X' }).effects.map((e) => [Object.keys(e.mods)[0], e.condition])).toEqual([['hitModifier', null], ['woundModifier', 'ruleTrigger']]);
   });
 
   it('"below half this unit\'s Starting Strength" is a self gate', () => {
@@ -2217,9 +2218,10 @@ describe('unread-trigger precision: review pass 1 breaking variants (2026-10-03)
     expect(r.map(sig)).toEqual([['targetCondition', { attackBonus: 1 }], ['targetCondition', { damageBonus: 1 }]]);
   });
 
-  it('BREAKING VARIANT: an unread "instead" tier on the same unread toggle as its head, or under a once-per-battle gate, is dropped', () => {
+  it('BREAKING VARIANT: an unread "instead" tier on the same unread toggle as its head stores its delta (mapper 4); under a once-per-battle gate it is dropped', () => {
+    // Both on the one rule-trigger toggle: ticked, the pair gives the tier's +2, never +3 (dropped before mapper 4).
     const same = all("Add 1 to the Strength characteristic of Psychic weapons equipped by models in the bearer's unit. While the bearer's unit is Empowered, add 2 to the Strength characteristic of Psychic weapons equipped by models in that unit instead.");
-    expect(same.map(sig)).toEqual([['ruleTrigger', { strengthBonus: 1 }]]);
+    expect(same.map(sig)).toEqual([['ruleTrigger', { strengthBonus: 1 }], ['ruleTrigger', { strengthBonus: 1 }]]);
     const chain = 'Once per battle, at the start of the Fight phase, add 1 to the Attacks characteristic of melee weapons equipped by the bearer. If the bearer has completed one or more Deeds, add 3 to the Attacks characteristic instead. If the bearer has completed two or more Deeds, add 4 to the Attacks characteristic instead.';
     expect(all(chain).map(sig)).toEqual([['oncePerBattle', { attackBonus: 1 }]]);
     expect(held(chain).map((e) => [e.condition, !!e._suspect])).toEqual([['oncePerBattle', false], [null, true], [null, true]]);
@@ -2272,5 +2274,93 @@ describe('unread-trigger precision: review pass 1 breaking variants (2026-10-03)
     ]) {
       expect(all(text).every((e) => e.condition === 'ruleTrigger'), text).toBe(true);
     }
+  });
+});
+
+describe('mapper version 4: unread tiers behind the rule-trigger toggle, marked keyword names (2026-10-04)', () => {
+  // Owner ruling: an effect whose trigger can't be read is neither dropped nor applied; it goes behind the
+  // opt-in "Rule trigger met" toggle (`ruleTrigger`), stratagems included. Texts are generic phrasings.
+  const all = (text) => mapRuleText(text, { name: 'X' }).effects;
+  const cap = (text) => captureUnitAbilities([{ name: 'X', text }]);
+  const sig = (e) => [e.condition, e.mods];
+
+  it('BREAKING VARIANT: an unread "as well" tier after an ungated head is gated, not dropped', () => {
+    const text = "Add 1 to the Strength characteristic of the bearer's melee weapons. If the bearer's unit is Zealous, add 1 to the Damage characteristic as well.";
+    expect(all(text).map(sig)).toEqual([[null, { strengthBonus: 1 }], ['ruleTrigger', { damageBonus: 1 }]]);
+    // The datasheet capture keeps HOLDING it for review (it has a review surface).
+    expect(cap(text).find((e) => e.mods.damageBonus).captured).toBe(true);
+  });
+
+  it('BREAKING VARIANT: an unread tier of a stratagem is gated too', () => {
+    const G = '�';
+    const text = `WHEN: Fight phase ${G} TARGET: One unit from your army ${G} EFFECT: Until the end of the turn, improve the Strength characteristic of melee weapons equipped by models in your unit by 1 ${G} If your unit is Zealous, until the end of the phase, improve the Armour Penetration characteristic of melee weapons equipped by models in your unit by 1 as well ${G}`;
+    const plan = planPackRules({ faction: 'F', detachments: [{ name: 'D', stratagems: [{ name: 'S', text }] }] });
+    expect(plan.detachments[0].stratagems[0].effects.map(sig)).toEqual([[null, { strengthBonus: 1 }], ['ruleTrigger', { apBonus: 1 }]]);
+  });
+
+  it('BREAKING VARIANT: an unread re-roll "instead" tier is gated at its own value (the best of the two is taken)', () => {
+    const r = all('Each time a model in this unit makes an attack, re-roll a Hit roll of 1. If this unit is wholly within your Zone of Light, you can re-roll the Hit roll instead.');
+    expect(r.map(sig)).toEqual([[null, { reroll: { hit: 'ones' } }], ['ruleTrigger', { reroll: { hit: 'all' } }]]);
+  });
+
+  it("BREAKING VARIANT: an unread \"instead\" tier on the head's own unread toggle never stacks, even when smaller", () => {
+    // Both Psychic-qualified, so both unread: ticked, the pair gives the tier's value exactly.
+    const up = all('Add 1 to the Strength characteristic of Psychic weapons equipped by the bearer. If the bearer is Zealous, add 3 to the Strength characteristic of Psychic weapons equipped by the bearer instead.');
+    expect(up.map(sig)).toEqual([['ruleTrigger', { strengthBonus: 1 }], ['ruleTrigger', { strengthBonus: 2 }]]);
+    const down = all('Add 2 to the Strength characteristic of Psychic weapons equipped by the bearer. If the bearer is Zealous, add 1 to the Strength characteristic of Psychic weapons equipped by the bearer instead.');
+    expect(down.map(sig)).toEqual([['ruleTrigger', { strengthBonus: 2 }], ['ruleTrigger', { strengthBonus: -1 }]]);
+    expect(down.reduce((s, e) => s + e.mods.strengthBonus, 0)).toBe(1);
+  });
+
+  it('BREAKING VARIANT: an unread "instead" tier that replaces a DIFFERENT modifier would stack, so it is dropped', () => {
+    // "re-roll a Wound roll of 1 … add 1 to the Wound roll instead": the one slot can't switch the re-roll off.
+    const r = all('Each time a model in this unit makes a Psychic Attack, re-roll a Wound roll of 1. If this unit is wholly within your Zone of Light, each time it makes a Psychic Attack, add 1 to the Wound roll instead.');
+    expect(r.map(sig)).toEqual([['ruleTrigger', { reroll: { wound: 'ones' } }]]);
+    // …and a weaker re-roll "instead" would be out-ranked by the head, so it goes too.
+    const w = all('Each time a model in this unit makes an attack, re-roll the Hit roll. If this unit is Zealous, re-roll a Hit roll of 1 instead.');
+    expect(w.map(sig)).toEqual([[null, { reroll: { hit: 'all' } }]]);
+    // A keyword "instead" of another keyword would be granted on top of it.
+    const k = all('Ranged weapons equipped by models in this unit have the [LETHAL HITS] ability. If this unit is Zealous, those weapons have the [DEVASTATING WOUNDS] ability instead.');
+    expect(k.map(sig)).toEqual([[null, { grantKeywords: ['LETHAL HITS'] }]]);
+    // The same ability one step up is covered: the engine takes its best instance.
+    const s = all('Ranged weapons equipped by models in this unit have the [SUSTAINED HITS 1] ability. If this unit is Zealous, those weapons have the [SUSTAINED HITS 2] ability instead.');
+    expect(s.map(sig)).toEqual([[null, { grantKeywords: ['SUSTAINED HITS 1'] }], ['ruleTrigger', { grantKeywords: ['SUSTAINED HITS 2'] }]]);
+  });
+
+  it('BREAKING VARIANT: an unread "instead" tier whose replaced modifier sits before its head clause is dropped, a chain is not', () => {
+    // The +1 to Hit is two clauses back (the clause between reads nothing): unpaired, the tier's +2 would stack
+    // on it to +3.
+    const far = all('Each time a model in this unit makes an attack, add 1 to the Hit roll. Models in this unit can move through walls. If this unit is Zealous, add 2 to the Hit roll instead.');
+    expect(far.map(sig)).toEqual([[null, { hitModifier: 1 }]]);
+    // A chain pairs each tier with the one before it: ticked, the total is the last tier's value.
+    const chain = all("Add 1 to the Attacks characteristic of the bearer's melee weapons. If the bearer is Zealous, add 3 to the Attacks characteristic of the bearer's melee weapons instead. If the bearer is Exalted, add 4 to the Attacks characteristic of the bearer's melee weapons instead.");
+    expect(chain.map(sig)).toEqual([[null, { attackBonus: 1 }], ['ruleTrigger', { attackBonus: 2 }], ['ruleTrigger', { attackBonus: 1 }]]);
+  });
+
+  it('BREAKING VARIANT: a two-gate tier (its own keyword gate lost the slot) stays dropped from a pack rule', () => {
+    const r = all('Each time a model in this unit makes an attack, re-roll a Hit roll of 1. If your unit has the Corsair keyword, then each time a model in your unit makes an attack that targets an enemy unit within range of an objective marker, you can re-roll the Hit roll instead.');
+    expect(r.map(sig)).toEqual([[null, { reroll: { hit: 'ones' } }]]);
+  });
+
+  it('BREAKING VARIANT: a marked keyword name with a lowercase word scopes as the whole keyword', () => {
+    const text = 'Each time a ^^**Cabal**^^ or ^^**Gloom for Sale**^^ model in this unit makes an attack, add 1 to the Hit roll.';
+    expect(all(text)[0].scope).toEqual(['CABAL', 'GLOOM FOR SALE']);
+    // Unmarked, the lowercase word still breaks the run (no guess from prose): the old "HIRE" reading.
+    expect(all(text.replace(/\^\^|\*\*/g, ''))[0].scope).toEqual(['SALE']);
+    // A span that LISTS keywords still splits on "or", and "of" still joins a name.
+    expect(all('Each time a ^^Alpha, Beta or Gamma Delta^^ model makes an attack, add 1 to the Hit roll.')[0].scope).toEqual(['ALPHA', 'BETA', 'GAMMA DELTA']);
+    expect(all('Each time a ^^Sons of Gloom^^ model makes an attack, add 1 to the Hit roll.')[0].scope).toEqual(['SONS OF GLOOM']);
+  });
+
+  it('a marked keyword name is kept in the stored source text, even for a one-line rule, but the display text is unchanged', () => {
+    const text = 'Each time a ^^**Gloom for Sale**^^ model from your army makes an attack, add 1 to the Hit roll.';
+    const plan = planPackRules({ faction: 'F', detachments: [{ name: 'D', rule: { name: 'R', text } }] });
+    const rule = plan.detachments[0].rule;
+    expect(rule.text).toBe('Each time a Gloom for Sale model from your army makes an attack, add 1 to the Hit roll.');
+    expect(rule.sourceText).toBe('Each time a Gloom FOR Sale model from your army makes an attack, add 1 to the Hit roll.');
+    expect(mapRuleText(rule.sourceText).effects[0].scope).toEqual(['GLOOM FOR SALE']);
+    // No marked name with a lowercase word, no change: a one-line rule keeps no source text.
+    const plain = planPackRules({ faction: 'F', detachments: [{ name: 'D', rule: { name: 'R', text: 'Each time a ^^Cabal^^ model makes an attack, add 1 to the Hit roll.' } }] });
+    expect(plain.detachments[0].rule.sourceText).toBeUndefined();
   });
 });
