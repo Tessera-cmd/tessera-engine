@@ -1010,6 +1010,30 @@ describe("enhancementEligibility + enhancementMatches — the generic restrictio
     const stealth = enhancementEligibility({ description: '**STEALTH BATTLESUITS** unit only.' });
     expect(enhancementMatches(stealth, ['FACTION: T’AU EMPIRE', 'STEALTH BATTLESUIT'])).toBe(true); // plural phrase, singular keyword
   });
+
+  // Legality triage 2026-10-04: an "(excluding …)" in the EFFECT text is not a bearer carve-out.
+  // Before the fix the first parenthetical anywhere became `excl`, hiding Orks Dreadherder from
+  // every Big Mek and Necrons Phasal Subjugator from every character (20 live enhancements).
+  it('ignores an "(excluding …)" that qualifies the effect, not the bearer (Dreadherder, Phasal Subjugator)', () => {
+    const dread = enhancementEligibility({
+      description: '**BIG MEK** model only. While this model is within 3" of a friendly **ORKS WALKER** unit (excluding **BIG MEK** units):\n- This model has **Lone Operative**.',
+    });
+    expect(dread).toEqual({ any: ['BIG MEK'], excl: [], unitScope: false });
+    expect(enhancementMatches(dread, ['INFANTRY', 'CHARACTER', 'FACTION: ORKS', 'BIG MEK', 'LEADER'])).toBe(true);
+    const phasal = enhancementEligibility({
+      description: 'NECRONS model only. While a friendly NECRONS unit (excluding CHARACTER units) is within 6" of the bearer, each time a model in that unit makes an attack, add 1 to the hit roll.',
+    });
+    expect(phasal.excl).toEqual([]);
+    expect(enhancementMatches(phasal, ['FACTION: NECRONS', 'CHARACTER', 'INFANTRY'])).toBe(true);
+  });
+
+  it('keeps a carve-out attached to the restriction clause, with or without a closing period', () => {
+    const regen = enhancementEligibility({ description: '**^^Tyranids^^** model only (excluding **^^Monsters^^** models) The bearer\'s unit can be regenerated up to twice per phase.' });
+    expect(regen.excl).toEqual(['MONSTERS']);
+    expect(enhancementMatches(regen, ['FACTION: TYRANIDS', 'MONSTER', 'CHARACTER'])).toBe(false);
+    const smoky = enhancementEligibility({ description: '**SPEED FREEKS** unit only (excluding **AIRCRAFT** units). When an attack targets a unit…' });
+    expect(smoky).toEqual({ any: ['SPEED FREEKS'], excl: ['AIRCRAFT'], unitScope: true });
+  });
 });
 
 describe('condition-gap closes (so conditional buffs are gated, not always-on)', () => {

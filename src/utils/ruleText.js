@@ -1747,10 +1747,14 @@ export function enhancementEligibility(enh) {
   const m = text.match(/(?:^|[.;:!?]\s*|\n\s*)([A-Z0-9'’/\- ]{2,90}?)\s+(MODELS?|UNITS?)\s+ONLY\b/);
   let phrase = m ? m[1].trim() : null;
   let unitScope = m ? /^UNITS?$/.test(m[2]) : false;
+  let restrictionEnd = m ? m.index + m[0].length : -1;
   if (!phrase) {
     // The bare "<PHRASE> only" form ("Kroot Flesh Shaper only. …") — opening clause only.
     const b = text.match(/^\s*([A-Z0-9'’/\- ]{2,90}?)\s+ONLY\b/);
-    if (b) phrase = b[1].trim();
+    if (b) {
+      phrase = b[1].trim();
+      restrictionEnd = b.index + b[0].length;
+    }
   }
   if (!phrase || ENH_STOPWORDS.test(phrase)) return null;
   // Alternatives arrive as a slash list ("GHOSTKEEL BATTLESUIT/PATHFINDER TEAM/STEALTH
@@ -1763,7 +1767,13 @@ export function enhancementEligibility(enh) {
     .filter(Boolean);
   if (!any.length) return null;
   const excl = [];
-  const em = text.match(/\(\s*EXCLUDING\s+([^)]+?)\s*\)/);
+  // The carve-out must belong to the RESTRICTION clause: "X model only (excluding Y models)". An
+  // "(excluding …)" later in the rule text qualifies the EFFECT's target, not the bearer (legality
+  // triage 2026-10-04): Orks Dreadherder "BIG MEK model only. While … ORKS WALKER unit (excluding
+  // BIG MEK units)" parsed as excl BIG MEK and was hidden from every Big Mek; Necrons Phasal
+  // Subjugator ("… NECRONS unit (excluding CHARACTER units)") was hidden from every character.
+  // 31 live restrictions carried an exclusion; only 11 sit on the restriction clause.
+  const em = text.slice(restrictionEnd).match(/^\s*\(\s*EXCLUDING\s+([^)]+?)\s*\)/);
   if (em) {
     for (const part of em[1].split(/\/|,| OR | AND /)) {
       const p = part.replace(/\bMODELS?\b|\bUNITS?\b/g, '').trim();
