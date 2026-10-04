@@ -44,7 +44,10 @@
 // 4 = an "If …, … as well / instead" tier whose trigger can't be read goes behind the `ruleTrigger` toggle on
 //     the pack path instead of being dropped (an "instead" tier sharing that toggle with its head stores its
 //     delta); a marked keyword name with a lowercase word ("Blades for Hire") scopes as the whole keyword.
-export const MAPPER_VERSION = 4;
+// 5 = 2.93.23: the always-on sweep. A duration outside a stratagem, a "for each" count, a battle-round window,
+//     a tally-table row, a zone, a designated target and a stratagem's "select [A] or [B]" gate their effects;
+//     "■" is a bullet; a colon-less trigger sentence and a duration's mid-sentence colon open a list.
+export const MAPPER_VERSION = 5;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -568,12 +571,22 @@ const SENTENCE = '\u0002';
 // have: - +1 S. - +1 S for every 5 models…"); a dash elsewhere ("re - roll" in a PDF, "Blight - Each time")
 // is not a bullet.
 const BULLET = '\u0003';
+// The first item of an UNMARKED list (mapper 5, 2026-10-04): "Each time a unit … disembarks from a
+// Transport, until the end of the turn: Ranged weapons … have [IGNORES COVER]. Melee weapons … have
+// [LANCE]." The lead-in's colon sits mid-sentence and the items carry no bullet, so the second item read
+// as a sentence of its own and applied on every attack. The item after the colon is marked LIST_ITEM, and
+// it and every clause after it in the same sub-rule read the lead-in as bulleted items do. Only a duration
+// lead-in ("until the end of the turn / phase:") opens one: the live data has no other unmarked list.
+const LIST_ITEM = '\u0004';
 function splitClauses(text) {
   return String(text || '')
-    .replace(/■/g, '.')
     .replace(/(?:\s*�\s*|(?<=[a-z0-9\])])\s+)(?=If\b)/g, `. ${SENTENCE}`)
-    .replace(/\s*▪\s*(?:in addition|additionally|furthermore),\s*/gi, `. ${BULLET}`)
-    .replace(/\s*▪\s*|(?<=[:.])\s+-\s+(?=\S)/g, `. ${BULLET}`)
+    .replace(/(\buntil\s+the\s+end\s+of\s+(?:the|that|this|your(?:\s+next)?)\s+(?:[a-z]+\s+)?(?:phase|turn)):\s+(?=[A-Z[])/g, `$1:. ${LIST_ITEM}`)
+    .replace(/\s*[▪■]\s*(?:in addition|additionally|furthermore),\s*/gi, `. ${BULLET}`)
+    // "■" is the faction packs' (and some catalogue texts') bullet, as "▪" is (mapper 5): read as a full stop,
+    // its items lost their lead-in ("Each time … makes an attack that targets the closest eligible target: ■
+    // Re-roll a Wound roll of 1" applied on every attack).
+    .replace(/\s*[▪■]\s*|(?<=[:.])\s+-\s+(?=\S)/g, `. ${BULLET}`)
     .replace(/\b(?:in addition|additionally|furthermore),/gi, '. ')
     // "…Torrent weapons equipped by models in that unit, and all other ranged weapons … have [SUSTAINED HITS
     // 1]" (Fire and Fury) is two effects on two sets of weapons: a qualifier on the first must not gate the second.
@@ -948,11 +961,17 @@ function mapClause(
   // gets the target gate). A separate-sentence tier keeps its OWN gate and inherits the head's only
   // when it has none — an effect has one condition slot, so a two-gate tier keeps the narrower,
   // specific one ("If your unit is Battle-shocked, add 2 … instead" must not ride the charge toggle).
+  // An "as well" tier with a gate of its OWN the mapper can't read ("■ If your Saga is completed, add 1 to the
+  // Wound roll as well", after a target-gated head) has two gates and one slot. Its own is the narrower (it
+  // comes on top of the head's), so it does not ride the head's toggle: it is an unread tier like a gate-less
+  // one (`ruleTrigger` on the pack path, held on datasheets). An "instead" tier keeps the rules above.
+  const ownGateUnread =
+    tier && !conjunct && !degradeGated && /^if\b/i.test(clause) && !/\binstead\b(?!\s+of\b)/i.test(clause) && !sg && !detectCondition(clause, gateCtx);
   const readCondition = degradeGated
     ? 'damaged'
     : conjunct && tier
       ? detectCondition(`${headText} ${clause}`, gateCtx) || prev.condition || nameCondition || null
-      : detectCondition(clause, gateCtx) || (tier ? prev.condition : null) || (lead ? lead.condition : null) || nameCondition || null;
+      : detectCondition(clause, gateCtx) || (tier && !ownGateUnread ? prev.condition : null) || (lead && !ownGateUnread ? lead.condition : null) || nameCondition || null;
   // A tier the one condition slot can't tell apart from its head (2026-10-03, review of the pack sentence
   // split) is UNRESOLVED, so it is dropped (pack rules) or held (datasheets) like any gate-less tier:
   //   - an "instead" tier on the head's own gate, read or inherited. Kill Shot's "re-roll a Wound roll of 1
@@ -1042,7 +1061,14 @@ function mapClause(
       // A weapon or attack qualifier the engine can't express ("Psychic weapons", "a Psychic Attack",
       // "Torrent weapons", "Plasma weapon profiles", "this unit's Boltgun weapons") would apply the buff
       // to every weapon (2026-10-03).
-      weaponQualified(clause)) ||
+      weaponQualified(clause) ||
+      // Mapper 5 (2026-10-04): trigger shapes that still read as always-on. See their definitions below.
+      (source !== 'stratagem' && DURATION_RE.test(stratagemEffectText(clause)) && !SELECTED_DURATION_RE.test(clause)) ||
+      COUNT_TRIGGER_RE.test(clause) ||
+      BATTLE_ROUND_RE.test(clause) ||
+      TALLY_ROW_RE.test(clause) ||
+      ZONE_RE.test(clause) ||
+      DESIGNATED_TARGET_RE.test(clause)) ||
     // A bulleted item takes its lead-in's trigger ("When your unit uses the Dark Pacts ability, your unit's
     // ranged attacks have: ▪ [LETHAL HITS] . ▪ [SUSTAINED HITS 1] .").
     (!condition && !!lead?.suspect);
@@ -1098,6 +1124,36 @@ const UNRESOLVED_GATE_WORDS_RE =
 // "Each time this unit is selected to shoot / fight" is the ordinary activation and is not matched.
 const EVENT_TRIGGER_RE =
   /\bselected\s+to\s+(?:make\s+an?\s+[^.,;]{0,40}?\bmove\b|advance\b|fall\s*-?\s*back\b|disembark\b)|\bin\s+(?:a|any|the)\s+turn\b|\buses?\s+(?:its|the|their|this|that|your|an?)\b[^.,;]{0,40}?\b(?:abilit(?:y|ies)|stratagems?)\b|\bdisembark(?:s|ed)?\b/i;
+
+// Mapper 5 (2026-10-04, the always-on sweep): trigger shapes the clause check above did not read, each found
+// applying on every attack in the pinned catalogue or the faction packs.
+//   - A DURATION ("until the end of the phase / turn / your next Fight phase") outside a stratagem: something
+//     started it ("Each time a unit … is set up as Reinforcements, until the end of your next Fight phase, …",
+//     "… makes a Dark Pact, until the end of the phase, …"). A stratagem's own duration is met when it is used.
+//     "Each time this unit is selected to shoot / fight, until the end of the phase" is every activation.
+const DURATION_RE = /\buntil\s+the\s+end\s+of\s+(?:the|that|this|your(?:\s+next)?)\s+(?:[a-z]+\s+)?(?:phase|turn|battle\s+round)\b/i;
+const SELECTED_DURATION_RE = /^each\s+time\b[^,]*\bselected\s+to\s+(?:shoot|fight)\b[^,]*,\s*until\b/i;
+//   - A COUNT that scales the bonus ("For each Miracle dice just discarded, … add 1 to the Attacks").
+const COUNT_TRIGGER_RE = /^for\s+(?:each|every)\b/i;
+//   - A BATTLE-ROUND window ("During the third, fourth and fifth battle rounds", "From the third battle round
+//     onwards").
+const BATTLE_ROUND_RE = /\b(?:during|in|from)\s+the\s+(?:first|second|third|fourth|fifth)\b[^.;]{0,40}?\bbattle\s+rounds?\b|\bbattle\s+rounds?\s+onwards\b/i;
+//   - A row of a tally table ("… depending on how many Pact points you have gained: 1+: … 3+: …").
+const TALLY_ROW_RE = /^\d+\+\s*:/;
+//   - A rule-defined or board ZONE ("models in your unit that are wholly within your Hallowed Ground", "within
+//     your deployment zone").
+const ZONE_RE = /\b(?:wholly\s+)?within\s+(?:your|your\s+army'?s|your\s+opponent'?s)\s+(?!army\b)\S/i;
+//   - A DESIGNATED target ("each time your unit makes an attack that targets your Vendetta target"). Oath of
+//     Moment's own rule reads its designation by name (targetMarked), so it never reaches this check.
+const DESIGNATED_TARGET_RE = /\btargets?\s+your\s+(?:army'?s\s+)?[^,.;]{1,40}?\btarget\b/i;
+// A colon-less lead-in (see mapRuleText): a trigger opener.
+const DANGLING_LEAD_RE = /^(?:each\s+time|when(?:ever)?|while|if|after)\b/i;
+// A choice between named abilities in a stratagem ("Select [LETHAL HITS] or [SUSTAINED HITS 1]", "Select the
+// [SUSTAINED HITS 1] or [LETHAL HITS] ability"): every option is emitted, so none applies unattended. Not
+// when the rule also lets the player take them all ("You can instead select the [SUSTAINED HITS 1], [LETHAL
+// HITS] and [HAZARDOUS] abilities"): all of them together is a legal reading, so they stay applied.
+const KEYWORD_CHOICE_RE = /\bselect\s+(?:the\s+)?\[[^\]]+\](?:\s*,\s*\[[^\]]+\])*\s*,?\s*or\s+(?:the\s+)?\[/i;
+const ALL_OPTIONS_RE = /\binstead\s+select\s+(?:the\s+)?\[[^\]]+\](?:\s*,\s*\[[^\]]+\])*\s*,?\s*and\s+(?:the\s+)?\[/i;
 // A pack-PDF stratagem's WHEN / TARGET text, which sits in the same clause as its EFFECT (see the
 // SENTENCE note above splitClauses): everything from the first "WHEN:" or "TARGET:" up to "EFFECT:" (or the
 // clause end).
@@ -1258,11 +1314,15 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   // Each "instead" clause with the head clause it follows (both effect lists), for the stacking check.
   const insteadClauses = [];
   let headEffects = [];
+  // Inside an unmarked list (see LIST_ITEM): every clause is an item of the open lead-in.
+  let unmarkedList = false;
   for (const [ci, clause] of clauses.entries()) {
     const conjunct = clause.startsWith(CONJUNCT);
     const sentence = clause.startsWith(SENTENCE);
-    const bullet = clause.startsWith(BULLET);
-    let body = conjunct || sentence || bullet ? clause.slice(1).trim() : clause;
+    const listItem = clause.startsWith(LIST_ITEM);
+    if (listItem) unmarkedList = true;
+    let bullet = clause.startsWith(BULLET) || listItem || (unmarkedList && !conjunct && !sentence);
+    let body = conjunct || sentence || listItem || clause.startsWith(BULLET) ? clause.slice(1).trim() : clause;
     if (headingRe) {
       let opener = null;
       let cutAt = -1;
@@ -1284,6 +1344,10 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
         prev = null; // a new sub-rule is never a tier of the previous one
         leadIn = null;
         headEffects = [];
+        if (!listItem && !clause.startsWith(BULLET)) {
+          unmarkedList = false; // a new sub-rule closes an unmarked list
+          bullet = false;
+        }
       }
       if (!body) continue;
     }
@@ -1320,8 +1384,13 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
     // ranged attacks have [ASSAULT] …"), and its record already carries what it read from its own lead-in.
     // Flat text can't show nesting, so the inner list's lead-in stays open until a clause that is not a
     // bulleted item: an outer item after an inner list reads the inner lead-in (the safe direction).
+    // A trigger sentence that reads no modifier and stops before its consequence ("Each time a model … makes
+    // a melee attack that targets an enemy unit, if that enemy unit is …, or if … ■ Add 1 to the Hit roll",
+    // a catalogue text missing the lead-in's colon) is the lead-in of the bulleted items after it (mapper 5):
+    // read as a sentence of its own it left its first item applying on every attack. Only a trigger opener
+    // counts, so a flavour sentence before a list never gates it.
     if (/:\s*$/.test(body)) leadIn = r.prev;
-    else if (!bullet) leadIn = null;
+    else if (!bullet) leadIn = !r.effects.length && DANGLING_LEAD_RE.test(body) ? r.prev : null;
   }
 
   // Rule-internal keyword grants (round-3 review): a scope naming a keyword this rule itself
@@ -1379,7 +1448,7 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   // one enemy unit" held its Feel No Pain 5+, and Surprise Assault's Tunnel Marker distances its re-roll of
   // hit rolls of 1. The heal words moved to the clause check (mapClause). A choice between listed options
   // still flags every option wherever it sits (the "▪ Or:" bullet follows its first option).
-  const choice = CHOICE_RE.test(mapText);
+  const choice = CHOICE_RE.test(mapText) || (KEYWORD_CHOICE_RE.test(mapText) && !ALL_OPTIONS_RE.test(mapText));
   for (const e of effects) if (!e.condition && (choice || clauseOf.get(e) >= activationAt)) e._suspect = true;
 
   // Without a review surface (every caller but captureUnitAbilities: pack rules, .rosz roster rules,

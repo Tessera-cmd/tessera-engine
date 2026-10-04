@@ -2148,8 +2148,11 @@ describe('unread-trigger precision (mapper version 3, 2026-10-03)', () => {
   });
 
   it('an excluded class, the ordinary melee / ranged weapons and a unit name are not qualifiers', () => {
+    // A stratagem's effect: its "until the end of the phase" is met when it is used (mapper 5 gates a
+    // duration outside a stratagem, see the mapper-5 block).
+    const strat = 'Until the end of the phase, ranged weapons equipped by models in your unit (excluding Torrent weapons) have the [LETHAL HITS] ability.';
+    expect(mapRuleText(strat, { name: 'X', source: 'stratagem' }).effects.map((e) => e.condition)).toEqual([null]);
     for (const text of [
-      'Until the end of the phase, ranged weapons equipped by models in your unit (excluding Torrent weapons) have the [LETHAL HITS] ability.',
       'Ranged weapons equipped by models in this unit have the [LETHAL HITS] ability.',
       'Each time a model in a HEAVY WEAPONS SQUAD unit from your army makes an attack, add 1 to the Hit roll.',
     ]) {
@@ -2362,5 +2365,74 @@ describe('mapper version 4: unread tiers behind the rule-trigger toggle, marked 
     // No marked name with a lowercase word, no change: a one-line rule keeps no source text.
     const plain = planPackRules({ faction: 'F', detachments: [{ name: 'D', rule: { name: 'R', text: 'Each time a ^^Cabal^^ model makes an attack, add 1 to the Hit roll.' } }] });
     expect(plain.detachments[0].rule.sourceText).toBeUndefined();
+  });
+});
+
+// Mapper 5 (2026-10-04): the always-on sweep. Every always-on effect across the pinned catalogue, its
+// datasheet abilities and the faction packs was classified by the trigger words of its own clause and
+// lead-in; these are the shapes that still applied on every attack, each with the variant that must stay
+// always-on.
+describe('mapper version 5: triggers that still read as always-on (2026-10-04)', () => {
+  const all = (text, source) => mapRuleText(text, { name: 'X', source }).effects;
+  const cap = (text) => captureUnitAbilities([{ name: 'X', text }]);
+  const conds = (text, source) => all(text, source).map((e) => e.condition);
+
+  it('a "■" item reads its lead-in, as a "▪" item does', () => {
+    const text = 'Each time a model from your army makes an attack that targets the closest eligible target: ■ Re-roll a Wound roll of 1.';
+    expect(conds(text)).toEqual(['targetCondition']); // the lead-in's target gate (was always-on)
+    // A plain lead-in still gives its items unconditionally.
+    expect(conds('Ranged weapons equipped by models in this unit have: ■ [LETHAL HITS]. ■ [IGNORES COVER].')).toEqual([null, null]);
+  });
+
+  it('a trigger sentence with no colon before its items is their lead-in, a flavour sentence is not', () => {
+    const r = all('Each time a model in an X unit from your army makes a melee attack that targets an enemy unit, if that enemy unit is Battle-shocked, or if your unit is larger. ■ Add 1 to the Hit roll.');
+    expect(r).toHaveLength(1);
+    expect(r[0].condition).toBeTruthy(); // was always-on, and any-phase
+    expect(r[0].phase).toBe('fight');
+    // Breaking variant: prose before the list (even with "while" in it) does not gate a genuine always-on item.
+    const f = all('The warriors grow fiercer while the hunt goes on. ■ Add 2 to the Strength characteristic of weapons equipped by X models from your army.');
+    expect(f.map((e) => [e.condition, e.mods.strengthBonus])).toEqual([[null, 2]]);
+  });
+
+  it('an "as well" tier with an unread gate of its own does not ride the head\'s read gate', () => {
+    const r = all('Each time a model from your army makes a melee attack that targets an enemy unit that is below its Starting Strength: ■ Add 1 to the Hit roll. ■ If your Vow is fulfilled, add 1 to the Wound roll as well.');
+    expect(r.find((e) => e.mods.hitModifier === 1).condition).toBe('targetCondition');
+    expect(r.find((e) => e.mods.woundModifier === 1).condition).toBe('ruleTrigger');
+  });
+
+  it("a duration outside a stratagem has a trigger; a stratagem's own duration and an activation do not", () => {
+    const text = 'Each time a unit from your army is set up on the battlefield as Reinforcements, until the end of the turn, weapons equipped by models in that unit have the [LETHAL HITS] ability.';
+    expect(conds(text)).toEqual(['ruleTrigger']);
+    expect(cap(text).every((e) => e.captured)).toBe(true);
+    expect(conds('Until the end of the phase, weapons equipped by models in your unit have the [LETHAL HITS] ability.', 'stratagem')).toEqual([null]);
+    expect(conds('Each time this unit is selected to shoot, until the end of the phase, ranged weapons equipped by models in this unit have the [LETHAL HITS] ability.')).toEqual([null]);
+  });
+
+  it('a duration lead-in with a mid-sentence colon gates every item after it', () => {
+    const r = all('Each time a unit from your army disembarks from a Transport, until the end of the turn: Ranged weapons equipped by models in that unit have the [IGNORES COVER] ability. Melee weapons equipped by models in that unit have the [LANCE] ability.');
+    expect(r.map((e) => e.condition)).toEqual(['ruleTrigger', 'ruleTrigger']);
+  });
+
+  it('a count, a battle-round window and a tally row are triggers', () => {
+    expect(conds('For each Command point spent, add 1 to the Attacks characteristic of melee weapons equipped by the bearer.')).toEqual(['ruleTrigger']);
+    expect(conds('During the second, third and fourth battle rounds, ranged weapons equipped by X models from your army have the [SUSTAINED HITS 1] ability.')).toEqual(['ruleTrigger']);
+    const tier = all('Each time the bearer makes a ranged attack, add 1 to the Hit roll. From the third battle round onwards, add 1 to the Wound roll as well.');
+    expect(tier.find((e) => e.mods.hitModifier === 1).condition).toBeNull();
+    expect(tier.find((e) => e.mods.woundModifier === 1).condition).toBe('ruleTrigger');
+    const tally = all('X units gain a bonus depending on how many tokens you have, as shown below. 1+: Each time a model in this unit makes an attack, re-roll a Hit roll of 1. 3+: Each time a model in this unit makes an attack, re-roll a Wound roll of 1.');
+    expect(tally.map((e) => e.condition)).toEqual(['ruleTrigger', 'ruleTrigger']);
+  });
+
+  it('a zone and a designated target are triggers, in a stratagem too; Oath of Moment keeps its own gate', () => {
+    expect(conds('EFFECT: Until the end of the phase, models in your unit that are wholly within your deployment zone have a 4+ invulnerable save.', 'stratagem')).toEqual(['ruleTrigger']);
+    expect(conds('EFFECT: Until the end of the phase, each time your unit makes an attack that targets your Grudge target, add 1 to the Wound roll.', 'stratagem')).toEqual(['ruleTrigger']);
+    expect(mapRuleText('Each time a model with this ability makes an attack that targets your Oath of Moment target, add 1 to the Hit roll.', { name: 'Oath of Moment' }).effects.map((e) => e.condition)).toEqual(['targetMarked']);
+  });
+
+  it('a stratagem choice between named abilities gates every option, unless all of them may be taken together', () => {
+    const choice = 'EFFECT: Select [LETHAL HITS] or [SUSTAINED HITS 1]. Until the end of the phase, weapons equipped by models in your unit have the selected ability.';
+    expect(conds(choice, 'stratagem')).toEqual(['ruleTrigger', 'ruleTrigger']);
+    const both = 'EFFECT: Select the [SUSTAINED HITS 1] or [LETHAL HITS] ability. Until the end of the phase, ranged weapons equipped by models in your unit have the selected ability. You can instead select the [SUSTAINED HITS 1], [LETHAL HITS] and [HAZARDOUS] abilities to apply to those weapons.';
+    expect(conds(both, 'stratagem').every((c) => c === null)).toBe(true);
   });
 });
