@@ -2563,3 +2563,42 @@ describe('the leader gate tags (mapper 6)', () => {
     expect(abil.every((e) => e.leaderOnly === true)).toBe(true);
   });
 });
+
+describe('mapper version 7: a battle-round tier and a duration phase word (2026-10-05)', () => {
+  const all = (text, source) => mapRuleText(text, { name: 'X', source }).effects;
+  const row = (r, key) => r.find((e) => e.mods[key] !== undefined);
+
+  it('BREAKING VARIANT: a battle-round "as well" tier reads its head\'s phase, behind its own toggle', () => {
+    const r = all('Each time the bearer makes a ranged attack, add 1 to the Hit roll. From the third battle round onwards, add 1 to the Wound roll as well.', 'enhancement');
+    expect([row(r, 'hitModifier').phase, row(r, 'hitModifier').condition]).toEqual(['shooting', null]);
+    // Was phase 'any': with the toggle on, the bonus reached the bearer's melee attacks too.
+    expect([row(r, 'woundModifier').phase, row(r, 'woundModifier').condition]).toEqual(['shooting', 'ruleTrigger']);
+    const m = all('Each time a model in this unit makes a melee attack, add 1 to the Hit roll. During the fourth and fifth battle rounds, add 1 to the Wound roll as well.');
+    expect(row(m, 'woundModifier').phase).toBe('fight');
+  });
+
+  it("BREAKING VARIANT: a battle-round tier never rides its head's read toggle", () => {
+    const r = all('Each time a model in this unit makes a melee attack, if that model made a Charge move this turn, add 1 to the Hit roll. From the second battle round onwards, add 1 to the Wound roll as well.');
+    expect(row(r, 'hitModifier').condition).toBe('onCharge');
+    expect([row(r, 'woundModifier').phase, row(r, 'woundModifier').condition]).toEqual(['fight', 'ruleTrigger']);
+    // Held, not applied, where there is a review surface.
+    const cap = captureUnitAbilities([{ name: 'X', text: 'Each time this model makes a ranged attack, add 1 to the Hit roll. From the third battle round onwards, add 1 to the Wound roll as well.' }]);
+    expect(cap.find((e) => e.mods.woundModifier === 1).captured).toBe(true);
+  });
+
+  it('a battle-round window that opens a rule of its own is not a tier', () => {
+    const r = all('Each time the bearer makes a melee attack, add 1 to the Hit roll. During the third battle round, ranged weapons equipped by models in this unit have the [LETHAL HITS] ability.');
+    const k = r.find((e) => e.mods.grantKeywords);
+    expect([k.phase, k.condition]).toEqual(['shooting', 'ruleTrigger']);
+  });
+
+  it("BREAKING VARIANT: a duration's phase word does not set the phase of a clause that names the weapon type", () => {
+    const r = all("Each time this unit is set up on the battlefield as Reinforcements, until the end of your next Fight phase, ranged weapons equipped by models in this unit have the [LETHAL HITS] ability.", 'enhancement');
+    expect([r[0].phase, r[0].condition]).toEqual(['shooting', 'ruleTrigger']); // was 'fight': it never applied
+    const m = all('Each time this unit disembarks from a Transport, until the start of your next Shooting phase, melee weapons equipped by models in this unit have the [LANCE] ability.');
+    expect(m[0].phase).toBe('fight');
+    // A stratagem whose WHEN names one phase and whose duration names the other keeps the weapon type's phase.
+    const s = all('WHEN: Your Shooting phase. TARGET: One unit from your army. EFFECT: Until the end of your next Fight phase, melee weapons equipped by models in your unit have the [LETHAL HITS] ability.', 'stratagem');
+    expect(s.map((e) => e.phase)).toEqual(['fight']);
+  });
+});

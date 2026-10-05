@@ -50,7 +50,10 @@
 // 6 = 2.93.25: the leader gate. An effect stated under "while the bearer / this model is leading a unit" (or a
 //     later sentence of the same rule) is tagged `leaderOnly`, and one under "while a <PHRASE> model is leading
 //     this unit" `ledOnly: '<PHRASE>'`; a catalogue enhancement's structured buffs take its text's gate.
-export const MAPPER_VERSION = 6;
+// 7 = 2.93.28: a battle-round tier ("From the third battle round onwards, … as well") continues its head (its
+//     phase, never its toggle), and a duration's phase word ("until the end of your next Fight phase") no
+//     longer sets the phase of a clause that names the weapon type ("ranged weapons … have [LETHAL HITS]").
+export const MAPPER_VERSION = 7;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -225,7 +228,19 @@ const NUM = '(\\d+|one|two|three|four|five|six)';
 // to shoot or fight") is usable in either, so it is 'any' unless a melee or ranged weapon word pins it
 // (2026-10-03). The fight test used to win, so a pack stratagem (one clause, its full stops lost in the
 // PDF) stored 'fight' and its -1 to be hit never applied against shooting.
+// A DURATION that names a phase ("until the end of your next Fight phase", "until the start of your next
+// Shooting phase") says when the effect ENDS, not which attacks it covers (2.93.28): "…as Reinforcements,
+// until the end of your next Fight phase, ranged weapons equipped in the bearer's unit have [LETHAL HITS]"
+// stored 'fight' and never applied. When the rest of the clause names the weapon type, the weapon type wins.
+// A duration with no weapon type beside it keeps the reading below (deliberately unchanged).
+const DURATION_PHASE_RE = /\buntil\s+the\s+(?:start|end)\s+of\s+(?:the|that|this|your|your\s+opponent's)(?:\s+next)?\s+(?:fight|shooting)\s+phase\b/gi;
 function detectPhase(t) {
+  const rest = t.replace(DURATION_PHASE_RE, ' ');
+  if (rest !== t) {
+    const melee = /\b(melee weapons?|melee attacks?|made with melee)\b/i.test(rest);
+    const ranged = /\b(ranged weapons?|ranged attacks?|made with ranged)\b/i.test(rest);
+    if (melee !== ranged) return melee ? 'fight' : 'shooting';
+  }
   const either = /\b(?:shoot(?:ing)?\s+or\s+(?:the\s+)?fight|fight\s+or\s+(?:the\s+)?shoot(?:ing)?)\b/i.test(t);
   if (either || (/\b(fight phase|selected to fight)\b/i.test(t) && /\b(shooting phase|selected to shoot)\b/i.test(t))) {
     const melee = /\b(melee weapons?|melee attacks?|made with melee)\b/i.test(t);
@@ -922,7 +937,7 @@ function mapClause(
   //     ability-level gate (once per battle / Waaagh!) will still cover it;
   //   - a tier of a DROPPED clause is dropped with it ("…wholly within 6" of the bearer, add 2 to the
   //     Attacks… If the bearer's unit has achieved one or more Boasts, add 3 … instead" — Hordeslayer).
-  const tier = !!prev && (conjunct || TIER_CONT_RE.test(clause));
+  const tier = !!prev && (conjunct || TIER_CONT_RE.test(clause) || ROUND_TIER_RE.test(clause));
   // A bulleted item reads its subject and side through its lead-in ("Each time an attack targets your
   // unit: ▪ subtract 1 from the Hit roll"), as a tier does through its head.
   const headText = tier ? prev.text || '' : lead ? lead.text || '' : '';
@@ -968,8 +983,16 @@ function mapClause(
   // Wound roll as well", after a target-gated head) has two gates and one slot. Its own is the narrower (it
   // comes on top of the head's), so it does not ride the head's toggle: it is an unread tier like a gate-less
   // one (`ruleTrigger` on the pack path, held on datasheets). An "instead" tier keeps the rules above.
+  // A battle-round tier ("From the third battle round onwards, add 1 to the Wound roll as well") is the same
+  // shape: its window is a gate of its own the mapper can't read (mapper 7).
   const ownGateUnread =
-    tier && !conjunct && !degradeGated && /^if\b/i.test(clause) && !/\binstead\b(?!\s+of\b)/i.test(clause) && !sg && !detectCondition(clause, gateCtx);
+    tier &&
+    !conjunct &&
+    !degradeGated &&
+    (/^if\b/i.test(clause) || ROUND_TIER_RE.test(clause)) &&
+    !/\binstead\b(?!\s+of\b)/i.test(clause) &&
+    !sg &&
+    !detectCondition(clause, gateCtx);
   const readCondition = degradeGated
     ? 'damaged'
     : conjunct && tier
@@ -1279,7 +1302,13 @@ const INSTEAD_DELTA = new WeakSet();
 // clause that adds to or replaces the previous modifier ("as well" / "instead"), or restates the
 // previous predicate one tier further ("If that target is also Below Half-strength"). A bare "also"
 // elsewhere ("If the bearer is a CHARACTER, models in its unit also have…") is a new rule, not a tier.
+// A clause OPENED by a battle-round window that adds to or replaces the previous modifier ("Each time the bearer
+// makes a ranged attack, add 1 to the Hit roll. From the third battle round onwards, add 1 to the Wound roll as
+// well") is a tier too (mapper 7): it is the same ranged attack, so it reads the head's phase. Read as a rule of
+// its own it stored phase 'any' and its toggle gave the bonus to melee attacks. Its window stays an unread gate
+// (`ownGateUnread`), so an "as well" tier never rides the head's toggle.
 const TIER_CONT_RE = /^if\b[^.]*\b(?:as well|instead)\b|^if\b[^,.]*\b(?:is|are)\s+also\s+(?:below|at\s+or\s+below)\b/i;
+const ROUND_TIER_RE = /^(?:during|in|from)\s+the\s+(?:first|second|third|fourth|fifth)\b[^.;]{0,40}?\bbattle\s+rounds?\b[^.]*\b(?:as well|instead)\b/i;
 
 /**
  * Map one rule's text into Effects + a classification. The text is mapped CLAUSE BY CLAUSE, and
