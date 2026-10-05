@@ -10,7 +10,7 @@
 // against 1-wound models (its leave-one-out delta is ~0): it generalises to ANY rule
 // whose effect is wasted in the current matchup, not just hand-coded special cases.
 
-import { collectEffects, resolveEffects, applyToSim, filterEffectsForUnit, CONDITIONS } from './effects.js';
+import { collectEffects, resolveEffects, applyToSim, filterEffectsForUnit, filterLeaderGated, leaderGateMet, CONDITIONS } from './effects.js';
 import { ARMY_RULES_BY_ID, detachmentForSelection } from '../data/rules.js';
 
 // Absolute deltas below which a toggle is "low impact" (tunable). Matches the user's
@@ -22,6 +22,27 @@ export function classifyLowImpact(impact, tol = LOW_IMPACT) {
 }
 
 const CONDITION_LABEL = Object.fromEntries(CONDITIONS.map((c) => [c.id, c.label]));
+// The `waitingOn` label of a ticked rule whose effects all need a character leading the unit (none attached).
+export const LEADER_WAITING = 'A character leading the unit';
+
+// One side's effects for a run: the unit's gathered abilities plus its rules selection, whose
+// "while … leading" effects need a character attached to the unit (effects.js leaderGateMet,
+// 2026-10-05). `attached` = that unit's attached characters; absent = nobody attached, so a
+// leader-gated rule effect is dropped. Same order as one collectEffects call.
+function sideEffects(abilities, sel, attached) {
+  return [
+    ...collectEffects({ abilities }),
+    ...filterLeaderGated(
+      collectEffects({
+        armyRule: ARMY_RULES_BY_ID[sel.armyRuleId],
+        detachment: detachmentForSelection(sel),
+        stratagems: new Set(sel.stratagems),
+        enhancements: new Set(sel.enhancements),
+      }),
+      attached,
+    ),
+  ];
+}
 
 // Resolve one full selection (attacker rules + defender rules + conditions) into the
 // engine's {options, defender}, exactly as the live run does. `baseOptions` defaults to the
@@ -33,24 +54,12 @@ function resolveSelection(ctx, atkSel, defSel, conditions, baseOptions = ctx.bas
   // Scope-gate: a model-type-scoped army/detachment effect is dropped for a side whose unit lacks
   // that keyword. ctx.attackerKeywords/defenderKeywords are optional; omitted == no gating.
   const atkEffects = filterEffectsForUnit(
-    collectEffects({
-      abilities: ctx.attackerAbilities,
-      armyRule: ARMY_RULES_BY_ID[atkSel.armyRuleId],
-      detachment: detachmentForSelection(atkSel),
-      stratagems: new Set(atkSel.stratagems),
-      enhancements: new Set(atkSel.enhancements),
-    }).filter(offensive),
+    sideEffects(ctx.attackerAbilities, atkSel, ctx.attackerAttached).filter(offensive),
     ctx.attackerKeywords,
     ctx.attackerFaction,
   );
   const defEffects = filterEffectsForUnit(
-    collectEffects({
-      abilities: ctx.defenderAbilities,
-      armyRule: ARMY_RULES_BY_ID[defSel.armyRuleId],
-      detachment: detachmentForSelection(defSel),
-      stratagems: new Set(defSel.stratagems),
-      enhancements: new Set(defSel.enhancements),
-    }).filter(defensive),
+    sideEffects(ctx.defenderAbilities, defSel, ctx.defenderAttached).filter(defensive),
     ctx.defenderKeywords,
     ctx.defenderFaction,
   );
@@ -93,7 +102,8 @@ const MAX_VARIANTS = 16;
 
 /**
  * @param ctx { attackerAbilities, defenderAbilities, atkRules, defRules, conditions,
- *              baseOptions, baseDefender, phase }
+ *              baseOptions, baseDefender, phase,
+ *              attackerAttached?, defenderAttached? }  (each side's attached characters, for the leader gate)
  * @returns { full: {options, defender}, variants: [{ key, label, kind, side, options, defender, cp? }] }
  *          (`cp`: a stratagem variant's integer Command-point cost, only when the stratagem has one)
  */
@@ -116,8 +126,13 @@ export function buildImpactPlan(ctx) {
       keywords,
       faction,
     );
-    const off = live.map((e) => (e.condition && e.condition !== 'always' && !conditions.includes(e.condition) ? e.condition : null));
-    if (live.length && off.every(Boolean)) variants[variants.length - 1].waitingOn = [...new Set(off)].map((c) => CONDITION_LABEL[c] || c);
+    // A rule effect that works only while a character leads the unit (leaderGateMet) waits on an attached
+    // character when none that qualifies is (2026-10-05): it names LEADER_WAITING, not "not worth the CP".
+    const attached = side === 'defender' ? ctx.defenderAttached : ctx.attackerAttached;
+    const off = live.map((e) =>
+      !leaderGateMet(e, attached) ? LEADER_WAITING : e.condition && e.condition !== 'always' && !conditions.includes(e.condition) ? CONDITION_LABEL[e.condition] || e.condition : null,
+    );
+    if (live.length && off.every(Boolean)) variants[variants.length - 1].waitingOn = [...new Set(off)];
   };
 
   // For each side, drop each active army rule / stratagem / enhancement in turn.

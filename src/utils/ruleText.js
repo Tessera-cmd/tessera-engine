@@ -47,7 +47,10 @@
 // 5 = 2.93.23: the always-on sweep. A duration outside a stratagem, a "for each" count, a battle-round window,
 //     a tally-table row, a zone, a designated target and a stratagem's "select [A] or [B]" gate their effects;
 //     "■" is a bullet; a colon-less trigger sentence and a duration's mid-sentence colon open a list.
-export const MAPPER_VERSION = 5;
+// 6 = 2.93.25: the leader gate. An effect stated under "while the bearer / this model is leading a unit" (or a
+//     later sentence of the same rule) is tagged `leaderOnly`, and one under "while a <PHRASE> model is leading
+//     this unit" `ledOnly: '<PHRASE>'`; a catalogue enhancement's structured buffs take its text's gate.
+export const MAPPER_VERSION = 6;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -1195,6 +1198,39 @@ function weaponQualified(clause) {
   return WEAPON_QUALIFIER_RE.test(t) || NAMED_WEAPON_RE.test(t);
 }
 
+// The LEADER GATE (mapper 6, 2026-10-05). Core Rules 19.01 / 19.04: a leader or support unit "leads" a bodyguard
+// unit to form an attached unit, and a rule worded "while the bearer is leading a unit" does nothing for a
+// character that leads nothing. Two shapes, read anywhere in a clause:
+//   - LEADER_GATE_RE: "While / When / If this model / this unit / the bearer is leading a(n) [<phrase>] unit", and
+//     the subjectless "while leading that unit". Tags `leaderOnly: true`; the bodyguard phrase between "a(n)"
+//     and "unit" (POXWALKERS, BLOOD CLAWS…) is recorded as `leaderOf`, unread by any gate (yet).
+//   - LED_GATE_RE: "While / When a(n) / one or more <PHRASE> model(s) is / are leading this / that unit" (a
+//     bodyguard rule). Tags `ledOnly: '<PHRASE>'` (upper-cased; true when no phrase): it needs an attached
+//     character carrying those keywords.
+// Flavour prose ("leading by inspirational example", "Leading the charge", "any unit they are leading") has no
+// such gate shape and is never read as one. The tag is independent of the one `condition` slot, and the sim
+// applies it where a side's effects are gathered for a run (engine/effects.js leaderGateMet).
+const LEADER_GATE_RE =
+  /\b(?:while|when|if)\s+(?:(?:this\s+(?:model|unit)|the\s+bearer)\s+is\s+leading\s+(?:a|an)\s+(?:(?!units?\b)([^,.;:]{1,60}?)\s+)?units?\b|leading\s+(?:this|that|a|an)\s+unit\b)/i;
+const LED_GATE_RE = /\b(?:while|when)\s+(?:a|an|one\s+or\s+more)\s+([^,.;:]{0,60}?)\s*\bmodels?\s+(?:is|are)\s+leading\s+(?:this|that)\s+unit\b/i;
+// The leader-gate tags a piece of rule text carries ({ leaderOnly, leaderOf, ledOnly }), or null.
+function leaderGateOf(text) {
+  const t = String(text || '');
+  const tag = {};
+  const lead = t.match(LEADER_GATE_RE);
+  if (lead) {
+    tag.leaderOnly = true;
+    const of = String(lead[1] || '').trim();
+    if (of) tag.leaderOf = of.toUpperCase();
+  }
+  const led = t.match(LED_GATE_RE);
+  if (led) {
+    const phrase = String(led[1] || '').trim().toUpperCase();
+    tag.ledOnly = phrase || true;
+  }
+  return Object.keys(tag).length ? tag : null;
+}
+
 // The ability-level gates mapRuleText applies to every conditionless effect (see there).
 const ABILITY_ONCE_RE = /\bonce per (?:battle|turn|game)\b/i;
 const ABILITY_WAAAGH_RE = /\bwaaa?gh!?\b[^.]{0,30}?\bactive\b|\bis active for your army\b/i;
@@ -1316,6 +1352,12 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   let headEffects = [];
   // Inside an unmarked list (see LIST_ITEM): every clause is an item of the open lead-in.
   let unmarkedList = false;
+  // The leader gate in force (see LEADER_GATE_RE): set by the clause that states it and carried to every LATER
+  // clause of the same sub-rule, because GW states the trigger first and the later sentences say "that unit"
+  // ("While the bearer is leading a unit, … FNP 6+. While that unit is Battle-shocked, … FNP 4+ instead"). Never
+  // an EARLIER clause. A later sentence that is in fact independent is over-tagged, which only under-applies it
+  // (the safe direction). A new named sub-rule starts clean, like the tier and lead-in reading.
+  let leadTag = null;
   for (const [ci, clause] of clauses.entries()) {
     const conjunct = clause.startsWith(CONJUNCT);
     const sentence = clause.startsWith(SENTENCE);
@@ -1344,6 +1386,7 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
         prev = null; // a new sub-rule is never a tier of the previous one
         leadIn = null;
         headEffects = [];
+        leadTag = null;
         if (!listItem && !clause.startsWith(BULLET)) {
           unmarkedList = false; // a new sub-rule closes an unmarked list
           bullet = false;
@@ -1352,6 +1395,8 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
       if (!body) continue;
     }
     const conjunctHead = !!clauses[ci + 1]?.startsWith(CONJUNCT);
+    const gate = leaderGateOf(body);
+    if (gate) leadTag = { ...(leadTag || {}), ...gate };
     const r = mapClause(body, { name: effName, source, nameCondition, inherited: carry, degradeAbility, prev, conjunct, conjunctHead, abilityGated, holdUnresolved, lead: bullet ? leadIn : null, sentence });
     // An "instead" clause ("While the bearer's unit is Righteous, add 2 to the Attacks … instead") replaces
     // the previous clause's modifier of the same kind: pair them so the tier can be stored as the delta.
@@ -1373,6 +1418,7 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
       }
     }
     for (const e of r.effects) clauseOf.set(e, ci);
+    if (leadTag) for (const e of r.effects) Object.assign(e, leadTag);
     effects.push(...r.effects);
     matched.push(...r.matched);
     if (activationAt === Infinity && ACTIVATION_RE.test(body.replace(TARGET_RANGE_RE, 'targets a unit'))) activationAt = ci;
@@ -1973,6 +2019,12 @@ function structuredCoveredKeys(mods) {
 function applyStructuredMods(plan, rawMods) {
   const structured = modsToEffects(rawMods, plan.name);
   if (!structured.length) return plan;
+  // A structured buff has no clause of its own, so it takes the leader gate stated ANYWHERE in the
+  // enhancement's text (mapper 6): "While the bearer is leading a unit, … [SUSTAINED HITS 1]" carries the same
+  // keyword as a catalogue modifier, and that copy applied with no character attached. Over-tagging a buff the
+  // text states before its gate only under-applies it.
+  const gate = leaderGateOf(keywordCase(plan.text || ''));
+  if (gate) for (const e of structured) Object.assign(e, gate);
   const covered = structuredCoveredKeys(rawMods);
   const prose = (plan.effects || [])
     .map((e) => {

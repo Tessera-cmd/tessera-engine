@@ -17,7 +17,46 @@ import {
   strongerReroll,
   effectAppliesToUnit,
   filterEffectsForUnit,
+  leaderGateMet,
+  filterLeaderGated,
 } from './effects.js';
+
+// ---- the leader gate (2026-10-05) ------------------------------------------
+// Core Rules 19.01 / 19.04: a "while leading" rule needs the character to be leading (attached to) the unit.
+describe('leaderGateMet / filterLeaderGated', () => {
+  const plain = { name: 'p', mods: { hitModifier: 1 } };
+  const leader = { name: 'l', mods: { hitModifier: 1 }, leaderOnly: true };
+  const ledAny = { name: 'a', mods: { hitModifier: 1 }, ledOnly: true };
+  const ledPhrase = { name: 'n', mods: { hitModifier: 1 }, ledOnly: 'FOO CHARACTER' };
+  const fooChar = { name: 'Lord', keywords: ['CHARACTER', 'INFANTRY', 'FACTION: FOO'] };
+  const barChar = { name: 'Chief', keywords: ['CHARACTER', 'INFANTRY', 'FACTION: BAR'] };
+
+  it('an untagged effect always passes, attached or not', () => {
+    expect(leaderGateMet(plain, undefined)).toBe(true);
+    expect(leaderGateMet(plain, [])).toBe(true);
+    expect(leaderGateMet(plain, [fooChar])).toBe(true);
+  });
+  it('BREAKING VARIANT: a leaderOnly effect needs an attached character; nobody (null / undefined / []) fails', () => {
+    for (const none of [undefined, null, [], [null]]) expect(leaderGateMet(leader, none)).toBe(false);
+    expect(leaderGateMet(leader, [barChar])).toBe(true);
+  });
+  it('a ledOnly phrase needs an attached character carrying it; true needs any character', () => {
+    expect(leaderGateMet(ledPhrase, [barChar])).toBe(false);
+    expect(leaderGateMet(ledPhrase, [fooChar])).toBe(true);
+    expect(leaderGateMet(ledPhrase, [barChar, fooChar])).toBe(true);
+    expect(leaderGateMet(ledPhrase, [])).toBe(false);
+    expect(leaderGateMet(ledAny, [barChar])).toBe(true);
+    expect(leaderGateMet(ledAny, [])).toBe(false);
+    // the faction name backs up a character with no faction keyword, as a scope does
+    expect(leaderGateMet(ledPhrase, [{ name: 'X', keywords: ['CHARACTER'], faction: 'Foo' }])).toBe(true);
+  });
+  it('filterLeaderGated keeps order and drops only the unmet ones', () => {
+    expect(filterLeaderGated([plain, leader, ledPhrase], []).map((e) => e.name)).toEqual(['p']);
+    expect(filterLeaderGated([plain, leader, ledPhrase], [barChar]).map((e) => e.name)).toEqual(['p', 'l']);
+    expect(filterLeaderGated([plain, leader, ledPhrase], [fooChar]).map((e) => e.name)).toEqual(['p', 'l', 'n']);
+    expect(filterLeaderGated(undefined, [fooChar])).toEqual([]);
+  });
+});
 
 // ---- 1. pure resolver ------------------------------------------------------
 describe('effectAppliesToUnit — keyword-phrase scope (Session 17; phrases 2026-07-14)', () => {

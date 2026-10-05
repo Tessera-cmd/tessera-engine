@@ -2460,3 +2460,106 @@ describe('mapper version 5: triggers that still read as always-on (2026-10-04)',
     expect(conds(both, 'stratagem').every((c) => c === null)).toBe(true);
   });
 });
+
+// The leader gate (mapper 6, 2026-10-05). Core Rules 19.01 / 19.04: an effect under "while the bearer is leading
+// a unit" does nothing for a character that leads nothing, and one under "while a <PHRASE> model is leading this
+// unit" needs an attached character carrying that phrase. The mapper TAGS such effects (the sim gates them,
+// engine/effects.js leaderGateMet); the tag never replaces the effect's own condition.
+describe('the leader gate tags (mapper 6)', () => {
+  const effs = (text, name = 'Rule') => mapRuleText(text, { name }).effects;
+  const tags = (e) => ({ leaderOnly: e.leaderOnly, ledOnly: e.ledOnly, leaderOf: e.leaderOf });
+
+  it('tags the while / when / if bearer and this-model forms leaderOnly', () => {
+    for (const t of [
+      'While the bearer is leading a unit, each time a model in that unit makes an attack, add 1 to the Hit roll.',
+      'When this model is leading a unit, melee weapons equipped by models in that unit have the [LANCE] ability.',
+      'Once per battle, if the bearer is leading a unit, the bearer can use this ability. If it does, until the end of the phase, add 1 to the Wound roll.',
+    ]) {
+      const e = effs(t);
+      expect(e.length).toBeGreaterThan(0);
+      expect(e.every((x) => x.leaderOnly === true)).toBe(true);
+      expect(e.every((x) => x.ledOnly === undefined)).toBe(true);
+    }
+  });
+
+  it('records the bodyguard a "leading a <PHRASE> unit" gate names, and none for "leading a unit"', () => {
+    const e = effs('Once per battle, if the bearer is leading a FOO WARRIORS unit, the bearer can use this ability. If it does, until the end of the phase, improve the Armour Penetration characteristic of melee weapons equipped by models in that unit by 1.');
+    expect(e.map(tags)).toEqual([{ leaderOnly: true, ledOnly: undefined, leaderOf: 'FOO WARRIORS' }]);
+    expect(effs('While the bearer is leading a unit, add 1 to the Hit roll.')[0].leaderOf).toBeUndefined();
+    expect(effs('While the bearer is leading a unit that is within range of an objective marker you control, models in that unit have a 4+ invulnerable save.')[0].leaderOf).toBeUndefined();
+  });
+
+  it('tags the bodyguard form ledOnly with the upper-cased keyword phrase', () => {
+    const e = effs('While a FOO CHARACTER model is leading this unit, each time a model in this unit makes an attack, add 1 to the Hit roll.');
+    expect(e.map(tags)).toEqual([{ leaderOnly: undefined, ledOnly: 'FOO CHARACTER', leaderOf: undefined }]);
+    const more = effs('For each FOO unit from your army, while one or more CHARACTER models are leading that unit, models in that unit have the Feel No Pain 5+ ability.');
+    expect(more.map((x) => x.ledOnly)).toEqual(['CHARACTER']);
+  });
+
+  it('BREAKING VARIANT: a LATER sentence of the same rule inherits the gate, with its own condition kept', () => {
+    const e = effs('While the bearer is leading a unit, models in that unit have the Feel No Pain 6+ ability. While that unit is Battle-shocked, models in that unit have the Feel No Pain 4+ ability instead.');
+    expect(e.map((x) => [x.mods.fnp, x.condition, x.leaderOnly])).toEqual([
+      [6, null, true],
+      [4, 'targetCondition', true],
+    ]);
+    // a subjectless "while leading that unit" in the later sentence keeps the earlier led-only phrase too
+    const both = effs('For each FOO unit from your army, while one or more CHARACTER models are leading that unit, you can re-roll Charge rolls made for it. If that model is a BAR, that model has the Feel No Pain 3+ ability while leading that unit.');
+    expect(both.map(tags)).toEqual([{ leaderOnly: true, ledOnly: 'CHARACTER', leaderOf: undefined }]);
+  });
+
+  it('BREAKING VARIANT: an EARLIER sentence is never tagged', () => {
+    const e = effs('Ranged weapons equipped by models in this unit have the [LETHAL HITS] ability. While the bearer is leading a unit, each time a model in that unit makes an attack, add 1 to the Hit roll.');
+    expect(e.map((x) => [Object.keys(x.mods)[0], x.leaderOnly])).toEqual([
+      ['grantKeywords', undefined],
+      ['hitModifier', true],
+    ]);
+  });
+
+  it('a conditioned clause keeps its condition and gains the tag', () => {
+    const e = effs('While the bearer is leading a unit, each time a model in that unit makes an attack, add 1 to the Hit roll if that unit is below its Starting Strength.');
+    expect(e.map((x) => [x.mods.hitModifier, x.condition, x.leaderOnly])).toEqual([[1, 'belowStrength', true]]);
+  });
+
+  it('BREAKING VARIANT: flavour prose about "leading" is not a gate', () => {
+    for (const t of [
+      'The prince fights at the front, leading by inspirational example. Melee weapons equipped by models in this unit have the [LANCE] ability.',
+      'Leading the charge, this unit strikes first. Melee weapons equipped by models in this unit have the [LANCE] ability.',
+      'The bearer, and models in any unit they are leading, have the Feel No Pain 6+ ability.',
+    ]) {
+      const e = effs(t);
+      expect(e.length).toBeGreaterThan(0);
+      expect(e.every((x) => x.leaderOnly === undefined && x.ledOnly === undefined)).toBe(true);
+    }
+  });
+
+  it('a new named sub-rule starts clean', () => {
+    const e = effs('Alpha Rite: While the bearer is leading a unit, add 1 to the Hit roll.\nBeta Rite: Models in this unit have the Feel No Pain 5+ ability.');
+    expect(e.map((x) => [x.name, x.leaderOnly])).toEqual([
+      ['Alpha Rite', true],
+      ['Beta Rite', undefined],
+    ]);
+  });
+
+  it("an enhancement's structured catalogue buffs take its text's gate", () => {
+    const plan = planPackRules({
+      faction: 'F',
+      armyRule: null,
+      detachments: [{ name: 'D', rule: null, stratagems: [], enhancements: [{
+        name: 'Gated Gift',
+        text: 'While the bearer is leading a unit, ranged weapons equipped by models in that unit have the [SUSTAINED HITS 1] ability.',
+        wargearMods: [{ target: 'ranged', op: 'addKw', keywords: ['SUSTAINED HITS 1'] }],
+      }] }],
+    });
+    const eff = plan.detachments[0].enhancements[0].effects;
+    expect(eff.length).toBe(2); // the prose grant and the structured one
+    expect(eff.every((e) => e.leaderOnly === true)).toBe(true);
+  });
+
+  it('the roster and datasheet paths tag too', () => {
+    const r = planRosterRules({ detachment: { name: 'D', rule: { name: 'R', text: 'While a FOO CHARACTER model is leading this unit, add 1 to the Hit roll.' } } });
+    const roster = r.detachment.rule.effects;
+    expect(roster.map((e) => e.ledOnly)).toEqual(['FOO CHARACTER']);
+    const abil = captureUnitAbilities([{ name: 'Aura', text: 'At the start of the battle, if this model is leading a unit, each time a model in that unit makes an attack, add 1 to the Hit roll.' }]);
+    expect(abil.every((e) => e.leaderOnly === true)).toBe(true);
+  });
+});

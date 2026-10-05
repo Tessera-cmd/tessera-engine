@@ -17,6 +17,7 @@
 //     side?:  'attacker' | 'defender',        // default 'attacker'
 //     phase?: 'shooting' | 'fight' | 'any',   // default 'any'
 //     condition?: <CONDITIONS id> | null,     // null/'always' = unconditional
+//     leaderOnly?: true, ledOnly?: true|string, // the leader gate (see leaderGateMet)
 //     mods: {
 //       // attacker-side (offensive):
 //       hitModifier?, woundModifier?,         // ints; the engine clamps each to +/-1
@@ -143,6 +144,34 @@ export function effectAppliesToUnit(effect, unitKeywords, unitFaction) {
 export function filterEffectsForUnit(effects, unitKeywords, unitFaction) {
   if (unitKeywords == null) return effects || [];
   return (effects || []).filter((e) => effectAppliesToUnit(e, unitKeywords, unitFaction));
+}
+
+// ---- the leader gate (2026-10-05) ---------------------------------------------
+// 11e Core Rules 19.01 / 19.04: a leader or support unit LEADS a bodyguard unit, forming an attached unit, so a
+// rule worded "while the bearer is leading a unit" does nothing for a character that leads nothing. The rule
+// mapper tags such an effect (utils/ruleText.js, mapper 6):
+//   leaderOnly: true            needs at least one character attached to the unit being simulated;
+//   ledOnly: true | '<PHRASE>'  needs an attached character (carrying the keyword phrase, when one is given:
+//                               "While a NECRONS CHARACTER model is leading this unit").
+// `attachedChars` are the characters attached to that unit for this run; null/undefined = nobody attached,
+// so a tagged effect is dropped (under-applying is the safe direction). An untagged effect always passes, so
+// every untagged run is unchanged. The phrase is matched the same way a scope is (effectAppliesToUnit).
+// Deliberate simplification: 19.04's footnote keeps a leader's own "while leading" abilities after its
+// bodyguard is destroyed, if it started the battle attached; the sim reads a lone character as one that never
+// led (attach the bodyguard to simulate the aura).
+export function leaderGateMet(effect, attachedChars) {
+  if (!effect) return true;
+  const led = effect.ledOnly === true ? '' : typeof effect.ledOnly === 'string' ? effect.ledOnly.trim() : null;
+  if (effect.leaderOnly !== true && led == null) return true;
+  const chars = (attachedChars || []).filter(Boolean);
+  if (!chars.length) return false;
+  if (!led) return true;
+  return chars.some((c) => effectAppliesToUnit({ scope: [led] }, c.keywords || [], c.faction || ''));
+}
+
+// The effects whose leader gate the attached characters meet (see leaderGateMet).
+export function filterLeaderGated(effects, attachedChars) {
+  return (effects || []).filter((e) => leaderGateMet(e, attachedChars));
 }
 
 const REROLL_RANK = { none: 0, ones: 1, failed: 2, all: 3 };
