@@ -53,7 +53,10 @@
 // 7 = 2.93.28: a battle-round tier ("From the third battle round onwards, … as well") continues its head (its
 //     phase, never its toggle), and a duration's phase word ("until the end of your next Fight phase") no
 //     longer sets the phase of a clause that names the weapon type ("ranged weapons … have [LETHAL HITS]").
-export const MAPPER_VERSION = 7;
+// 8 = 2.93.30: a DETACHMENT rule whose text carries enhancement wording ("the bearer", "<X> model(s) only") is
+//     held: a faction-pack page read across its two columns fuses the rule with its enhancements, and the
+//     enhancements' buffs were applied as the detachment's own (mergedDetachmentText).
+export const MAPPER_VERSION = 8;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -2089,6 +2092,24 @@ function applyStructuredMods(plan, rawMods) {
   return { ...plan, effects, classification, notes };
 }
 
+// ---- a detachment rule fused with its enhancements (2.93.30, MAPPER_VERSION 8) ----
+// Some faction-pack detachment pages lay the rule and the enhancements out in two columns, and a read
+// across the columns returns ONE detachment rule whose text runs on into the enhancements (and, on the
+// special detachments, the Corsair Enhancements / Extremis abilities that stand in for them). Mapped as
+// the detachment's own, an enhancement's buff then applied to every unit in its scope: Haloscreed Battle
+// Clade's Inloaded Lethality (+3 Attacks, +1 Damage) on every Tech-Priest Dominus and Manipulus, always on.
+// Enhancement wording never belongs in a detachment rule: "the bearer", or a restriction line "<X> model(s)
+// only". Measured 2026-10-06: 7 of the 136 detachment rules read from the 29 official packs carry it (all
+// seven fused pages: Haloscreed Battle Clade, Corsair Coterie, Veiled Blade Elimination Force, Pantheon of
+// Woe, Freebooter Krew, Hammer of Avernii, Saga of the Great Wolf x2) and 0 of the 432 read from the 37
+// live 11e catalogues. Such a rule is held (text kept, no effect) until the page reads cleanly.
+const MERGED_DETACHMENT_RX = /\bbearer\b|\bmodels? only\b/i;
+export function mergedDetachmentText(text) {
+  return typeof text === 'string' && MERGED_DETACHMENT_RX.test(text);
+}
+export const MERGED_DETACHMENT_NOTE =
+  "Held: this detachment's page reads as one block with its enhancements, so none of it is simulated. The rule text is shown in full; apply its effects with the manual toggles if you need them.";
+
 // ---- plan a faction PACK's extracted rules (MFM loader P3) ------------------
 // A whole faction pack carries an army rule plus MANY detachments, each with its own rule,
 // stratagems and enhancements (unlike a single roster, which has one chosen detachment and no
@@ -2102,6 +2123,13 @@ export function planPackRules(raw = {}) {
     entry && (entry.text || entry.name)
       ? { name: entry.name || 'Rule', text: cleanRuleText(entry.text), ...sourceTextOf(entry.text), ...mapRuleText(entry.text, { name: entry.name, source }) }
       : null;
+  // A detachment rule fused with its page's enhancements is held: its text stays readable, nothing is
+  // simulated (mergedDetachmentText). Applied here so the import and the stored-rule re-plan agree.
+  const planDetachmentRule = (entry) => {
+    const p = planOne(entry, 'detachment');
+    if (!p || !mergedDetachmentText(entry.text)) return p;
+    return { ...p, effects: [], classification: 'not-simulatable', matched: [], unmapped: [], conditions: [], notes: [MERGED_DETACHMENT_NOTE] };
+  };
 
   // An enhancement may carry a points cost (from a catalogue parse — bsdataRules); preserve it on the
   // planned entry (planOne maps only the text), additive + display-only downstream. It may ALSO carry
@@ -2140,7 +2168,7 @@ export function planPackRules(raw = {}) {
     // Two dispositions can happen since MFM v1.4 (the codex Orks War Horde) — additive array.
     forceDispositions: Array.isArray(d?.forceDispositions) && d.forceDispositions.length ? d.forceDispositions : undefined,
     keywords: Array.isArray(d?.keywords) ? d.keywords : undefined,
-    rule: planOne(d?.rule, 'detachment'),
+    rule: planDetachmentRule(d?.rule),
     // Referenced abilities (Against the Horde …) — DISPLAY-ONLY reference text, never simulatable
     // (they are conditional + unit-scoped, so applying them army-wide would be wrong). Carried
     // through so the builder shows them under the detachment rule (2026-07-11).

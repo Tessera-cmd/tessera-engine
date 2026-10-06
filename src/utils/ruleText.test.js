@@ -18,6 +18,8 @@ import {
   enhancementMatches,
   modsToEffects,
   degradeInfo,
+  mergedDetachmentText,
+  MERGED_DETACHMENT_NOTE,
 } from './ruleText.js';
 import { effectAppliesToUnit, resolveEffects, CONDITIONS } from '../engine/effects.js';
 
@@ -2600,5 +2602,50 @@ describe('mapper version 7: a battle-round tier and a duration phase word (2026-
     // A stratagem whose WHEN names one phase and whose duration names the other keeps the weapon type's phase.
     const s = all('WHEN: Your Shooting phase. TARGET: One unit from your army. EFFECT: Until the end of your next Fight phase, melee weapons equipped by models in your unit have the [LETHAL HITS] ability.', 'stratagem');
     expect(s.map((e) => e.phase)).toEqual(['fight']);
+  });
+});
+
+// 2.93.30 (MAPPER_VERSION 8): a faction-pack detachment page read across its two columns fuses the
+// detachment rule with its enhancements. Synthetic wording in the shape of the real fused pages.
+describe('planPackRules: a detachment rule fused with its enhancements is held', () => {
+  const FUSED =
+    'Each time a model from your army makes a melee attack, re-roll a Hit roll of 1. IRON EDGE A blade forged for war. ' +
+    "Test Priest model only. Add 3 to the Attacks characteristic of the bearer's melee weapons and add 1 to the Damage characteristic of the bearer's melee weapons.";
+  const CLEAN = 'Each time a model from your army makes a melee attack, re-roll a Hit roll of 1.';
+  const plan = (rule, extra = {}) => planPackRules({ detachments: [{ name: 'Test Host', rule, stratagems: [], enhancements: [], ...extra }] }).detachments[0];
+
+  it('the mapper alone reads the fused text as always-on enhancement buffs (the bug the hold removes)', () => {
+    const r = mapRuleText(FUSED, { name: 'Iron Rule', source: 'detachment' });
+    const mods = Object.assign({}, ...r.effects.map((e) => e.mods));
+    expect(mods.attackBonus).toBe(3);
+    expect(mods.damageBonus).toBe(1);
+  });
+
+  it('holds the fused rule: text kept, no effect, not-simulatable, with the note', () => {
+    expect(mergedDetachmentText(FUSED)).toBe(true);
+    const d = plan({ name: 'Iron Rule', text: FUSED });
+    expect(d.rule.effects).toEqual([]);
+    expect(d.rule.classification).toBe('not-simulatable');
+    expect(d.rule.notes).toEqual([MERGED_DETACHMENT_NOTE]);
+    expect(d.rule.text).toContain('IRON EDGE');
+    expect(resolveEffects(d.rule.effects, { phase: 'fight' }).attacker.attackBonus || 0).toBe(0);
+  });
+
+  it('a restriction line alone ("models only") also holds; a clean rule keeps its effect', () => {
+    expect(mergedDetachmentText('Each unit from your army gains a bonus. Test Agent models only. Twice per battle, do a thing.')).toBe(true);
+    expect(mergedDetachmentText(CLEAN)).toBe(false);
+    const d = plan({ name: 'Clean Rule', text: CLEAN });
+    expect(d.rule.effects.length).toBeGreaterThan(0);
+    expect(d.rule.notes || []).not.toContain(MERGED_DETACHMENT_NOTE);
+  });
+
+  it('only the detachment RULE is held: an enhancement and a stratagem worded with "the bearer" keep their effects', () => {
+    const ENH = "Test Priest model only. Add 1 to the Attacks characteristic of the bearer's melee weapons.";
+    const d = plan({ name: 'Clean Rule', text: CLEAN }, {
+      enhancements: [{ name: 'Iron Edge', text: ENH }],
+      stratagems: [{ name: 'Edge', text: "WHEN: Fight phase. TARGET: One CHARACTER unit from your army. EFFECT: Until the end of the phase, add 1 to the Attacks characteristic of the bearer's melee weapons." }],
+    });
+    expect(d.enhancements[0].effects.some((e) => e.mods.attackBonus === 1)).toBe(true);
+    expect(d.stratagems[0].effects.length).toBeGreaterThan(0);
   });
 });
