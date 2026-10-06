@@ -56,7 +56,15 @@
 // 8 = 2.93.30: a DETACHMENT rule whose text carries enhancement wording ("the bearer", "<X> model(s) only") is
 //     held: a faction-pack page read across its two columns fuses the rule with its enhancements, and the
 //     enhancements' buffs were applied as the detachment's own (mergedDetachmentText).
-export const MAPPER_VERSION = 8;
+// 9 = 2.94.2: who an enhancement reaches (11e Core Rules 19.03 / 19.04, ledger items 6 and 57). A Save / Wounds /
+//     Toughness buff whose text gives it to the unit ("This unit has +1 T", "the Toughness characteristic of models
+//     in the bearer's unit") is tagged `unitWide` and reaches every model; one on "the bearer" / "this model" stays
+//     on the bearer (statBuffScope). A restriction line ("<X> model(s) / unit(s) only") is no longer a scope: every
+//     later effect that names no receiving unit of its own carries it as `bearer` (restrictionPrefix; an effect that
+//     names one keeps its scope, ungated), so "WOLF GUARD BATTLE LEADER model only. While
+//     the bearer is leading a unit, … that unit have [LANCE]" reaches the squad it leads. A scope named only with
+//     "unit(s)" is tagged `scopeUnit` and matches the attached unit's keyword union; a "model(s)" scope does not.
+export const MAPPER_VERSION = 9;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -453,9 +461,60 @@ function keywordAliases(text) {
   return out;
 }
 
+// An enhancement's RESTRICTION line ("WOLF GUARD BATTLE LEADER model only.", "Canoness or Palatine model only",
+// "STEALTH BATTLESUITS unit only (excluding …)") names who may TAKE it, never the units its effects reach
+// (mapper 9, 2026-10-06, ledger item 57). Read as a scope, it was matched against the bodyguard's keywords, so
+// "Wolf Guard Battle Leader model only. While the bearer is leading a unit, weapons equipped by models in that
+// unit have [LANCE]" never applied to the squad it leads. The run must OPEN a sentence (every live restriction
+// does, in the catalogues and after a pack's flavour sentence), directly followed by "model(s) / unit(s) only";
+// a spaced slash list before it ("WINGED TYRANID PRIME / TYRANID PRIME WITH LASH WHIP model only") belongs to it.
+// Its phrases are returned as `bearer` (mapRuleText tags the effects stated after it) and kept out of the scope.
+// "only" must end the line ("…model only.", "…unit only (excluding …)", a pack's "…units only �"), or run straight
+// into the next capitalised sentence: "Vehicle models only count as …" is not a restriction (review, 2026-10-06).
+const RUN_ONLY_RE = new RegExp(`^${RUN_SRC}$`);
+const RESTRICTION_POST_RE = /^\s+only(?:\s*(?:[.;:(�■▪•]|$)|\s+[A-Z[])/;
+// The slash-list prefix ('' when none) when the run before `post` is a restriction, else null. The list is split
+// on "/" and each piece tested on its own (a nested quantifier over RUN_SRC backtracked exponentially on a long
+// unspaced slash list, review 2026-10-06), and an over-long prefix is never a restriction.
+function restrictionPrefix(pre, post) {
+  if (!RESTRICTION_POST_RE.test(post)) return null;
+  const seg = pre.slice(Math.max(...['.', ';', ':', '!', '?', '�'].map((c) => pre.lastIndexOf(c))) + 1);
+  if (!seg.trim()) return '';
+  if (seg.length > 200) return null;
+  const parts = seg.split('/');
+  if (parts.length < 2 || parts[parts.length - 1].trim()) return null;
+  return parts.slice(0, -1).every((p) => RUN_ONLY_RE.test(p.trim())) ? seg : null;
+}
+// The restriction phrases a rule text carries, in order (see restrictionPrefix). Pure.
+function bearerPhrases(t) {
+  const out = [];
+  const re = new RegExp(`(${RUN_SRC})[ ]+(units?|models?)\\b`, 'g');
+  let m;
+  while ((m = re.exec(t))) {
+    const prefix = restrictionPrefix(t.slice(0, m.index), t.slice(m.index + m[0].length));
+    if (prefix == null) continue;
+    for (const p of [...splitRunPhrases(prefix), ...splitRunPhrases(m[1])]) if (!out.includes(p)) out.push(p);
+  }
+  const up = t.toUpperCase();
+  for (const k of MODEL_TYPES) {
+    const rm = up.match(new RegExp(`(?:^|[.;:!?\\uFFFD]\\s*)${k.replace(/[-/]/g, '\\$&')}\\s+(?:MODELS?|UNITS?)(?=\\s+ONLY\\b)`));
+    if (rm && RESTRICTION_POST_RE.test(t.slice(rm.index + rm[0].length)) && !out.includes(k)) out.push(k);
+  }
+  return out;
+}
+
 function detectScope(t) {
   const attacker = [];
   const defender = [];
+  const bearer = [];
+  // Whether each scope phrase came from a "unit(s)" or a "model(s)" mention (mapper 9, ledger item 57): a
+  // unit-phrased scope reads the attached unit's keyword UNION (19.03), a model-phrased one the bodyguard's
+  // own keywords. A phrase named with both nouns counts as model-phrased (the narrower reading).
+  const nouns = new Map();
+  const noteNoun = (phrase, noun) => {
+    const n = /^units?$/i.test(noun) ? 'unit' : 'model';
+    if (nouns.get(phrase) !== 'model') nouns.set(phrase, n);
+  };
   const pushTo = (arr, phrase) => {
     if (!arr.includes(phrase)) arr.push(phrase);
   };
@@ -473,6 +532,12 @@ function detectScope(t) {
     const pre = t.slice(0, m.index);
     const post = t.slice(m.index + m[0].length);
     allRuns.push(m[1].toUpperCase());
+    // An enhancement's restriction line names its bearer, never a scope (see restrictionPrefix).
+    const prefix = restrictionPrefix(pre, post);
+    if (prefix != null) {
+      for (const p of [...splitRunPhrases(prefix), ...splitRunPhrases(m[1])]) pushTo(bearer, p);
+      continue;
+    }
     // Inside an "excluding/except …" span (same sentence/paren): not a scope, it's a carve-out.
     if (/\b(?:excluding|except)\b[^.)]*$/i.test(pre)) continue;
     // "X model is leading this unit" — a leader gate on the LED unit, not a scope on the bearer.
@@ -503,6 +568,7 @@ function detectScope(t) {
       /^['’s]*\s*(?:\([^)]*\)\s*)?(?:from|in) your army\b/i.test(post);
     if (isTarget && !isFriendly) continue;
     for (const p of phrases) {
+      noteNoun(p, m[2]);
       if (isTarget) pushTo(defender, p);
       else {
         pushTo(attacker, p);
@@ -518,21 +584,30 @@ function detectScope(t) {
   for (const k of MODEL_TYPES) {
     const kw = new RegExp(`\\b${k.replace(/[-/]/g, '\\$&')}\\b`);
     const kre = new RegExp(`${kw.source}[^.]{0,40}?\\b(MODELS?|UNITS?)\\b`);
-    if (!kre.test(up)) continue;
+    const km = up.match(kre);
+    if (!km) continue;
     if (allRuns.some((r) => kw.test(r))) continue;
+    // A lowercase restriction line ("vehicle model only.") names the bearer (see bearerPhrases).
+    if (bearerPhrases(t).includes(k)) {
+      pushTo(bearer, k);
+      continue;
+    }
+    noteNoun(k, km[1]);
     pushTo(attacker, k);
     pushTo(defender, k);
   }
   // The restriction idiom "…is a MAGUS, PRIMUS, or ACOLYTE ICONWARD, that model has…" (round-3
   // review, Xenocreed Congregation): the alternative list names the TIGHTEST subject description,
   // so it REPLACES the clause's broader subject scope (each named class implies the broader noun).
-  const restr = t.match(new RegExp(`\\bis\\s+(?:a|an)\\s+(${RUN_SRC})\\s*,\\s*(?:that|this)\\s+(?:model|unit)\\b`));
+  const restr = t.match(new RegExp(`\\bis\\s+(?:a|an)\\s+(${RUN_SRC})\\s*,\\s*(?:that|this)\\s+(model|unit)\\b`));
   if (restr) {
     const phrases = splitRunPhrases(restr[1]);
     if (phrases.length) {
       attacker.length = 0;
       defender.length = 0;
       for (const p of phrases) {
+        nouns.delete(p);
+        noteNoun(p, restr[2]);
         attacker.push(p);
         defender.push(p);
       }
@@ -555,9 +630,9 @@ function detectScope(t) {
     // aircraft's own anti-ground buff off (2026-10-03). The clause's condition covers it instead.
     if (/\benemy\s+(?:units?|models?)\s*\(\s*$/i.test(t.slice(0, exclSpan.index))) excl = [];
     const drop = (p) => new RegExp(`\\b${p.replace(/[-/+*?^$()[\]{}|\\]/g, '\\$&')}\\b`, 'i').test(exclSpan[1]);
-    return { attacker: attacker.filter((p) => !drop(p)), defender: defender.filter((p) => !drop(p)), excl };
+    return { attacker: attacker.filter((p) => !drop(p)), defender: defender.filter((p) => !drop(p)), excl, bearer, nouns };
   }
-  return { attacker, defender, excl };
+  return { attacker, defender, excl, bearer, nouns };
 }
 
 // Army-COMPOSITION conditional: a clause gated on which detachment you run or which keywords/
@@ -1042,7 +1117,9 @@ function mapClause(
   // A CONJUNCT tail ("…improve the Ballistic Skill by 1 and, if the Spotted unit was marked by an
   // Observer unit, that attack has [IGNORES COVER]") shares the head's subject: the units it names
   // are objects of its condition, never the acting unit, so it always inherits the carried scope.
-  const hasOwnScope = !(conjunct && inherited?.scope) && (ownScope.attacker.length > 0 || ownScope.defender.length > 0);
+  // A restriction line ("<X> model only (excluding <Y> models).") still establishes the carry, as it did when
+  // its run was read as a scope: the later sentences inherit its carve-out, now with no scope phrase (mapper 9).
+  const hasOwnScope = !(conjunct && inherited?.scope) && (ownScope.attacker.length > 0 || ownScope.defender.length > 0 || ownScope.bearer.length > 0);
   // A subject-less clause inherits the carried scope; its OWN exclusions still union in (a
   // continuation can add a carve-out without restating the subject).
   const scope =
@@ -1052,6 +1129,7 @@ function mapClause(
           attacker: inherited.scope.attacker,
           defender: inherited.scope.defender,
           excl: [...new Set([...(inherited.scope.excl || []), ...(ownScope.excl || [])])],
+          nouns: inherited.scope.nouns,
         };
   // A clause that is conditionally TRIGGERED but whose gate we couldn't resolve into a known
   // condition: an always-on effect from it is probably a mis-read (the buff is really conditional),
@@ -1105,6 +1183,8 @@ function mapClause(
     const eff = { name, side, phase: phaseOverride || phase, condition, mods: mod };
     const sideScope = side === 'defender' ? scope.defender : scope.attacker;
     if (sideScope.length) eff.scope = sideScope;
+    // Every scope phrase named with "unit(s)": the attached unit's keyword union applies (mapper 9, 19.03).
+    if (sideScope.length && sideScope.every((p) => scope.nouns?.get(p) === 'unit')) eff.scopeUnit = true;
     if (scope.excl?.length) eff.scopeExcl = scope.excl;
     if (source) eff.source = source;
     // An exclusion on the ATTACKING enemy ("each time an enemy unit (excluding TITANIC units) …") can't
@@ -1138,7 +1218,7 @@ function mapClause(
     }
   }
   const kinds = [...new Set(effects.flatMap((e) => modKinds(e.mods)))];
-  return { effects, matched, ownScope: hasOwnScope ? ownScope : null, ownPhase, prev: { phase, condition, strength: sg?.subject || null, suspect, kinds, text: clause } };
+  return { effects, matched, ownScope: hasOwnScope ? ownScope : null, bearer: ownScope.bearer, ownPhase, prev: { phase, condition, strength: sg?.subject || null, suspect, kinds, text: clause } };
 }
 
 // Gate wording the mapper has no condition for (2026-10-03 review): a clause carrying one is held for
@@ -1390,6 +1470,11 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   // an EARLIER clause. A later sentence that is in fact independent is over-tagged, which only under-applies it
   // (the safe direction). A new named sub-rule starts clean, like the tier and lead-in reading.
   let leadTag = null;
+  // The restriction in force ("<X> model(s) / unit(s) only", mapper 9; see restrictionPrefix): set by the clause that
+  // states it and carried to every LATER clause, as the scope it used to be was, until the next restriction replaces
+  // it (only on effects with no scope of their own, see below). An enhancement states one, first; a rule with several sections ("Shadow Legion Khorne units only … Shadow
+  // Legion Tzeentch units only …") gates each section on its own, never on the union of all of them.
+  let bearer = null;
   for (const [ci, clause] of clauses.entries()) {
     const conjunct = clause.startsWith(CONJUNCT);
     const sentence = clause.startsWith(SENTENCE);
@@ -1454,6 +1539,13 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
     effects.push(...r.effects);
     matched.push(...r.matched);
     if (activationAt === Infinity && ACTIVATION_RE.test(body.replace(TARGET_RANGE_RE, 'targets a unit'))) activationAt = ci;
+    if (r.bearer?.length) bearer = [...r.bearer];
+    // The bearer gate (ledger item 57): engine/effects.js effectAppliesToUnit passes it when a phrase matches the unit's
+    // own keywords or an attached character's (the model that can carry the enhancement).
+    // An effect that names its own receiving unit ("select one friendly VEHICLE unit within 6\" of this model …")
+    // reaches a unit other than the bearer's: it keeps its scope reading, ungated, as before mapper 9 (review
+    // 2026-10-06: Guiding Presence's bearer AELDARI PSYKER and scope VEHICLE could never both hold on one unit).
+    if (bearer) for (const e of r.effects) if (!e.scope) e.bearer = [...bearer];
     if (r.ownScope) carry = { scope: r.ownScope, phase: r.ownPhase };
     prev = r.prev;
     headEffects = r.effects;
@@ -1482,6 +1574,8 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
       for (const s of e.scope) for (const extra of aliases.get(String(s).toUpperCase()) || []) {
         if (!expanded.includes(extra)) expanded.push(extra);
       }
+      // A granting class joins with no noun of its own: the scope is no longer wholly unit-phrased (mapper 9).
+      if (expanded.length !== e.scope.length) delete e.scopeUnit;
       e.scope = expanded;
     }
   }
@@ -1507,7 +1601,6 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   // bracket (verified across all 168 in the official packs), so gating the whole ability cannot
   // under-gate a genuinely always-on clause.
   if (degradeAbility) for (const e of effects) e.condition = 'damaged';
-
   const abilityGate = ABILITY_ONCE_RE.test(mapText) ? 'oncePerBattle' : ABILITY_WAAAGH_RE.test(mapText) ? 'armyAbilityActive' : null;
   // (A tier the slot can't tell apart from its head stays held: the ability gate would let it ride along.)
   if (abilityGate) for (const e of effects) if (!e.condition && !UNRESOLVED_TIER.has(e)) e.condition = abilityGate;
@@ -1980,7 +2073,67 @@ export function planHasRules(plan) {
 // weapon BS/WS increment maps to hitModifier (a better skill = +1 to hit, item 5d); a `set` on a
 // weapon stat has no effects-layer bonus equivalent and is skipped (no real 10e enhancement uses one).
 // Pure. Exported for tests.
-export function modsToEffects(mods, name = 'Enhancement') {
+//
+// WHO a Save / Wounds / Toughness buff reaches is read from the enhancement's TEXT, per stat (mapper 9, ledger item
+// 6; 11e Core Rules 19.04: a rule that affects a unit applies to every model in an attached unit, one that affects a
+// single specified model only to that model). A unit-wide stat buff is tagged `unitWide: true` and the engine
+// (effects.js applyToSim) applies it to every model group; untagged, it stays on the one bearer as before.
+//   (a) "<Stat> characteristic of models in the bearer's / this / that unit" (after the stat) -> unit;
+//   (b) else the nearest subject before the stat in its sentence ("this unit", "models in this unit", "the bearer's
+//       unit" -> unit; "the bearer", "the bearer's <Stat>", "this model" -> bearer), a bulleted item with no subject
+//       of its own reading its lead-in ("This unit has: - +1 T. - 4+ Sv.");
+//   (c) no subject, or any mention read as the bearer's -> bearer (the safe direction, today's reading).
+const STAT_WORD_RE = {
+  SV: /\bSave(?=\s+characteristics?\b)|\bSv\b/g,
+  W: /\bWounds\b|(?<=[+-]\d+\s?)W\b/g,
+  T: /\bToughness\b|(?<=[+-]\d+\s?)T\b(?!['’])/g,
+};
+const STAT_UNIT_AFTER_RE = /^\S+\s+characteristics?\s+of\s+(?:the\s+)?models\s+in\s+(?:the\s+bearer's|this|that|its)\s+unit\b/i;
+const STAT_SUBJECT_RE = /(models\s+in\s+(?:this|that|the\s+bearer's|its)\s+unit|the\s+bearer's\s+unit|this\s+unit|that\s+unit)|((?:the\s+)?bearer(?:'s)?|this\s+model)/gi;
+const STAT_BULLET_RE = /(?:^|\s)[-▪■•](?=\s)/g;
+function lastSubject(seg) {
+  let last = null;
+  for (const m of seg.matchAll(STAT_SUBJECT_RE)) last = m[1] ? 'unit' : 'bearer';
+  return last;
+}
+function endOfLastMatch(s, re) {
+  let at = -1;
+  for (const m of s.matchAll(re)) at = m.index + m[0].length;
+  return at;
+}
+// 'unit' when every mention of `stat` in `text` reads as unit-wide, else 'bearer'. Pure.
+export function statBuffScope(text, stat) {
+  const t = cleanRuleText(text);
+  const re = STAT_WORD_RE[stat];
+  if (!t || !re) return 'bearer';
+  let seen = 0;
+  for (const m of t.matchAll(re)) {
+    seen += 1;
+    const i = m.index;
+    if (STAT_UNIT_AFTER_RE.test(t.slice(i))) continue;
+    const before = t.slice(0, i);
+    const sentenceAt = endOfLastMatch(before, /[.!?;�](?=\s|$)/g);
+    const bulletAt = endOfLastMatch(before, STAT_BULLET_RE);
+    let subject = lastSubject(before.slice(Math.max(sentenceAt, bulletAt, 0)));
+    if (!subject && bulletAt > sentenceAt) {
+      // A bulleted item with no subject of its own reads the lead-in that opened its list.
+      const colon = before.lastIndexOf(':', bulletAt);
+      if (colon >= 0) {
+        const lead = before.slice(0, colon);
+        subject = lastSubject(lead.slice(Math.max(endOfLastMatch(lead, /[.!?;�](?=\s|$)/g), 0)));
+      }
+    }
+    // ...and a bearer named AFTER the stat in its own sentence ("While this unit is Battle-shocked, add 1 to the
+    // Toughness characteristic of the bearer") wins over the subject before it (review 2026-10-06).
+    const after = t.slice(i + m[0].length);
+    const end = after.search(/[.!?;�](?=\s|$)|\s[-▪■•]\s/);
+    if ([...(end >= 0 ? after.slice(0, end) : after).matchAll(STAT_SUBJECT_RE)].some((x) => !x[1])) return 'bearer';
+    if (subject !== 'unit') return 'bearer';
+  }
+  return seen ? 'unit' : 'bearer';
+}
+
+export function modsToEffects(mods, name = 'Enhancement', text = '') {
   const out = [];
   for (const m of mods || []) {
     if (m.target === 'melee' || m.target === 'ranged') {
@@ -2005,7 +2158,11 @@ export function modsToEffects(mods, name = 'Enhancement') {
       if (m.op === 'set' && m.stat === 'SV') mod.saveSet = m.value;
       else if (m.op === 'add' && m.stat === 'W') mod.woundBonus = m.delta;
       else if (m.op === 'add' && m.stat === 'T') mod.toughBonus = m.delta;
-      if (Object.keys(mod).length) out.push({ name, side: 'defender', phase: 'any', condition: null, mods: mod, source: 'enhancement' });
+      if (Object.keys(mod).length) {
+        const eff = { name, side: 'defender', phase: 'any', condition: null, mods: mod, source: 'enhancement' };
+        if (statBuffScope(text, m.stat) === 'unit') eff.unitWide = true;
+        out.push(eff);
+      }
     }
   }
   return out;
@@ -2048,8 +2205,9 @@ function structuredCoveredKeys(mods) {
 // situational "+2 while…" parts the structured modifier doesn't carry) and non-overlapping prose mods
 // (fnp, invuln) are kept. A 'not-simulatable' enhancement that now has structured effects is
 // reclassified 'mapped'. Pure.
-function applyStructuredMods(plan, rawMods) {
-  const structured = modsToEffects(rawMods, plan.name);
+function applyStructuredMods(plan, rawMods, rawText = plan.text) {
+  const ruleText = cleanRuleText(keywordCase(rawText || ''));
+  const structured = modsToEffects(rawMods, plan.name, ruleText);
   if (!structured.length) return plan;
   // A structured buff has no clause of its own, so it takes the leader gate stated ANYWHERE in the
   // enhancement's text (mapper 6): "While the bearer is leading a unit, … [SUSTAINED HITS 1]" carries the same
@@ -2057,6 +2215,9 @@ function applyStructuredMods(plan, rawMods) {
   // text states before its gate only under-applies it.
   const gate = leaderGateOf(keywordCase(plan.text || ''));
   if (gate) for (const e of structured) Object.assign(e, gate);
+  // ...and the text's restriction line, as every prose effect of the enhancement carries it (mapper 9, see bearerPhrases).
+  const bearer = bearerPhrases(ruleText);
+  if (bearer.length) for (const e of structured) e.bearer = [...bearer];
   const covered = structuredCoveredKeys(rawMods);
   const prose = (plan.effects || [])
     .map((e) => {
@@ -2145,7 +2306,7 @@ export function planPackRules(raw = {}) {
     // The raw structured modifiers ride on the planned entry too, so a stored enhancement can be
     // re-mapped exactly after a mapper fix (customRules replanLibraryStore): its effects depend on
     // them as well as on its text.
-    if (Array.isArray(e?.wargearMods) && e.wargearMods.length) p = { ...applyStructuredMods(p, e.wargearMods), wargearMods: e.wargearMods };
+    if (Array.isArray(e?.wargearMods) && e.wargearMods.length) p = { ...applyStructuredMods(p, e.wargearMods, e.text), wargearMods: e.wargearMods };
     return p;
   };
   // A stratagem may carry its Command-point cost (the PDF heading, a rules pack, the AI transcription);

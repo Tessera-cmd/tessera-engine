@@ -57,11 +57,13 @@ function resolveSelection(ctx, atkSel, defSel, conditions, baseOptions = ctx.bas
     sideEffects(ctx.attackerAbilities, atkSel, ctx.attackerAttached).filter(offensive),
     ctx.attackerKeywords,
     ctx.attackerFaction,
+    ctx.attackerAttached,
   );
   const defEffects = filterEffectsForUnit(
     sideEffects(ctx.defenderAbilities, defSel, ctx.defenderAttached).filter(defensive),
     ctx.defenderKeywords,
     ctx.defenderFaction,
+    ctx.defenderAttached,
   );
   const resolved = resolveEffects([...atkEffects, ...defEffects], {
     phase: ctx.phase,
@@ -121,14 +123,16 @@ export function buildImpactPlan(ctx) {
   const tagWaiting = (side, effects) => {
     const keywords = side === 'defender' ? ctx.defenderKeywords : ctx.attackerKeywords;
     const faction = side === 'defender' ? ctx.defenderFaction : ctx.attackerFaction;
+    // The attached characters also widen a unit-phrased scope and meet a bearer restriction (effectAppliesToUnit).
+    const attached = side === 'defender' ? ctx.defenderAttached : ctx.attackerAttached;
     const live = filterEffectsForUnit(
       (effects || []).filter((e) => e && e.mods && ((e.side || 'attacker') === 'defender') === (side === 'defender') && ((e.phase || 'any') === 'any' || e.phase === ctx.phase)),
       keywords,
       faction,
+      attached,
     );
     // A rule effect that works only while a character leads the unit (leaderGateMet) waits on an attached
     // character when none that qualifies is (2026-10-05): it names LEADER_WAITING, not "not worth the CP".
-    const attached = side === 'defender' ? ctx.defenderAttached : ctx.attackerAttached;
     const off = live.map((e) =>
       !leaderGateMet(e, attached) ? LEADER_WAITING : e.condition && e.condition !== 'always' && !conditions.includes(e.condition) ? CONDITION_LABEL[e.condition] || e.condition : null,
     );

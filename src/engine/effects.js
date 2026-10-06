@@ -18,6 +18,13 @@
 //     phase?: 'shooting' | 'fight' | 'any',   // default 'any'
 //     condition?: <CONDITIONS id> | null,     // null/'always' = unconditional
 //     leaderOnly?: true, ledOnly?: true|string, // the leader gate (see leaderGateMet)
+//     scope?: string[], scopeExcl?: string[], // keyword-phrase scope + carve-outs (see effectAppliesToUnit)
+//     scopeUnit?: true,                       // the scope was named with "unit(s)": matched against the attached
+//                                             // unit's keyword union (19.03), not the bodyguard's alone
+//     bearer?: string[],                      // an enhancement's "<X> model/unit only" restriction: the unit or an
+//                                             // attached character must carry one phrase (see effectAppliesToUnit)
+//     unitWide?: true,                        // a saveSet/woundBonus/toughBonus that reaches EVERY model (19.04),
+//                                             // not just the bearer (see applyToSim)
 //     mods: {
 //       // attacker-side (offensive):
 //       hitModifier?, woundModifier?,         // ints; the engine clamps each to +/-1
@@ -114,22 +121,44 @@ function phraseMatchesKeywords(phrase, have) {
   return seg(0);
 }
 
-export function effectAppliesToUnit(effect, unitKeywords, unitFaction) {
+// The keyword set a phrase is matched against: the keywords, "FACTION: X" also exposed as X, plus the faction
+// NAME (a preset/hand-entered unit may carry no faction keyword, so a faction-phrased army-wide rule, "Orks
+// models from your army…", still lands on it).
+function keywordSet(keywords, faction, into = new Set()) {
+  for (const k of keywords || []) {
+    const K = String(k).toUpperCase().trim();
+    if (!K) continue;
+    into.add(K);
+    // Catalogue drafts carry the faction keyword as "FACTION: X" — expose the bare X too.
+    if (K.startsWith('FACTION:')) into.add(K.slice(8).trim());
+  }
+  if (faction) into.add(String(faction).toUpperCase().trim());
+  return into;
+}
+
+// `attachedChars` (optional, mapper 9 / ledger item 57): the characters attached to this unit for the run, as
+// [{ keywords, faction }]. Omitted, every check reads the unit's own keywords exactly as before.
+//   - `bearer` (an enhancement's "<X> model/unit only" restriction) passes when ANY phrase matches the unit's own
+//     keywords or ANY attached character's: a lone character carrying it, a unit given a "unit only" enhancement,
+//     or a character leading the unit. (It does not know WHICH character holds the enhancement: ledger item 58.)
+//   - a `scopeUnit` effect (its scope named with "unit(s)") matches its scope AND its scopeExcl against the
+//     attached unit's keyword union: 19.03, "An attached unit has all of the keywords of all of its component
+//     units". A model-phrased scope keeps the bodyguard's own keywords (19.03: models do not gain each other's).
+export function effectAppliesToUnit(effect, unitKeywords, unitFaction, attachedChars) {
+  const chars = (attachedChars || []).filter(Boolean);
+  if (effect?.bearer?.length) {
+    const holders = [keywordSet(unitKeywords, unitFaction), ...chars.map((c) => keywordSet(c.keywords, c.faction))];
+    const ok = effect.bearer.some((b) => {
+      const P = String(b).toUpperCase().trim();
+      return holders.some((h) => phraseMatchesKeywords(P, h));
+    });
+    if (!ok) return false;
+  }
   const scoped = effect?.scope?.length;
   const excluded = effect?.scopeExcl?.length;
   if (!scoped && !excluded) return true;
-  const have = new Set();
-  for (const k of unitKeywords || []) {
-    const K = String(k).toUpperCase().trim();
-    if (!K) continue;
-    have.add(K);
-    // Catalogue drafts carry the faction keyword as "FACTION: X" — expose the bare X too.
-    if (K.startsWith('FACTION:')) have.add(K.slice(8).trim());
-  }
-  // The unit's faction NAME backs up the keyword list (a preset/hand-entered unit may carry no
-  // faction keyword), so a faction-phrased army-wide rule ("Orks models from your army…") still
-  // lands on it.
-  if (unitFaction) have.add(String(unitFaction).toUpperCase().trim());
+  const have = keywordSet(unitKeywords, unitFaction);
+  if (effect.scopeUnit === true) for (const c of chars) keywordSet(c.keywords, c.faction, have);
   // Exclusions first (2026-07-14): a rule's "(excluding EPIC HERO units)" carve-out — a unit
   // matching ANY excluded phrase never receives the effect, whatever the scope says.
   if (excluded && effect.scopeExcl.some((s) => phraseMatchesKeywords(String(s).toUpperCase().trim(), have))) return false;
@@ -140,10 +169,10 @@ export function effectAppliesToUnit(effect, unitKeywords, unitFaction) {
 // Filter a list of effects to those that apply to a unit with the given keywords (+ optional
 // faction name, used as a keyword fallback). When `unitKeywords` is null/undefined, gating is
 // skipped (effects returned unchanged) so existing callers that don't supply keywords are
-// unaffected.
-export function filterEffectsForUnit(effects, unitKeywords, unitFaction) {
+// unaffected. `attachedChars` as effectAppliesToUnit.
+export function filterEffectsForUnit(effects, unitKeywords, unitFaction, attachedChars) {
   if (unitKeywords == null) return effects || [];
-  return (effects || []).filter((e) => effectAppliesToUnit(e, unitKeywords, unitFaction));
+  return (effects || []).filter((e) => effectAppliesToUnit(e, unitKeywords, unitFaction, attachedChars));
 }
 
 // ---- the leader gate (2026-10-05) ---------------------------------------------
@@ -213,6 +242,10 @@ function emptyDefender() {
     saveSet: null,
     woundBonus: 0,
     toughBonus: 0,
+    // the same buffs given to the whole unit (19.04, mapper 9 `unitWide`): applied to EVERY model group.
+    unitSaveSet: null,
+    unitWoundBonus: 0,
+    unitToughBonus: 0,
     grantUnitKeywords: [],
     removeUnitKeywords: [],
   };
@@ -263,9 +296,15 @@ export function resolveEffects(effects, ctx = {}) {
       if (m.halveDamage) def.halveDamage = true;
       if (m.hitPenalty) def.hitPenalty += m.hitPenalty;
       if (m.saveReroll) def.saveReroll = strongerReroll(def.saveReroll, m.saveReroll);
-      if (m.saveSet != null) def.saveSet = def.saveSet == null ? m.saveSet : Math.min(def.saveSet, m.saveSet);
-      if (m.woundBonus) def.woundBonus += m.woundBonus;
-      if (m.toughBonus) def.toughBonus += m.toughBonus;
+      if (e.unitWide === true) {
+        if (m.saveSet != null) def.unitSaveSet = def.unitSaveSet == null ? m.saveSet : Math.min(def.unitSaveSet, m.saveSet);
+        if (m.woundBonus) def.unitWoundBonus += m.woundBonus;
+        if (m.toughBonus) def.unitToughBonus += m.toughBonus;
+      } else {
+        if (m.saveSet != null) def.saveSet = def.saveSet == null ? m.saveSet : Math.min(def.saveSet, m.saveSet);
+        if (m.woundBonus) def.woundBonus += m.woundBonus;
+        if (m.toughBonus) def.toughBonus += m.toughBonus;
+      }
     } else {
       if (m.hitModifier) atk.hitModifier += m.hitModifier;
       if (m.woundModifier) atk.woundModifier += m.woundModifier;
@@ -335,6 +374,17 @@ export function applyToSim(baseOptions, baseDefender, resolved) {
   if (d.grantUnitKeywords.length || d.removeUnitKeywords.length) {
     defender.keywords = effectiveKeywords(baseDefender.keywords, d);
   }
+  // A unit-wide statline buff (mapper 9 `unitWide`: "This unit has +1 T", "the Toughness characteristic of models
+  // in the bearer's unit") reaches EVERY model (19.04, owner ruling 2026-10-05): the body headline, each champion
+  // profile and the leader / attached characters. A group that does not carry its own value (a champion profile,
+  // or a character's T, left null) inherits the updated body, so it is left null rather than given the buff twice.
+  if (d.unitSaveSet != null || d.unitWoundBonus || d.unitToughBonus) {
+    const u = { saveSet: d.unitSaveSet, woundBonus: d.unitWoundBonus, toughBonus: d.unitToughBonus };
+    defender = mergeUnitStats(defender, u);
+    if (defender.leader) defender = { ...defender, leader: mergeUnitStats(defender.leader, u, true) };
+    if (Array.isArray(defender.attached)) defender = { ...defender, attached: defender.attached.map((c) => mergeUnitStats(c, u, true)) };
+    if (Array.isArray(defender.profiles)) defender = { ...defender, profiles: defender.profiles.map((p) => mergeUnitStats(p, u, true)) };
+  }
   // Unit-statline enhancement buffs (Save 2+, +W, +T) are on ONE model (the bearer), so they are NOT
   // distributed — applying a 2+ save to a whole led squad would be a glaring over-buff. Target the
   // attached leader if the defending unit has one (an enhancement is on a character, usually the
@@ -358,12 +408,13 @@ export function applyToSim(baseOptions, baseDefender, resolved) {
 
 // Apply unit-statline buffs (Save set / +Wounds / +Toughness) to ONE profile (the bearer). Keeps the
 // better Save (lower target), sums W/T. The fields match the unit/leader schema (SV/W/T).
-function mergeUnitStats(target, d) {
+// `explicitOnly`: a stat the group leaves null (it inherits the body's) stays null (the unit-wide path).
+function mergeUnitStats(target, d, explicitOnly = false) {
   if (!target || typeof target !== 'object' || !d) return target;
   const out = { ...target };
-  if (d.saveSet != null) out.SV = out.SV == null ? d.saveSet : Math.min(out.SV, d.saveSet);
-  if (d.woundBonus) out.W = (out.W || 0) + d.woundBonus;
-  if (d.toughBonus) out.T = (out.T || 0) + d.toughBonus;
+  if (d.saveSet != null && !(explicitOnly && out.SV == null)) out.SV = out.SV == null ? d.saveSet : Math.min(out.SV, d.saveSet);
+  if (d.woundBonus && !(explicitOnly && out.W == null)) out.W = (out.W || 0) + d.woundBonus;
+  if (d.toughBonus && !(explicitOnly && out.T == null)) out.T = (out.T || 0) + d.toughBonus;
   return out;
 }
 
@@ -406,6 +457,7 @@ export function isAttackerActive(a) {
 export function isDefenderActive(d) {
   return (
     d.fnp != null || d.invuln != null || d.damageReduction || d.halveDamage || d.hitPenalty ||
-    d.saveReroll !== 'none' || d.saveSet != null || d.woundBonus || d.toughBonus
+    d.saveReroll !== 'none' || d.saveSet != null || d.woundBonus || d.toughBonus ||
+    d.unitSaveSet != null || d.unitWoundBonus || d.unitToughBonus
   );
 }

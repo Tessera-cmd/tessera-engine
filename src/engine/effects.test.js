@@ -428,3 +428,102 @@ describe('engine primitive: granted keywords', () => {
     expect(lethal).toBeGreaterThan(base);
   });
 });
+
+// ---- who a rule reaches in an attached unit (mapper 9, 2026-10-06; ledger items 6 and 57) ----------------
+// 11e Core Rules 19.03: an attached unit has all of the keywords of its component units (its models do not gain
+// each other's). 19.04: a rule that affects a unit applies to every model in an attached unit; one that affects a
+// single specified model (an enhancement, a piece of wargear) only to that model. Synthetic keywords throughout.
+describe('scopeUnit / bearer: effectAppliesToUnit with the attached characters (19.03)', () => {
+  const chars = [{ keywords: ['CHARACTER', 'TEST LEADER', 'EPIC HERO'], faction: 'Testers' }];
+  it('a unit-phrased scope matches an attached character keyword; a model-phrased one does not', () => {
+    const unitPhrased = { name: 'u', mods: { hitModifier: 1 }, scope: ['CHARACTER'], scopeUnit: true };
+    const modelPhrased = { name: 'm', mods: { hitModifier: 1 }, scope: ['CHARACTER'] };
+    expect(effectAppliesToUnit(unitPhrased, ['INFANTRY'], 'Testers', chars)).toBe(true);
+    expect(effectAppliesToUnit(modelPhrased, ['INFANTRY'], 'Testers', chars)).toBe(false);
+    // no one attached: the bodyguard's own keywords, as before
+    expect(effectAppliesToUnit(unitPhrased, ['INFANTRY'], 'Testers', [])).toBe(false);
+  });
+  it('a unit-phrased scopeExcl reads the union too (an EPIC HERO leading the unit makes it an EPIC HERO unit)', () => {
+    const e = { name: 'x', mods: { hitModifier: 1 }, scope: ['INFANTRY'], scopeExcl: ['EPIC HERO'], scopeUnit: true };
+    expect(effectAppliesToUnit(e, ['INFANTRY'], 'Testers')).toBe(true);
+    expect(effectAppliesToUnit(e, ['INFANTRY'], 'Testers', chars)).toBe(false);
+    // the model-phrased reading keeps the bodyguard's own keywords
+    expect(effectAppliesToUnit({ ...e, scopeUnit: undefined }, ['INFANTRY'], 'Testers', chars)).toBe(true);
+  });
+  it('the bearer gate: a lone bearer, a led unit and a "unit only" unit pass; an unled squad does not', () => {
+    const e = { name: 'b', mods: { grantKeywords: ['LANCE'] }, bearer: ['TEST LEADER'] };
+    expect(effectAppliesToUnit(e, ['CHARACTER', 'TEST LEADER'], 'Testers')).toBe(true); // lone character
+    expect(effectAppliesToUnit(e, ['INFANTRY', 'BLADE SQUAD'], 'Testers', chars)).toBe(true); // led by one
+    expect(effectAppliesToUnit(e, ['INFANTRY', 'BLADE SQUAD'], 'Testers')).toBe(false); // nobody attached
+    expect(effectAppliesToUnit(e, ['INFANTRY', 'BLADE SQUAD'], 'Testers', [{ keywords: ['CHARACTER', 'OTHER LEADER'] }])).toBe(false);
+    const unitOnly = { name: 'u', mods: { hitModifier: 1 }, bearer: ['BLADE SQUAD'] };
+    expect(effectAppliesToUnit(unitOnly, ['INFANTRY', 'BLADE SQUAD'], 'Testers')).toBe(true);
+    // any of several phrases ("Alpha or Beta model only")
+    expect(effectAppliesToUnit({ ...e, bearer: ['ALPHA', 'TEST LEADER'] }, ['TEST LEADER'], 'Testers')).toBe(true);
+  });
+  it('the bearer gate combines with the leader gate (leaderOnly + bearer: only a squad led by the bearer)', () => {
+    const e = { name: 'Foretelling', mods: { grantKeywords: ['LANCE'] }, leaderOnly: true, bearer: ['TEST LEADER'] };
+    const gather = (kw, attached) => filterEffectsForUnit(filterLeaderGated([e], attached), kw, 'Testers', attached);
+    expect(gather(['BLADE SQUAD'], chars)).toHaveLength(1);
+    expect(gather(['BLADE SQUAD'], [])).toHaveLength(0);
+    expect(gather(['BLADE SQUAD'], [{ keywords: ['OTHER LEADER'] }])).toHaveLength(0);
+  });
+  it('omitting the 4th argument is the old behaviour exactly (untagged effects ignore attached characters)', () => {
+    const effs = [
+      { name: 'a', mods: { hitModifier: 1 }, scope: ['CHARACTER'] },
+      { name: 'b', mods: { hitModifier: 1 }, scope: ['INFANTRY'], scopeExcl: ['EPIC HERO'] },
+      { name: 'c', mods: { hitModifier: 1 } },
+    ];
+    expect(filterEffectsForUnit(effs, ['INFANTRY'], 'Testers').map((x) => x.name)).toEqual(['b', 'c']);
+    expect(filterEffectsForUnit(effs, ['INFANTRY'], 'Testers', chars).map((x) => x.name)).toEqual(['b', 'c']);
+  });
+});
+
+describe('unitWide statline buffs reach every model (19.04, ledger item 6)', () => {
+  const unitT = { side: 'defender', mods: { toughBonus: 1 }, unitWide: true };
+  it('resolveEffects routes a unitWide buff into the unit fields and leaves the bearer fields alone', () => {
+    const { defender } = resolveEffects(
+      [unitT, { side: 'defender', mods: { saveSet: 4 }, unitWide: true }, { side: 'defender', mods: { saveSet: 3 }, unitWide: true }, { side: 'defender', mods: { woundBonus: 1 } }],
+      { phase: 'shooting' },
+    );
+    expect(defender).toMatchObject({ unitToughBonus: 1, unitSaveSet: 3, unitWoundBonus: 0, toughBonus: 0, saveSet: null, woundBonus: 1 });
+  });
+  it('applyToSim: body, explicit-value champion, leader and attached all gain it; an inheriting champion stays null', () => {
+    const base = {
+      models: 5, T: 4, W: 2, SV: 4,
+      profiles: [{ name: 'Inherit', models: 1, W: 3, SV: null, T: null }, { name: 'Own', models: 1, W: 2, SV: 3, T: 5 }],
+      leader: { name: 'L', W: 5, SV: 3, T: 5 },
+      attached: [{ name: 'S', W: 4, SV: 4, T: null }],
+    };
+    const resolved = resolveEffects([unitT, { side: 'defender', mods: { woundBonus: 1 }, unitWide: true }, { side: 'defender', mods: { saveSet: 3 }, unitWide: true }], { phase: 'shooting' });
+    const { defender } = applyToSim({}, base, resolved);
+    expect(defender).toMatchObject({ T: 5, W: 3, SV: 3 });
+    expect(defender.profiles[0]).toMatchObject({ W: 4, SV: null, T: null });
+    expect(defender.profiles[1]).toMatchObject({ W: 3, SV: 3, T: 6 });
+    expect(defender.leader).toMatchObject({ W: 6, SV: 3, T: 6 });
+    expect(defender.attached[0]).toMatchObject({ W: 5, SV: 3, T: null });
+  });
+  it('BREAKING VARIANT: a unit-wide buff reaches a multi-model squad with no character (the bearer path drops it)', () => {
+    const resolved = resolveEffects([unitT], { phase: 'shooting' });
+    expect(applyToSim({}, { models: 10, T: 4, W: 1, SV: 4 }, resolved).defender.T).toBe(5);
+    const bearerOnly = resolveEffects([{ side: 'defender', mods: { toughBonus: 1 } }], { phase: 'shooting' });
+    expect(applyToSim({}, { models: 10, T: 4, W: 1, SV: 4 }, bearerOnly).defender.T).toBe(4); // unchanged
+  });
+  it('a bearer buff beside a unit-wide one keeps its own target (the mixed shape: +1 W bearer, +1 T unit)', () => {
+    const resolved = resolveEffects([unitT, { side: 'defender', mods: { woundBonus: 1 } }], { phase: 'shooting' });
+    const { defender } = applyToSim({}, { models: 5, T: 4, W: 2, SV: 4, leader: { W: 4, SV: 3, T: 4 } }, resolved);
+    expect(defender).toMatchObject({ T: 5, W: 2 });
+    expect(defender.leader).toMatchObject({ T: 5, W: 5 });
+  });
+  it('engine: +1 T on a T4 body moves an S4 wound roll from 4+ to 5+ (closed form)', () => {
+    const attacker = { models: 600, weapons: [{ name: 'gun', type: 'ranged', count: 600, A: 1, BS: 2, S: 4, AP: 0, D: 1, keywords: [] }] };
+    const base = { models: 1000000, T: 4, SV: 7, W: 1, keywords: ['INFANTRY'] };
+    const up = applyToSim({}, base, resolveEffects([unitT], { phase: 'shooting' })).defender;
+    const seed = 0x6e57;
+    const r4 = runSimulation(attacker, base, { phase: 'ranged', iterations: 4000, seed });
+    const r5 = runSimulation(attacker, up, { phase: 'ranged', iterations: 4000, seed });
+    // 600 x 5/6 hit x 1/2 wound = 250; at T5 x 1/3 = 166.7
+    expect(Math.abs(r4.woundsDealt.mean - 250)).toBeLessThan(4);
+    expect(Math.abs(r5.woundsDealt.mean - 166.67)).toBeLessThan(4);
+  });
+});

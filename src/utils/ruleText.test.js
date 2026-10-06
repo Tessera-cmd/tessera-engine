@@ -17,6 +17,7 @@ import {
   enhancementEligibility,
   enhancementMatches,
   modsToEffects,
+  statBuffScope,
   degradeInfo,
   mergedDetachmentText,
   MERGED_DETACHMENT_NOTE,
@@ -2647,5 +2648,150 @@ describe('planPackRules: a detachment rule fused with its enhancements is held',
     });
     expect(d.enhancements[0].effects.some((e) => e.mods.attackBonus === 1)).toBe(true);
     expect(d.stratagems[0].effects.length).toBeGreaterThan(0);
+  });
+});
+
+// ---- who an enhancement reaches (mapper 9, 2026-10-06; ledger items 6 and 57; Core Rules 19.03 / 19.04) ----
+// Synthetic wording in GW's formulaic shapes; no rule text is copied.
+describe('statBuffScope: a Save / Wounds / Toughness buff given to the unit or to the bearer (item 6)', () => {
+  it('reads the subject before the stat', () => {
+    expect(statBuffScope('TEST CHAMPION model only. This unit has +1 T.', 'T')).toBe('unit');
+    expect(statBuffScope('This model has +2 W.', 'W')).toBe('bearer');
+    expect(statBuffScope("Add 1 to the bearer's Wounds characteristic.", 'W')).toBe('bearer');
+    expect(statBuffScope('The bearer has a Save characteristic of 3+.', 'SV')).toBe('bearer');
+    expect(statBuffScope("Improve the bearer's Leadership and Wounds characteristics by 1.", 'W')).toBe('bearer');
+    expect(statBuffScope("Models in the bearer's unit have +1 T.", 'T')).toBe('unit');
+  });
+  it('a bulleted item reads its lead-in ("This unit has: - +1 T. - 4+ Sv.")', () => {
+    const t = "BLADE SQUAD unit only. This unit has: - +1 T. - 4+ Sv. - This unit's melee attacks have +1 S.";
+    expect(statBuffScope(t, 'T')).toBe('unit');
+    expect(statBuffScope(t, 'SV')).toBe('unit');
+    // ...and a bulleted item with its own subject keeps it
+    expect(statBuffScope('TEST CHAMPION model only. ▪ This model has +2 W. ▪ This model\'s melee attacks have +1 S', 'W')).toBe('bearer');
+  });
+  it('the mixed shape: a stat named "of models in the bearer\'s unit" is unit-wide, the other stays on the bearer', () => {
+    const t = "Add 1 to the bearer's Wounds characteristic and add 1 to the Toughness characteristic of models in the bearer's unit.";
+    expect(statBuffScope(t, 'W')).toBe('bearer');
+    expect(statBuffScope(t, 'T')).toBe('unit');
+  });
+  it('no subject, no mention, or any bearer mention reads as the bearer (the safe direction)', () => {
+    expect(statBuffScope('+1 T.', 'T')).toBe('bearer');
+    expect(statBuffScope('', 'T')).toBe('bearer');
+    expect(statBuffScope('This unit has +1 T.', 'W')).toBe('bearer');
+    expect(statBuffScope('This unit has +1 T. This model has +1 T.', 'T')).toBe('bearer');
+    // "T'au" is not the Toughness stat
+    expect(statBuffScope("This unit has the T'au keyword. This model has +1 T.", 'T')).toBe('bearer');
+  });
+  it('BREAKING VARIANT (review): a bearer named after the stat, or a bare "bearer", wins over an earlier unit subject', () => {
+    expect(statBuffScope('While this unit is Battle-shocked, add 1 to the Toughness characteristic of the bearer.', 'T')).toBe('bearer');
+    expect(statBuffScope("Each time an attack targets the bearer's unit, add 1 to the Toughness characteristic of the bearer.", 'T')).toBe('bearer');
+    expect(statBuffScope("This unit's bearer has +2 W.", 'W')).toBe('bearer');
+    // ...while "of models in the bearer's unit" after the stat stays unit-wide
+    expect(statBuffScope("Add 1 to the Toughness characteristic of models in the bearer's unit.", 'T')).toBe('unit');
+  });
+  it('modsToEffects tags unitWide from the text, per stat; without text the shape is unchanged', () => {
+    const mods = [{ target: 'unit', op: 'add', stat: 'W', delta: 1 }, { target: 'unit', op: 'add', stat: 'T', delta: 1 }];
+    const t = "Add 1 to the bearer's Wounds characteristic and add 1 to the Toughness characteristic of models in the bearer's unit.";
+    const out = modsToEffects(mods, 'Synthetic Artisan', t);
+    expect(out.find((e) => e.mods.woundBonus).unitWide).toBeUndefined();
+    expect(out.find((e) => e.mods.toughBonus).unitWide).toBe(true);
+    expect(modsToEffects(mods, 'Synthetic Artisan').every((e) => e.unitWide === undefined)).toBe(true);
+  });
+  it('plan -> resolve: planPackRules carries unitWide into the unit fields (the store step: customRules.test.js)', () => {
+    const p = planPackRules({
+      detachments: [{ name: 'D', enhancements: [{ name: 'Star Mark', text: 'BLADE SQUAD unit only. This unit has: - +1 T. - 4+ Sv.', wargearMods: [{ target: 'unit', op: 'add', stat: 'T', delta: 1 }, { target: 'unit', op: 'set', stat: 'SV', value: 4 }] }] }],
+    }).detachments[0].enhancements[0];
+    const stored = p.effects;
+    expect(stored.filter((e) => e.unitWide).map((e) => e.mods)).toEqual([{ toughBonus: 1 }, { saveSet: 4 }]);
+    expect(stored.every((e) => JSON.stringify(e.bearer) === '["BLADE SQUAD"]')).toBe(true);
+    const { defender } = resolveEffects(stored, { phase: 'fight' });
+    expect(defender).toMatchObject({ unitToughBonus: 1, unitSaveSet: 4, toughBonus: 0, saveSet: null });
+  });
+});
+
+describe('the enhancement restriction is a bearer gate, not a scope (item 57)', () => {
+  const enh = (text, wargearMods) =>
+    planPackRules({ detachments: [{ name: 'D', enhancements: [{ name: 'E', text, ...(wargearMods ? { wargearMods } : {}) }] }] }).detachments[0].enhancements[0];
+  it('BREAKING VARIANT: "<X> model only. While the bearer is leading a unit, … that unit have [LANCE]" reaches the led unit', () => {
+    const p = enh('TEST LEADER model only. While the bearer is leading a unit, weapons equipped by models in that unit have the [LANCE] ability.');
+    expect(p.effects.length).toBeGreaterThan(0);
+    for (const e of p.effects) {
+      expect(e.bearer).toEqual(['TEST LEADER']);
+      expect(e.scope).toBeUndefined(); // was ['TEST LEADER'], matched against the bodyguard, so it never applied
+      expect(e.leaderOnly).toBe(true);
+    }
+    const stored = p.effects;
+    const led = [{ keywords: ['CHARACTER', 'TEST LEADER'] }];
+    expect(stored.every((e) => effectAppliesToUnit(e, ['INFANTRY', 'BLADE SQUAD'], 'Testers', led))).toBe(true);
+    expect(stored.some((e) => effectAppliesToUnit(e, ['INFANTRY', 'BLADE SQUAD'], 'Testers'))).toBe(false);
+  });
+  it('reads "<X> or <Y> model only", a spaced slash list, "unit only" and a carve-out after it', () => {
+    expect(enh('Alpha or Beta Gamma model only. The bearer has the [LETHAL HITS] ability.').effects[0].bearer).toEqual(['ALPHA', 'BETA GAMMA']);
+    expect(enh('ALPHA PRIME / BETA PRIME WITH WHIP model only. The bearer has the [LETHAL HITS] ability.').effects[0].bearer).toEqual(['ALPHA PRIME', 'BETA PRIME WITH WHIP']);
+    const unitOnly = enh("BLADE SQUAD unit only. This unit's melee attacks have the [LETHAL HITS] ability.");
+    expect(unitOnly.effects[0].bearer).toEqual(['BLADE SQUAD']);
+    const carved = enh("TEST HOST model only (excluding TEST ELITE models). Models in the bearer's unit have the [LETHAL HITS] ability.");
+    expect(carved.effects[0].bearer).toEqual(['TEST HOST']);
+    expect(carved.effects[0].scope).toBeUndefined();
+    expect(carved.effects[0].scopeExcl).toEqual(['TEST ELITE']); // the carve-out still rides on the later sentence
+  });
+  it('BREAKING VARIANT: a rule with one restriction per section gates each section on its own, never the union', () => {
+    const r = mapRuleText(
+      "Units from your army have the abilities below. ALPHA LEGION units only. This unit's melee attacks have the [LETHAL HITS] ability. BETA LEGION units only. Each time a melee attack targets this unit, subtract 1 from the Hit roll.",
+      { name: 'Sections', source: 'detachment' },
+    );
+    expect(r.effects.find((e) => e.mods.grantKeywords).bearer).toEqual(['ALPHA LEGION']);
+    expect(r.effects.find((e) => e.mods.hitPenalty).bearer).toEqual(['BETA LEGION']);
+  });
+  it('BREAKING VARIANT (review): an effect that names its own receiving unit keeps its scope and is not bearer-gated', () => {
+    const p = enh("TEST PSYKER model only. In your Shooting phase, choose one friendly TEST VEHICLE unit within 6\" of this model. That TEST VEHICLE unit's ranged attacks have +1 to hit rolls.");
+    expect(p.effects).toHaveLength(1);
+    expect(p.effects[0].scope).toEqual(['TEST VEHICLE']);
+    expect(p.effects[0].bearer).toBeUndefined(); // bearer AND scope could never both hold on one unit
+  });
+  it('BREAKING VARIANT (review): "<X> models only <verb>" mid-rule is not a restriction', () => {
+    const r = mapRuleText('Ranged weapons equipped by models in this unit have the [LETHAL HITS] ability. Vehicle models only count once. Ranged weapons equipped by models in this unit have the [IGNORES COVER] ability.');
+    for (const e of r.effects) expect(e.bearer).toBeUndefined();
+  });
+  it('BREAKING VARIANT (review): a long unspaced slash list before "model only" is read in linear time', () => {
+    const t0 = Date.now();
+    mapRuleText(`${'Alpha/'.repeat(40)} foo Beta model only. Weapons equipped by the bearer have [LETHAL HITS].`);
+    expect(Date.now() - t0).toBeLessThan(500);
+  });
+  it('a pack flavour sentence before the restriction does not hide it', () => {
+    expect(enh('A relic of the old wars. TEST LEADER model only. The bearer has the [LETHAL HITS] ability.').effects[0].bearer).toEqual(['TEST LEADER']);
+  });
+  it('a "model(s) only" that does not open a sentence stays a scope (unchanged)', () => {
+    const r = mapRuleText('Each time an attack is made by CHARACTER models only, add 1 to the Hit roll.');
+    for (const e of r.effects) expect(e.bearer).toBeUndefined();
+  });
+  it('the structured buffs carry the same bearer as the prose', () => {
+    const p = enh('TEST LEADER model only. The bearer has a Save characteristic of 2+.', [{ target: 'unit', op: 'set', stat: 'SV', value: 2 }]);
+    const sv = p.effects.find((e) => e.mods.saveSet === 2);
+    expect(sv.bearer).toEqual(['TEST LEADER']);
+    expect(sv.unitWide).toBeUndefined();
+  });
+});
+
+describe('scopeUnit: a scope named with "unit(s)" reads the attached unit (item 57, 19.03)', () => {
+  it('tags a wholly unit-phrased scope; a model-phrased or mixed one is not tagged', () => {
+    const u = mapRuleText('Each time a TEST CHARACTER unit from your army makes an attack, add 1 to the Hit roll.');
+    expect(u.effects[0]).toMatchObject({ scope: ['TEST CHARACTER'], scopeUnit: true });
+    const m = mapRuleText('Each time a TEST CHARACTER model from your army makes an attack, add 1 to the Hit roll.');
+    expect(m.effects[0].scope).toEqual(['TEST CHARACTER']);
+    expect(m.effects[0].scopeUnit).toBeUndefined();
+    const mixed = mapRuleText('Each time an ALPHA unit or a BETA model from your army makes an attack, add 1 to the Hit roll.');
+    expect(mixed.effects[0].scopeUnit).toBeUndefined();
+  });
+  it('a subject-less sentence inherits the carried scope with its noun', () => {
+    const r = mapRuleText('TEST CHARACTER units from your army are fearsome. Each time such a unit makes an attack, add 1 to the Hit roll.');
+    const e = r.effects.find((x) => x.mods.hitModifier);
+    expect(e).toMatchObject({ scope: ['TEST CHARACTER'], scopeUnit: true });
+  });
+  it('plan -> resolve: the tag widens the match only with a character attached', () => {
+    const [e] = mapRuleText('Each time a TEST CHARACTER unit from your army makes an attack, add 1 to the Hit roll.').effects;
+    expect(e.scopeUnit).toBe(true);
+    expect(effectAppliesToUnit(e, ['INFANTRY'], 'Testers', [{ keywords: ['TEST CHARACTER'] }])).toBe(true);
+    expect(effectAppliesToUnit(e, ['INFANTRY'], 'Testers')).toBe(false);
   });
 });
