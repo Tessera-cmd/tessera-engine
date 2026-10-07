@@ -533,3 +533,43 @@ describe('conditional weapon keywords (Codex: Orks era)', () => {
     expect(plainDef[0].weapon.keywords).toEqual([]);
   });
 });
+
+// ---- AP on critical wounds only (ledger item 84) -----------------------------------------------------------------
+// 05.02: a critical wound is an unmodified wound roll of 6 (or the [ANTI] threshold); "on a Critical Wound, improve the
+// Armour Penetration characteristic of that attack by 1" (Ingrained Superiority) applies to those wounds alone. 24.23: a
+// Lethal Hits auto-wound skips the wound roll, so it is not a critical wound.
+describe('critApBonus: AP improved on critical wounds only (ledger item 84)', () => {
+  const gun = (extra = []) => ({ name: 'g', type: 'ranged', count: 6000, A: 1, BS: 2, S: 4, AP: 0, D: 1, keywords: ['TORRENT', ...extra] });
+  const atk = (extra) => ({ models: 6000, weapons: [gun(extra)] });
+  const horde = { models: 100000, T: 4, SV: 3, W: 1, keywords: ['INFANTRY'] };
+  // Torrent (all hit), S4 v T4 wound 4+: non-crit wounds 1/3 save on 3+, crit wounds 1/6 save on 4+ with +1 AP.
+  // Failed = 6000 x (1/3 x 1/3 + 1/6 x 1/2) = 1166.7; with no bonus 6000 x 1/2 x 1/3 = 1000.
+  it('uniform path: the critical wounds save one worse (closed form)', () => {
+    const on = runSimulation(atk(), horde, { phase: 'ranged', iterations: 300, seed: 84, critApBonus: 1 });
+    const off = runSimulation(atk(), horde, { phase: 'ranged', iterations: 300, seed: 84 });
+    expect(Math.abs(on.woundsDealt.mean - 1166.7)).toBeLessThan(8);
+    expect(Math.abs(off.woundsDealt.mean - 1000)).toBeLessThan(8);
+  });
+  it('mixed (allocation) path: the same closed form', () => {
+    const mixed = { ...horde, profiles: [{ name: 'Sgt', count: 1, W: 1 }], attached: [{ name: 'C', models: 1, W: 5, SV: 3, T: 4, keywords: ['CHARACTER'] }] };
+    const on = runSimulation(atk(), mixed, { phase: 'ranged', iterations: 200, seed: 84, critApBonus: 1 });
+    expect(Math.abs(on.woundsDealt.mean - 1166.7)).toBeLessThan(10);
+  });
+  it('BREAKING VARIANT: a bonus of 0 is bit-identical to no option', () => {
+    const a = runSimulation(atk(), horde, { phase: 'ranged', iterations: 50, seed: 7, critApBonus: 0 });
+    const b = runSimulation(atk(), horde, { phase: 'ranged', iterations: 50, seed: 7 });
+    expect(a.woundsDealt).toEqual(b.woundsDealt);
+  });
+  it('a Lethal Hits auto-wound is not a critical wound; a Devastating crit is a mortal (no save)', () => {
+    // No Torrent: BS2+ hit, crit hits (1/6) auto-wound via Lethal at the base 3+ save; wound-roll crits gain the AP.
+    const lethal = { models: 6000, weapons: [{ ...gun(), keywords: ['LETHAL HITS'] }] };
+    const on = runSimulation(lethal, horde, { phase: 'ranged', iterations: 200, seed: 11, critApBonus: 1 });
+    // per attack: normal hits 4/6 -> wound 4+ (1/3 normal, 1/6 crit); auto-wounds 1/6. Failed = 4/6 x (1/9 + 1/12) + 1/6 x 1/3.
+    const expected = 6000 * ((4 / 6) * (1 / 9 + 1 / 12) + (1 / 6) * (1 / 3));
+    expect(Math.abs(on.woundsDealt.mean - expected)).toBeLessThan(9);
+    const dev = { models: 6000, weapons: [{ ...gun(), keywords: ['TORRENT', 'DEVASTATING WOUNDS'] }] };
+    const d1 = runSimulation(dev, horde, { phase: 'ranged', iterations: 100, seed: 3, critApBonus: 1 });
+    const d0 = runSimulation(dev, horde, { phase: 'ranged', iterations: 100, seed: 3 });
+    expect(d1.woundsDealt).toEqual(d0.woundsDealt); // Dev crits never reach a save: the bonus changes nothing
+  });
+});

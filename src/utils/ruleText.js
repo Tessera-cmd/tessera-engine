@@ -76,7 +76,9 @@
 //     "other Character models attached …" (`otherChars`) are kept and routed to that character (gatherRunAbilities).
 // 14 = ledger item 79: a fused detachment page worded "<X> unit only" is held; "Bearer's" is never a scope keyword; an
 //     AP / Damage / Strength / roll modifier stated "on a Critical Wound / Hit," is not simulated (it read as flat).
-export const MAPPER_VERSION = 14;
+// 15 = ledger item 84: "on a Critical Wound, improve the Armour Penetration characteristic of that attack by N" is
+//     `critApBonus: N`, simulated on the critical wounds alone (combat.js); other crit-only modifiers stay unsimulated.
+export const MAPPER_VERSION = 15;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -1211,7 +1213,14 @@ function mapClause(
     // "… makes an attack, on a Critical Wound, improve the Armour Penetration characteristic of that attack by 1": the
     // engine cannot give AP or Damage to critical wounds alone, and read as a flat bonus it applied to every attack
     // (Ingrained Superiority). Not simulated (mapper 14, ledger item 79); under-applies, the safe direction.
-    if (side === 'attacker' && CRIT_ONLY_RE.test(clause) && Object.keys(mod || {}).some((k) => CRIT_ONLY_KEYS.has(k))) return;
+    // Mapper 15 (ledger item 84): an AP improvement on a critical WOUND is the engine's `critApBonus` (combat.js gives it
+    // to the critical wounds alone); every other crit-only modifier stays unsimulated.
+    if (side === 'attacker' && CRIT_ONLY_RE.test(clause) && Object.keys(mod || {}).some((k) => CRIT_ONLY_KEYS.has(k))) {
+      const keys = Object.keys(mod || {});
+      if (!(CRIT_WOUND_RE.test(clause) && keys.length === 1 && keys[0] === 'apBonus')) return;
+      mod = { critApBonus: mod.apBonus };
+      summary = `+${mod.critApBonus} AP on critical wounds`;
+    }
     const eff = { name, side, phase: phaseOverride || phase, condition, mods: mod };
     const sideScope = side === 'defender' ? scope.defender : scope.attacker;
     if (sideScope.length) eff.scope = sideScope;
@@ -1376,6 +1385,7 @@ const ABILITY_ONCE_RE = /\bonce per (?:battle|turn|game)\b/i;
 // A modifier that only applies to a critical hit or wound ("on a Critical Wound, improve the AP …"): see mapClause add.
 const CRIT_ONLY_RE = /\b(?:on|for)\s+(?:an?\s+|each\s+)?(?:unmodified\s+)?Critical\s+(?:Hit|Wound)s?\s*,/i;
 const CRIT_ONLY_KEYS = new Set(['apBonus', 'damageBonus', 'strengthBonus', 'woundModifier', 'hitModifier']);
+const CRIT_WOUND_RE = /\b(?:on|for)\s+(?:an?\s+|each\s+)?(?:unmodified\s+)?Critical\s+Wounds?\s*,/i;
 const ONCE_OPENER_RE = /^\W*(?:in addition,\s*)?once per (?:battle|turn|game)\b/i;
 // "A TRANSPORT unit … this unit is embarked within has: …" (ledger item 80): the effect needs the unit embarked, a board
 // state the sim does not track, so its trigger is unread (the rule-trigger gate).

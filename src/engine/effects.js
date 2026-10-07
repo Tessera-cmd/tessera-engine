@@ -37,6 +37,7 @@
 //       // attacker-side (offensive):
 //       hitModifier?, woundModifier?,         // ints; the engine clamps each to +/-1
 //       apBonus?, damageBonus?,               // ints; improve AP / add flat Damage
+//       critApBonus?,                         // int; improve AP on CRITICAL wounds only (ledger item 84, combat.js)
 //       strengthBonus?, attackBonus?,         // ints; +N Strength (via wound table) / +N Attacks, NOT clamped
 //       reroll?: { hit?, wound? },            // 'ones' | 'failed' | 'all'
 //       grantKeywords?: string[],             // weapon keywords granted to the unit
@@ -237,6 +238,7 @@ function emptyAttacker() {
     hitModifier: 0,
     woundModifier: 0,
     apBonus: 0,
+    critApBonus: 0,
     damageBonus: 0,
     strengthBonus: 0,
     attackBonus: 0,
@@ -345,6 +347,7 @@ export function resolveEffects(effects, ctx = {}) {
       if (m.hitModifier) atk.hitModifier += m.hitModifier;
       if (m.woundModifier) atk.woundModifier += m.woundModifier;
       if (m.apBonus) atk.apBonus += m.apBonus;
+      if (m.critApBonus) atk.critApBonus += m.critApBonus;
       if (m.damageBonus) atk.damageBonus += m.damageBonus;
       if (m.strengthBonus) atk.strengthBonus += m.strengthBonus;
       if (m.attackBonus) atk.attackBonus += m.attackBonus;
@@ -423,6 +426,7 @@ export function applyToSim(baseOptions, baseDefender, resolved) {
   options.hitModifier = (baseOptions.hitModifier || 0) + a.hitModifier - d.hitPenalty;
   options.woundModifier = (baseOptions.woundModifier || 0) + a.woundModifier;
   options.apBonus = (baseOptions.apBonus || 0) + a.apBonus;
+  options.critApBonus = (baseOptions.critApBonus || 0) + (a.critApBonus || 0);
   options.damageBonus = (baseOptions.damageBonus || 0) + a.damageBonus;
   options.strengthBonus = (baseOptions.strengthBonus || 0) + a.strengthBonus;
   options.attackBonus = (baseOptions.attackBonus || 0) + a.attackBonus;
@@ -541,7 +545,7 @@ export function collectEffects({ abilities = [], armyRule = null, detachment = n
 // Convenience: does this resolved patch actually change anything? (for UI summaries)
 export function isAttackerActive(a) {
   return (
-    a.hitModifier || a.woundModifier || a.apBonus || a.damageBonus ||
+    a.hitModifier || a.woundModifier || a.apBonus || a.critApBonus || a.damageBonus ||
     a.strengthBonus || a.attackBonus ||
     a.hitReroll !== 'none' || a.woundReroll !== 'none' || a.grantKeywords.length
   );

@@ -2940,10 +2940,19 @@ describe('mapper 14: fused "unit only" pages, the Bearer role, crit-only modifie
     expect(r.effects).toEqual([expect.objectContaining({ mods: { apBonus: 1 } })]);
     expect(r.effects[0].scope).toBeUndefined();
   });
-  it('an AP bonus "on a Critical Wound" is not simulated (it read as +1 AP on every attack)', () => {
-    expect(mapRuleText('Each time a model in the bearer\'s unit makes an attack, on a Critical Wound, improve the Armour Penetration characteristic of that attack by 1.', { name: 'X' }).effects).toEqual([]);
+  it('an AP bonus "on a Critical Wound" is never a flat AP bonus (mapper 15 reads it as critApBonus)', () => {
+    const [e] = mapRuleText('Each time a model in the bearer\'s unit makes an attack, on a Critical Wound, improve the Armour Penetration characteristic of that attack by 1.', { name: 'X' }).effects;
+    expect(e.mods).toEqual({ critApBonus: 1 });
   });
   it('BREAKING VARIANT: a keyword granted on a Critical Hit is kept (it only acts on critical hits anyway)', () => {
     expect(mapRuleText('Each time a model in this unit makes an attack, on a Critical Hit, that attack has the [LETHAL HITS] ability.', { name: 'X' }).effects).toEqual([expect.objectContaining({ mods: { grantKeywords: ['LETHAL HITS'] } })]);
+  });
+});
+
+describe('mapper 15: AP on a critical wound is critApBonus (ledger item 84)', () => {
+  it('emits critApBonus; a crit-only Damage or a critical-HIT AP stays unsimulated', () => {
+    expect(mapRuleText('Each time a model in the bearer\'s unit makes an attack, on a Critical Wound, improve the Armour Penetration characteristic of that attack by 1.', { name: 'X' }).effects).toEqual([expect.objectContaining({ side: 'attacker', mods: { critApBonus: 1 } })]);
+    expect(mapRuleText('Each time a model in this unit makes an attack, on a Critical Hit, improve the Armour Penetration characteristic of that attack by 1.', { name: 'X' }).effects).toEqual([]);
+    expect(mapRuleText('Each time a model in this unit makes an attack, on a Critical Wound, add 1 to the Damage characteristic of that attack.', { name: 'X' }).effects).toEqual([]);
   });
 });

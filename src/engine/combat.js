@@ -387,6 +387,10 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
 
   let woundsToSave = autoWounds; // auto-wounds (Lethal) are normal wounds -> still get a save
   let devCritWounds = 0; // critical wounds that trigger Devastating Wounds
+  // Of woundsToSave, the CRITICAL wounds (05.02: an unmodified wound roll of 6, or the [ANTI] threshold) — only counted
+  // for `critApBonus` ("on a Critical Wound, improve the Armour Penetration characteristic of that attack by 1", ledger
+  // item 84). A Lethal Hits auto-wound is NOT one: it skips the wound roll (24.23).
+  let critToSave = 0;
 
   for (let i = 0; i < normalHits; i++) {
     const { pass, crit } = checkRoll(rng, {
@@ -397,7 +401,10 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
     });
     if (!pass) continue;
     if (crit && hasDev) devCritWounds += 1; // -> mortal wounds, no save (resolved below)
-    else woundsToSave += 1; // normal wound (incl. a crit wound on a non-Dev weapon)
+    else {
+      woundsToSave += 1; // normal wound (incl. a crit wound on a non-Dev weapon)
+      if (crit) critToSave += 1;
+    }
   }
   state.wounds += woundsToSave + devCritWounds; // all successful wounds (pre-save)
   state.mortalInstances += devCritWounds; // Dev crits bypass saves -> mortal wounds
@@ -407,6 +414,11 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   // characteristic "cannot be worse than 0" (02.02 bounds), so a mis-authored negative
   // apBonus in a custom rule can never turn a weapon into a save IMPROVER.
   const ap = Math.min(0, (weapon.AP || 0) - (o.apBonus || 0));
+  // A critical wound's own AP (critApBonus, ledger item 84). With no bonus every wound shares `ap` and the code below is
+  // the original path, bit-identical; with one, the critical wounds resolve as their own batch after the others (they
+  // are different attacks: 05.04 only batches identical ones).
+  const critAp = Math.min(0, ap - Math.max(0, o.critApBonus || 0)); // a negative (hand-entered) bonus never helps the save
+  const critSplit = critAp !== ap && critToSave > 0;
   const meltaAdd =
     hasKw(weapon, 'MELTA') && o.withinMeltaRange
       ? (weapon.meltaBonus ?? kwValue(weapon, 'MELTA', 1)) // dflt 1: bare keyword ≠ no-op
@@ -425,7 +437,10 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
     // so a Precision+Dev weapon cannot snipe a character via its mortals.
     const precision = hasKw(weapon, 'PRECISION');
     const ctx = { ap, meltaAdd, damageBonus, saveReroll: o.saveReroll, weaponD: weapon.D, precision };
-    resolveMixedSaves(state, woundsToSave, ctx, rng);
+    if (critSplit) {
+      resolveMixedSaves(state, woundsToSave - critToSave, ctx, rng);
+      resolveMixedSaves(state, critToSave, { ...ctx, ap: critAp }, rng);
+    } else resolveMixedSaves(state, woundsToSave, ctx, rng);
     resolveMixedMortals(state, devCritWounds, { meltaAdd, damageBonus, weaponD: weapon.D }, rng);
     return;
   }
@@ -435,9 +450,12 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   const armourTarget = defender.SV - ap; // AP worsens the save; >6 => no armour save
   const invulnTarget = defender.INV != null ? defender.INV : 7; // invuln ignores AP
   const saveTarget = Math.min(armourTarget, invulnTarget); // use the better save
+  const critSaveTarget = Math.min(defender.SV - critAp, invulnTarget); // the critical wounds' (critApBonus)
 
   for (let i = 0; i < woundsToSave; i++) {
-    if (rollSave(rng, saveTarget, o.saveReroll)) {
+    // With a critApBonus the last `critToSave` wounds are the critical ones (resolved after the others).
+    const target = critSplit && i >= woundsToSave - critToSave ? critSaveTarget : saveTarget;
+    if (rollSave(rng, target, o.saveReroll)) {
       state.savedWounds++;
       continue;
     }

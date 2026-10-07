@@ -684,3 +684,11 @@ describe('targetExcl: an attacker effect does nothing against an excluded target
     expect(resolveEffects([old], { phase: 'shooting', target: { keywords: ['VEHICLE'] } }).attacker.apBonus).toBe(1);
   });
 });
+
+describe('critApBonus through the effects layer (ledger item 84)', () => {
+  it('resolveEffects sums it and applyToSim adds it to the manual value', () => {
+    const r = resolveEffects([{ side: 'attacker', mods: { critApBonus: 1 } }, { side: 'attacker', mods: { critApBonus: 1, apBonus: 1 } }], { phase: 'shooting' });
+    expect(r.attacker).toMatchObject({ critApBonus: 2, apBonus: 1 });
+    expect(applyToSim({ critApBonus: 1 }, { models: 1 }, r).options).toMatchObject({ critApBonus: 3, apBonus: 1 });
+  });
+});
