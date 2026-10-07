@@ -2873,3 +2873,22 @@ describe('defenceReach reads the Damage reduction itself (ledger item 75, review
     expect(defenceReach('Each time an attack is allocated to this model, halve the Damage of that attack.', null, 'damage')).toBe('model');
   });
 });
+
+// ---- target carve-outs (mapper 11, ledger item 77) -------------------------------------------------------------
+// "… targets a unit (excluding MONSTERS and VEHICLES)" names the TARGET: it is the effect's targetExcl, checked against
+// the defender, never this side's own exclusion (which never matched, so the rule applied against Monsters too).
+describe('target carve-outs become targetExcl (ledger item 77)', () => {
+  const read = (t) => mapRuleText(t, { name: 'X' }).effects.map((e) => ({ scope: e.scope, scopeExcl: e.scopeExcl, targetExcl: e.targetExcl }));
+  it('reads the target forms', () => {
+    expect(read('Each time a model in a FOO unit from your army makes a ranged attack that targets a visible unit (excluding Monsters and Vehicles), improve the Armour Penetration characteristic of that attack by 1.')).toEqual([{ scope: ['FOO'], scopeExcl: undefined, targetExcl: ['MONSTERS', 'VEHICLES'] }]);
+    expect(read('In your Shooting phase, this unit\'s ranged attacks that target a unit (excluding FLY units) have [SUSTAINED HITS 1].')[0].targetExcl).toEqual(['FLY']);
+    expect(read('Each time a model in this unit makes a ranged attack (excluding attacks that target MONSTERS and VEHICLES), add 1 to the Wound roll.')[0].targetExcl).toEqual(['MONSTERS', 'VEHICLES']);
+  });
+  it('BREAKING VARIANT: an exclusion on this side\'s own unit stays a scopeExcl', () => {
+    expect(read('When a friendly FOO CHARACTER unit (excluding EPIC HERO units) is selected to fight, add 1 to the Hit roll.')).toEqual([{ scope: ['FOO CHARACTER'], scopeExcl: ['EPIC HERO'], targetExcl: undefined }]);
+  });
+  it('a defensive effect never carries a target carve-out', () => {
+    const r = mapRuleText('Each time an attack that targets a unit (excluding FOO units) is allocated to a model in this unit, subtract 1 from the Damage characteristic of that attack.', { name: 'X' });
+    expect(r.effects.every((e) => e.targetExcl === undefined)).toBe(true);
+  });
+});

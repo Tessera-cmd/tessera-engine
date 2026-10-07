@@ -661,3 +661,26 @@ describe('bearer statline buffs with no base value (ledger item 76)', () => {
     expect(Math.abs(r.woundsDealt.mean - 166.67)).toBeLessThan(4);
   });
 });
+
+// ---- target carve-outs (ledger item 77) ---------------------------------------------------------------------------
+describe('targetExcl: an attacker effect does nothing against an excluded target (ledger item 77)', () => {
+  const ap = { side: 'attacker', mods: { apBonus: 1 }, targetExcl: ['MONSTERS', 'VEHICLES'] };
+  it('skips the effect against a matching target (plural phrases match singular keywords), keeps it otherwise', () => {
+    expect(resolveEffects([ap], { phase: 'shooting', target: { keywords: ['VEHICLE', 'TRANSPORT'] } }).attacker.apBonus).toBe(0);
+    expect(resolveEffects([ap], { phase: 'shooting', target: { keywords: ['INFANTRY'] } }).attacker.apBonus).toBe(1);
+  });
+  it('the target is the attached unit: a MONSTER character leading infantry excludes it (19.03 keyword union)', () => {
+    const led = { keywords: ['INFANTRY'], attached: [{ keywords: ['MONSTER', 'CHARACTER'] }] };
+    expect(resolveEffects([ap], { phase: 'shooting', target: led }).attacker.apBonus).toBe(0);
+  });
+  it('with no target (a display summary) the carve-out is not checked; a defender effect is never skipped', () => {
+    expect(resolveEffects([ap], { phase: 'shooting' }).attacker.apBonus).toBe(1);
+    const def = { side: 'defender', mods: { fnp: 5 }, targetExcl: ['VEHICLES'] };
+    expect(resolveEffects([def], { phase: 'shooting', target: { keywords: ['VEHICLE'] } }).defender.fnp).toBe(5);
+  });
+  it('BREAKING VARIANT: the old reading (an own-unit scopeExcl) never matched, so the rule applied against vehicles', () => {
+    const old = { side: 'attacker', mods: { apBonus: 1 }, scopeExcl: ['MONSTERS', 'VEHICLES'] };
+    expect(filterEffectsForUnit([old], ['INFANTRY', 'REGIMENT'], 'Astra Militarum')).toHaveLength(1);
+    expect(resolveEffects([old], { phase: 'shooting', target: { keywords: ['VEHICLE'] } }).attacker.apBonus).toBe(1);
+  });
+});

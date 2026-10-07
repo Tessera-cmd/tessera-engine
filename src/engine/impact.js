@@ -68,6 +68,7 @@ function resolveSelection(ctx, atkSel, defSel, conditions, baseOptions = ctx.bas
   const resolved = resolveEffects([...atkEffects, ...defEffects], {
     phase: ctx.phase,
     activeConditions: new Set(conditions),
+    target: ctx.baseDefender, // a "targets a unit (excluding …)" carve-out is checked against it (ledger item 77)
   });
   return applyToSim(baseOptions, ctx.baseDefender, resolved);
 }

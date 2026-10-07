@@ -67,7 +67,9 @@
 // 10 = ledger item 75: a Feel No Pain, invulnerable save or Damage reduction whose clause gives it to one model ("The
 //     bearer has the Feel No Pain 5+ ability", "Each time an attack is allocated to this model, halve the Damage") is
 //     tagged `modelOnly` and reaches only that model (19.04; see defenceReach), never the unit it leads.
-export const MAPPER_VERSION = 10;
+// 11 = ledger item 77: a carve-out on the attack's target ("targets a unit (excluding MONSTERS and VEHICLES)") is the
+//     effect's `targetExcl`, checked against the defender's keywords, no longer this side's own exclusion.
+export const MAPPER_VERSION = 11;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -506,6 +508,10 @@ function bearerPhrases(t) {
   return out;
 }
 
+// "… that targets a (visible / enemy / eligible) unit (", "… targets the closest eligible unit (": the carve-out names
+// the target. "excluding attacks that target …", "excluding units that can FLY" after such a target, likewise.
+const TARGET_EXCL_BEFORE_RE = /\btargets?\s+(?:a|an|the|that|one)?\s*(?:(?:closest|visible|enemy|eligible)\s+)*(?:units?|models?)\s*\(\s*$/i;
+const TARGET_EXCL_SPAN_RE = /^\s*attacks?\s+that\s+targets?\b/i;
 function detectScope(t) {
   const attacker = [];
   const defender = [];
@@ -631,11 +637,19 @@ function detectScope(t) {
     // enemy unit (excluding TITANIC units) …") describes the target or the attacker, never this side's
     // own unit, and scopeExcl can only be checked against this side's unit: carried, it switched an
     // aircraft's own anti-ground buff off (2026-10-03). The clause's condition covers it instead.
-    if (/\benemy\s+(?:units?|models?)\s*\(\s*$/i.test(t.slice(0, exclSpan.index))) excl = [];
+    // A carve-out on the attack's TARGET ("makes a ranged attack that targets a visible unit (excluding Monsters and
+    // Vehicles)", "(excluding attacks that target MONSTERS and VEHICLES)") is checked against the DEFENDER's keywords
+    // (`targetExcl`, mapper 11, ledger item 77). Read as this side's own exclusion it never matched, so the rule applied
+    // against Monsters and Vehicles too, and an aircraft's "(excluding FLY units)" switched its own rule off.
+    let targetExcl = [];
+    if (TARGET_EXCL_BEFORE_RE.test(t.slice(0, exclSpan.index)) || TARGET_EXCL_SPAN_RE.test(exclSpan[1])) {
+      targetExcl = excl;
+      excl = [];
+    } else if (/\benemy\s+(?:units?|models?)\s*\(\s*$/i.test(t.slice(0, exclSpan.index))) excl = [];
     const drop = (p) => new RegExp(`\\b${p.replace(/[-/+*?^$()[\]{}|\\]/g, '\\$&')}\\b`, 'i').test(exclSpan[1]);
-    return { attacker: attacker.filter((p) => !drop(p)), defender: defender.filter((p) => !drop(p)), excl, bearer, nouns };
+    return { attacker: attacker.filter((p) => !drop(p)), defender: defender.filter((p) => !drop(p)), excl, targetExcl, bearer, nouns };
   }
-  return { attacker, defender, excl, bearer, nouns };
+  return { attacker, defender, excl, targetExcl: [], bearer, nouns };
 }
 
 // Army-COMPOSITION conditional: a clause gated on which detachment you run or which keywords/
@@ -1132,6 +1146,7 @@ function mapClause(
           attacker: inherited.scope.attacker,
           defender: inherited.scope.defender,
           excl: [...new Set([...(inherited.scope.excl || []), ...(ownScope.excl || [])])],
+          targetExcl: [...new Set([...(inherited.scope.targetExcl || []), ...(ownScope.targetExcl || [])])],
           nouns: inherited.scope.nouns,
         };
   // A clause that is conditionally TRIGGERED but whose gate we couldn't resolve into a known
@@ -1189,6 +1204,8 @@ function mapClause(
     // Every scope phrase named with "unit(s)": the attached unit's keyword union applies (mapper 9, 19.03).
     if (sideScope.length && sideScope.every((p) => scope.nouns?.get(p) === 'unit')) eff.scopeUnit = true;
     if (scope.excl?.length) eff.scopeExcl = scope.excl;
+    // The attack's target must carry none of these (engine/effects.js effectAppliesToTarget); an attacker buff only.
+    if (side === 'attacker' && scope.targetExcl?.length) eff.targetExcl = scope.targetExcl;
     if (source) eff.source = source;
     // An exclusion on the ATTACKING enemy ("each time an enemy unit (excluding TITANIC units) …") can't
     // gate a defence (detectScope doesn't carry it: scopeExcl only sees this side's unit), so without it

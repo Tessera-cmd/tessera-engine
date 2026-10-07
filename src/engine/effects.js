@@ -23,6 +23,9 @@
 //                                             // unit's keyword union (19.03), not the bodyguard's alone
 //     bearer?: string[],                      // an enhancement's "<X> model/unit only" restriction: the unit or an
 //                                             // attached character must carry one phrase (see effectAppliesToUnit)
+//     targetExcl?: string[],                  // an attacker effect that does nothing against a target carrying one of
+//                                             // these keyword phrases ("targets a unit (excluding MONSTERS and
+//                                             // VEHICLES)"); checked against ctx.target in resolveEffects
 //     unitWide?: true,                        // a saveSet/woundBonus/toughBonus that reaches EVERY model (19.04),
 //                                             // not just the bearer (see applyToSim)
 //     modelOnly?: true,                       // an fnp/invuln/damageReduction/halveDamage given to ONE model (19.04):
@@ -175,6 +178,19 @@ export function effectAppliesToUnit(effect, unitKeywords, unitFaction, attachedC
 // faction name, used as a keyword fallback). When `unitKeywords` is null/undefined, gating is
 // skipped (effects returned unchanged) so existing callers that don't supply keywords are
 // unaffected. `attachedChars` as effectAppliesToUnit.
+// The keywords an attack's TARGET has (ledger item 77): the defending unit's own plus every attached character's,
+// 19.03 ("An attached unit has all of the keywords of all of its component units"), plus its faction name.
+export function targetKeywordsOf(defender) {
+  const have = keywordSet(defender?.keywords, defender?.faction);
+  for (const c of attachedCharsOf(defender)) keywordSet(c?.keywords, c?.faction, have);
+  return have;
+}
+// Does a target carve-out ("… that targets a unit (excluding MONSTERS and VEHICLES)") rule this target out?
+export function targetExcluded(effect, targetKeywords) {
+  if (!effect?.targetExcl?.length || !targetKeywords) return false;
+  return effect.targetExcl.some((p) => phraseMatchesKeywords(String(p).toUpperCase().trim(), targetKeywords));
+}
+
 export function filterEffectsForUnit(effects, unitKeywords, unitFaction, attachedChars) {
   if (unitKeywords == null) return effects || [];
   return (effects || []).filter((e) => effectAppliesToUnit(e, unitKeywords, unitFaction, attachedChars));
@@ -274,10 +290,13 @@ export function effectiveKeywords(baseKeywords, patch) {
  * list. Pure, no engine calls, no randomness.
  *
  * @param effects  Effect[]
- * @param ctx      { phase: 'shooting'|'fight', activeConditions?: Set<string>|string[] }
+ * @param ctx      { phase: 'shooting'|'fight', activeConditions?: Set<string>|string[], target?: defender }
+ *                 `target`: the defending unit; an attacker effect whose `targetExcl` it matches is skipped (ledger
+ *                 item 77). Every sim path passes it; omitted (a display summary), carve-outs are not checked.
  */
 export function resolveEffects(effects, ctx = {}) {
   const phase = ctx.phase || 'shooting';
+  const targetKeywords = ctx.target ? targetKeywordsOf(ctx.target) : null;
   const active =
     ctx.activeConditions instanceof Set
       ? ctx.activeConditions
@@ -292,6 +311,7 @@ export function resolveEffects(effects, ctx = {}) {
     if (ePhase !== 'any' && ePhase !== phase) continue;
     const cond = e.condition || 'always';
     if (cond !== 'always' && !active.has(cond)) continue;
+    if ((e.side || 'attacker') !== 'defender' && targetExcluded(e, targetKeywords)) continue;
 
     const m = e.mods;
     const bucket = (e.side || 'attacker') === 'defender' ? def : atk;
