@@ -198,6 +198,23 @@ export function currentWoundToughness(groups) {
   return Math.max(...pool.map((g) => g.T));
 }
 
+// Wound-roll Toughness under the Kill Team rule (the Deathwatch "Kill Teams" army rule and the Imperial
+// Agents "Kill Team" ability, both packs verbatim on this point): "use the Toughness characteristic of the
+// majority of the models in that unit ... If two or more Toughness characteristics are tied for majority, use
+// the highest". Counted over the bodyguard (non-CHARACTER) models alive, as 19.02 counts them; the caller locks
+// the value for the whole attacking unit ("until the attacking unit has finished making its attacks").
+// null when no bodyguard model is left. Pure.
+export function majorityToughness(groups) {
+  const pool = (groups || []).filter((g) => !g.isCharacter && g.models > 0);
+  if (!pool.length) return null;
+  const n = new Map();
+  for (const g of pool) n.set(g.T, (n.get(g.T) || 0) + g.models);
+  let best = null;
+  let bestN = -1;
+  for (const [t, c] of n) if (c > bestN || (c === bestN && t > best)) [best, bestN] = [t, c];
+  return best;
+}
+
 // Does a save roll inflict damage against this group? (05.04 step 2.) Matches combat.js's
 // uniform rollSave: an unmodified 1 always inflicts; the invuln (if any) ignores AP; the
 // armour save is worsened by AP (a negative `ap`, so SV - ap raises the target).

@@ -23,6 +23,7 @@ import {
   isMixedDefender,
   buildGroups,
   currentWoundToughness,
+  majorityToughness,
   resolveMixedSaves,
   resolveMixedMortals,
   attachedChars,
@@ -128,6 +129,9 @@ function makeDefenderState(defender) {
   if (isMixedDefender(defender)) {
     state.groups = buildGroups(defender);
     state.totalModels = state.groups.reduce((s, g) => s + g.models, 0);
+    // Kill Team (defender.toughnessMajority): the wound-roll Toughness is the majority's, fixed for the whole
+    // attacking unit, so it is read once here (allocation.majorityToughness).
+    if (defender.toughnessMajority === true) state.majorityT = majorityToughness(state.groups);
   } else {
     state.modelsRemaining = defender.models;
     state.currentWounds = defender.W; // wounds left on the current (partially damaged) model
@@ -367,8 +371,9 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   // shifts the threshold differently than +1 to the wound roll. Not clamped (+2 is real).
   const effS = weapon.S + (o.strengthBonus || 0);
   // 19.02: vs an attached/mixed unit the wound roll uses the highest bodyguard Toughness
-  // (the Leader's only once they are gone). A uniform defender just uses its single T.
-  const T = state.groups ? currentWoundToughness(state.groups) ?? defender.T : defender.T;
+  // (the Leader's only once they are gone). A uniform defender just uses its single T. A Kill Team unit uses
+  // the majority's Toughness, locked when the attacking unit began (state.majorityT).
+  const T = state.groups ? (state.majorityT ?? currentWoundToughness(state.groups) ?? defender.T) : defender.T;
   const wt = woundTarget(effS, T);
   // 19.03: an attached unit has all its components' keywords, so Anti-[keyword] can trigger
   // off an attached character's keyword even for wounds not allocated to it. Union every

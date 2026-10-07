@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { runSimulation } from './monteCarlo.js';
 import { evalValue, makeRng } from './dice.js';
 import { simulateUnitAttack } from './combat.js';
+import { majorityToughness } from './allocation.js';
 
 const N = 30000;
 const SEED = 0x1234abcd;
@@ -603,5 +604,33 @@ describe('weaponMods: a weapon bonus reaches its holder\'s weapons only (ledger 
     const a = runSimulation(squad(), target, { phase: 'melee', iterations: 50, seed: 9 });
     const b = runSimulation(squad(), target, { phase: 'melee', iterations: 50, seed: 9, weaponMods: [] });
     expect(b.woundsDealt).toEqual(a.woundsDealt);
+  });
+});
+
+// ---- Kill Team: the majority's Toughness (ledger item 20) ----------------------------------------
+// Deathwatch "Kill Teams" army rule / Imperial Agents "Kill Team" ability (both packs): wound rolls use the
+// Toughness of the majority of the unit's models, ties to the highest, fixed for the whole attacking unit.
+describe('Kill Team majority Toughness (defender.toughnessMajority)', () => {
+  it('majorityToughness: most models wins, a tie takes the highest, characters and dead groups are ignored', () => {
+    expect(majorityToughness([{ T: 4, models: 4 }, { T: 6, models: 1 }])).toBe(4);
+    expect(majorityToughness([{ T: 4, models: 2 }, { T: 6, models: 2 }])).toBe(6);
+    expect(majorityToughness([{ T: 4, models: 0 }, { T: 6, models: 1 }, { T: 3, models: 5, isCharacter: true }])).toBe(6);
+    expect(majorityToughness([{ T: 4, models: 1, isCharacter: true }])).toBe(null);
+  });
+  // An Aquila-shaped unit: four T4 W2 models and one T6 W3 Gravis champion. Twelve auto-hitting S5 attacks.
+  const aquila = (flag) => ({ models: 5, T: 4, W: 2, SV: 3, profiles: [{ name: 'Gravis', count: 1, T: 6, W: 3, SV: 3 }], ...(flag ? { toughnessMajority: true } : {}) });
+  const gun = { models: 1, weapons: [{ name: 'g', type: 'ranged', count: 1, A: 12, BS: 3, S: 5, AP: 0, D: 1, keywords: ['TORRENT'] }] };
+  const run = (d) => runSimulation(gun, d, { phase: 'ranged', iterations: 20000, seed: 20 });
+  it('wounds on the majority T4 (3+): 12 x 2/3 = 8 wounds', () => {
+    expect(Math.abs(run(aquila(true)).breakdown.wounds - 8)).toBeLessThan(0.15);
+  });
+  it('BREAKING VARIANT: without the rule the highest bodyguard T6 applies (5+), about 12 x 1/3 = 4', () => {
+    const w = run(aquila(false)).breakdown.wounds;
+    expect(w).toBeGreaterThan(3.9);
+    expect(w).toBeLessThan(4.6);
+  });
+  it('a uniform unit is unchanged by the flag (same seed, same result)', () => {
+    const plain = { models: 5, T: 4, W: 2, SV: 3 };
+    expect(JSON.stringify(run({ ...plain, toughnessMajority: true }).woundsDealt)).toBe(JSON.stringify(run(plain).woundsDealt));
   });
 });
