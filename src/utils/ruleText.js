@@ -2010,13 +2010,15 @@ export function enhancementEligibility(enh) {
   if (!text.trim()) return null;
   // "<PHRASE> model(s)/unit(s) only" — anchored at the text start or a sentence boundary, so a
   // mid-sentence "this model only" aside never parses. '.' is excluded from the phrase class.
-  const m = text.match(/(?:^|[.;:!?]\s*|\n\s*)([A-Z0-9'’/\- ]{2,90}?)\s+(MODELS?|UNITS?)\s+ONLY\b/);
+  // A comma joins alternatives too ("Magus, Primus or Acolyte Iconward model only", ledger item 78): without it the phrase
+  // failed to parse and the enhancement was offered to every character in the army.
+  const m = text.match(/(?:^|[.;:!?]\s*|\n\s*)([A-Z0-9'’/\-, ]{2,90}?)\s+(MODELS?|UNITS?)\s+ONLY\b/);
   let phrase = m ? m[1].trim() : null;
   let unitScope = m ? /^UNITS?$/.test(m[2]) : false;
   let restrictionEnd = m ? m.index + m[0].length : -1;
   if (!phrase) {
     // The bare "<PHRASE> only" form ("Kroot Flesh Shaper only. …") — opening clause only.
-    const b = text.match(/^\s*([A-Z0-9'’/\- ]{2,90}?)\s+ONLY\b/);
+    const b = text.match(/^\s*([A-Z0-9'’/\-, ]{2,90}?)\s+ONLY\b/);
     if (b) {
       phrase = b[1].trim();
       restrictionEnd = b.index + b[0].length;
@@ -2028,7 +2030,7 @@ export function enhancementEligibility(enh) {
   // legality scan found 81 live restrictions unmatchable without the OR split: hidden from
   // everyone, the cardinal sin).
   const any = phrase
-    .split(/\/|\bOR\b/)
+    .split(/\/|,|\bOR\b/)
     .map((s) => s.trim())
     .filter(Boolean);
   if (!any.length) return null;
@@ -2105,7 +2107,9 @@ export function enhancementMatches(elig, keywords = [], faction = '', unitName =
     if (phraseSegments(P, have)) return true;
     if (!/\s/.test(P) && P.length >= 5) {
       for (const k of have) {
-        if (k.length > P.length && k.endsWith(P)) return true;
+        // ...but never across a hyphen: the T'au catalogue gives every other unit a NON-KROOT keyword, and "Kroot model
+        // only" matched it (ledger item 78: Kroothawk Flock offered to an Ethereal, a Cadre Fireblade, Commanders).
+        if (k.length > P.length && k.endsWith(P) && k[k.length - P.length - 1] !== '-') return true;
       }
     }
     return false;

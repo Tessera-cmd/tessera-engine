@@ -2968,3 +2968,19 @@ describe('mapper 16: a duration to a NEXT phase spans phases (ledger item 64)', 
     expect(phaseOf('Until the end of your next Fight phase, ranged weapons equipped by models in your unit have the [LETHAL HITS] ability.')).toEqual(['shooting']);
   });
 });
+
+describe('enhancement eligibility: comma lists and hyphenated keywords (ledger item 78)', () => {
+  it('a comma joins alternatives ("Foo, Bar or Baz model only")', () => {
+    const e = enhancementEligibility({ text: 'Foo, Bar or Baz Qux model only. The bearer has a thing.' });
+    expect(e).toEqual({ any: ['FOO', 'BAR', 'BAZ QUX'], excl: [], unitScope: false });
+    expect(enhancementMatches(e, ['CHARACTER', 'BAR'])).toBe(true);
+    expect(enhancementMatches(e, ['CHARACTER', 'OTHER'])).toBe(false); // it used to parse as no restriction: everyone
+  });
+  it('the keyword-family suffix match never crosses a hyphen (a NON-FOO keyword is not FOO)', () => {
+    const e = enhancementEligibility({ text: 'Kroot model only. The bearer has a thing.' });
+    expect(enhancementMatches(e, ['CHARACTER', 'NON-KROOT'])).toBe(false);
+    expect(enhancementMatches(e, ['CHARACTER', 'KROOT'])).toBe(true);
+    // BREAKING VARIANT: the compound family the suffix rule exists for still matches.
+    expect(enhancementMatches(enhancementEligibility({ text: 'SPEEDER unit only. This unit has a thing.' }), ['VEHICLE', 'LAND SPEEDER'])).toBe(true);
+  });
+});
