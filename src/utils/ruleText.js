@@ -88,7 +88,12 @@
 //     attack", a catalogue enhancement's structured weapon modifier) is tagged `modelOnly` and reaches that model's
 //     weapons only (combat.js options.weaponMods), never the squad it leads.
 // 20 = ledger item 18: a Designer's Note is not read as rule text (stripDesignerNotes).
-export const MAPPER_VERSION = 20;
+// 21 = ledger items 26 + 27: a list of characteristics ("add 1 to the Attacks and Strength characteristics", "+1 A and S")
+//     gives every stat it names, and "+N A" / "+N D" are read (never after a dice value: "D3+3 A"); an "Or:" option is
+//     an "instead" tier of the option before it (still a choice, off by default); the attacker's OWN unit being
+//     Battle-shocked or having a keyword is no longer read as the target's state; "Battle - shocked" is read; "within
+//     an objective you control" is the objective toggle.
+export const MAPPER_VERSION = 21;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -244,6 +249,8 @@ export function cleanRuleText(text) {
     // text has "re roll" (Hallowed Ground), which matched nothing. ("Battle - shocked" is left as is: read, "your unit is
     // Battle-shocked" took the TARGET toggle, a wrong gate that stacked Maddened Ferocity's "instead" tier.)
     .replace(/\b(re)(?:\s+-\s*|\s*-\s+|\s+)(roll)/gi, '$1-$2')
+    // ...and "Battle - shocked" (mapper 21, ledger item 27), now that an own unit's Battle-shock no longer reads as the target's.
+    .replace(/\b(battle)(?:\s+-\s*|\s*-\s+)(shocked)/gi, '$1-$2')
     .replace(/[‘’]/g, "'") // curly single quotes -> '
     .replace(/[“”]/g, '"') // curly double quotes -> "
     .replace(/\s+/g, ' ')
@@ -389,6 +396,21 @@ function strengthGate(t, { prevTarget = false, headText = '' } = {}) {
   return { subject, negated };
 }
 
+// The attacker's OWN unit or bearer being Battle-shocked (mapper 21, ledger item 26): not the target's state.
+// "That unit" is the attacker's own only when the clause names no enemy or target ("While an enemy unit is within
+// 12" of this model, if that unit is Battle-shocked" is the enemy: Psychological Saboteur).
+const OWN_SHOCKED_RE = /\b(?:(?:your|this|its|the\s+bearer['’]s)\s+unit|the\s+bearer|this\s+model)\s+is\s+battle-?shocked\b/i;
+const THAT_SHOCKED_RE = /\bthat\s+unit\s+is\s+battle-?shocked\b/i;
+const ENEMY_OR_TARGET_RE = /\benemy\b|\btargets?\b/i;
+const ownShocked = (t) => OWN_SHOCKED_RE.test(t) || (THAT_SHOCKED_RE.test(t) && !ENEMY_OR_TARGET_RE.test(t));
+// ...and the attacker's own unit or bearer having (or lacking) a keyword.
+const OWN_HAS_KW_RE = /\b(?:(?:your|this|its|the\s+bearer['’]s)\s+unit|the\s+bearer|this\s+model)\s+(?:does\s+not\s+have|has)\s+the\b[^.]{0,40}?\bkeywords?\b/gi;
+const THAT_HAS_KW_RE = /\bthat\s+unit\s+(?:does\s+not\s+have|has)\s+the\b[^.]{0,40}?\bkeywords?\b/gi;
+const stripOwnKeyword = (t) => {
+  const s = t.replace(OWN_HAS_KW_RE, ' ');
+  return ENEMY_OR_TARGET_RE.test(s) ? s : s.replace(THAT_HAS_KW_RE, ' ');
+};
+
 // Detect a single condition id for a clause (the most specific wins). Returns null for none.
 // `ctx.prevTarget` — see strengthGate.
 function detectCondition(t, ctx = {}) {
@@ -396,7 +418,8 @@ function detectCondition(t, ctx = {}) {
   // <X> is active for your army", "while your army's <X> is active". Checked FIRST so a buff
   // gated on it is situational (default OFF) rather than read as an always-on modifier.
   if (/\bwaaa?gh!?\b[^.]{0,30}?\bactive\b|\bis active for your army\b|while your army'?s?\b[^.]{0,40}?\bis active\b/i.test(t)) return 'armyAbilityActive';
-  if (/within range of .{0,30}?objective marker|controll?ing an objective|on an objective marker|while .{0,40}?controls? .{0,20}?objective/i.test(t)) return 'objectiveControl';
+  // ...and 11e's "within an objective you control" (Stoic Defender; mapper 21, ledger item 26)
+  if (/within range of .{0,30}?objective marker|controll?ing an objective|on an objective marker|while .{0,40}?controls? .{0,20}?objective|\bwithin\s+(?:an?|one\s+or\s+more)\s+objectives?(?:\s+markers?)?\s+(?:that\s+)?you\s+control/i.test(t)) return 'objectiveControl';
   if (/\bonce per (?:battle|turn|game)|for the rest of the battle|until the end of the battle\b/i.test(t)) return 'oncePerBattle';
   // On-charge: GW phrases the grant-on-charge form as "ends a Charge move" / "after it charges",
   // not only "made/makes a charge move" — cover both (real datasheets: Vanguard Assault et al).
@@ -422,14 +445,19 @@ function detectCondition(t, ctx = {}) {
     /\b(?:targets?|against)\s+(?:a|an|one)\s+[A-Z][A-Za-z' -]{1,40}?\b(?:units?|models?)\b/.test(t) || // "targets a MONSTER or VEHICLE unit"
     /\b(?:closest|nearest)\s+eligible\s+target\b/i.test(t) || // "targets the closest eligible target"
     /\bwhen targeting\b|\bexcluding\b[^.]{0,40}?\btarget/i.test(t) || // "[X] when targeting … units" / "(excluding attacks that target …)"
-    /\bis\s+battle-?shocked\b/i.test(t) || // target is Battle-shocked
+    // target is Battle-shocked; never the attacker's own unit or bearer ("If your unit is Battle-shocked", "While the
+    // bearer is Battle-shocked": mapper 21, ledger item 26), which is a state the sim has no toggle for
+    (/\bis\s+battle-?shocked\b/i.test(t) && !ownShocked(t)) ||
     // "If the target of that attack is a MONSTER or VEHICLE unit" / "If that target is TITANIC" — the
     // target's own description (2026-10-03; was always-on: no target verb for the patterns above) —
     // and the past tense "If that attack targeted an enemy PSYKER unit".
     /\b(?:the|that)\s+target(?:\s+unit)?(?:\s+of\s+(?:that|the|this|each)\s+attacks?)?\s+(?:is|has|contains)\b/i.test(t) ||
     /\battacks?\s+targeted\s+(?:a|an|one|the|that)\b/i.test(t) ||
     /\b(?:spotted|guided|observer)\s+unit\b|\bbenefit(?:ing|s)?\s+from\s+markerlight|\bmarkerlight token/i.test(t) || // Tau markerlight chain
-    /\b(?:does not have|has)\s+the\b[^.]{0,40}?\bkeywords?\b/i.test(t) // "if the target does not have the IMPERIUM keyword"
+    // "if the target does not have the IMPERIUM keyword"; never the attacker's own unit or bearer ("If your unit has the
+    // Khorne keyword", "If that unit has the HYBRID METAMORPHS keyword": mapper 21, ledger item 26), which is an unread
+    // trigger (the clause's "if" holds or gates it)
+    /\b(?:does not have|has)\s+the\b[^.]{0,40}?\bkeywords?\b/i.test(stripOwnKeyword(t))
   )
     return 'targetCondition';
   return null;
@@ -800,25 +828,73 @@ function rerollKind(t) {
 // Each pattern returns a `mod` patch + `side` ('attacker'|'defender'), or null. They run over
 // the cleaned full text; phase/condition/scope are detected once and attached to every emitted
 // effect. A pattern records the source phrase it matched (for the review).
+// A LIST of characteristics (mapper 21, ledger item 27): "add 1 to the Attacks and Strength characteristics",
+// "improve the Attacks, Strength and Armour Penetration characteristics of the bearer's weapons by 1". Only the first
+// stat used to be read (Crusade of Wrath, Might of Titan, Righteous Rage gave Attacks and no Strength). The single-stat
+// patterns below skip a stat that opens such a list, so nothing is counted twice.
+const STAT_WORD = '(?:attacks|strength|damage|armou?r penetration)';
+const STAT_SEP = '(?:\\s*,\\s*|\\s*,?\\s+and\\s+)';
+const NOT_LIST = `(?!${STAT_SEP}${STAT_WORD}\\b)`;
+const STAT_KEY = { attacks: 'attackBonus', strength: 'strengthBonus', damage: 'damageBonus', ap: 'apBonus' };
+const statKeyOf = (w) => STAT_KEY[/armou?r penetration/i.test(w) ? 'ap' : String(w).toLowerCase()];
+function statListMod(list, n) {
+  const mod = {};
+  for (const w of String(list).split(/\s*,\s*|\s*,?\s+and\s+/i)) {
+    const k = statKeyOf(w.trim());
+    if (k && n) mod[k] = n;
+  }
+  return Object.keys(mod).length >= 2 ? mod : null;
+}
+// The datasheet shorthand ("this model's melee attacks have +1 A and S", "+1 A, AP and D"), capital letters only.
+const SHORT_STAT = '(?:AP|A|S|D)';
+const SHORT_NOT_LIST = `(?!${STAT_SEP}${SHORT_STAT}\\b)`;
+const SHORT_KEY = { A: 'attackBonus', S: 'strengthBonus', D: 'damageBonus', AP: 'apBonus' };
+
 const MOD_PATTERNS = [
+  // A list of characteristics, added to or improved by one number.
+  {
+    re: new RegExp(`(?:adds? ${NUM} to|improves?) (?:the )?(${STAT_WORD}(?:${STAT_SEP}${STAT_WORD})+) characteristics?(?:[^.]*?\\bby ${NUM})?`, 'i'),
+    build: (m) => {
+      const n = numFrom(m[1]) ?? numFrom(m[3]);
+      const mod = statListMod(m[2], n);
+      return mod ? { side: 'attacker', mod, summary: `+${n} ${m[2]}` } : null;
+    },
+  },
+  {
+    re: new RegExp(`(?<![\\dA-Za-z])\\+(\\d+)\\s+(${SHORT_STAT}(?:${STAT_SEP}${SHORT_STAT})+)\\b`),
+    build: (m) => {
+      const n = parseInt(m[1], 10);
+      const mod = {};
+      for (const t of m[2].split(/\s*,\s*|\s*,?\s+and\s+/)) if (SHORT_KEY[t]) mod[SHORT_KEY[t]] = n;
+      return Object.keys(mod).length >= 2 ? { side: 'attacker', mod, summary: `+${n} ${m[2]}` } : null;
+    },
+  },
+  {
+    re: new RegExp(`(?<![\\dA-Za-z])\\+(\\d+)\\s+A\\b${SHORT_NOT_LIST}`),
+    build: (m) => ({ side: 'attacker', mod: { attackBonus: parseInt(m[1], 10) }, summary: `+${m[1]} Attacks` }),
+  },
+  {
+    re: new RegExp(`(?<![\\dA-Za-z])\\+(\\d+)\\s+D\\b${SHORT_NOT_LIST}`),
+    build: (m) => ({ side: 'attacker', mod: { damageBonus: parseInt(m[1], 10) }, summary: `+${m[1]} Damage` }),
+  },
   // +N Strength
   {
-    re: new RegExp(`adds? ${NUM} to (?:the )?strength`, 'i'),
+    re: new RegExp(`adds? ${NUM} to (?:the )?strength${NOT_LIST}`, 'i'),
     build: (m) => ({ side: 'attacker', mod: { strengthBonus: numFrom(m[1]) }, summary: `+${numFrom(m[1])} Strength` }),
   },
   // +N Attacks
   {
-    re: new RegExp(`adds? ${NUM} to (?:the )?attacks?`, 'i'),
+    re: new RegExp(`adds? ${NUM} to (?:the )?attacks?\\b${NOT_LIST}`, 'i'),
     build: (m) => ({ side: 'attacker', mod: { attackBonus: numFrom(m[1]) }, summary: `+${numFrom(m[1])} Attacks` }),
   },
   // +N Damage characteristic (offensive). Defender -Damage handled below.
   {
-    re: new RegExp(`adds? ${NUM} to (?:the )?damage characteristic`, 'i'),
+    re: new RegExp(`adds? ${NUM} to (?:the )?damage${NOT_LIST} characteristic`, 'i'),
     build: (m) => ({ side: 'attacker', mod: { damageBonus: numFrom(m[1]) }, summary: `+${numFrom(m[1])} Damage` }),
   },
   // Improve / add to Armour Penetration (offensive). "improve ... by N" or "add N to ... AP".
   {
-    re: new RegExp(`(?:improves? (?:the )?armou?r penetration[^.]*?by|adds? ${NUM} to (?:the )?armou?r penetration[^.]*?(?:by )?)\\s*(\\d+)?`, 'i'),
+    re: new RegExp(`(?:improves? (?:the )?armou?r penetration${NOT_LIST}[^.]*?by|adds? ${NUM} to (?:the )?armou?r penetration${NOT_LIST}[^.]*?(?:by )?)\\s*(\\d+)?`, 'i'),
     build: (m) => {
       const n = numFrom(m[2]) ?? numFrom(m[1]) ?? 1;
       return { side: 'attacker', mod: { apBonus: n }, summary: `+${n} AP` };
@@ -843,11 +919,11 @@ const MOD_PATTERNS = [
   // "+N S" / "+N AP" — the terse characteristic shorthand ("that unit's ranged attacks have +1 S",
   // World Eaters "+1 AP"). \b keeps "+1 SV" and prose "+2\" M" out.
   {
-    re: /\+(\d+)\s+S\b(?!V)/,
+    re: new RegExp(`(?<![\\dA-Za-z])\\+(\\d+)\\s+S\\b(?!V)${SHORT_NOT_LIST}`),
     build: (m) => ({ side: 'attacker', mod: { strengthBonus: parseInt(m[1], 10) }, summary: `+${m[1]} Strength` }),
   },
   {
-    re: /\+(\d+)\s+AP\b/,
+    re: new RegExp(`(?<![\\dA-Za-z])\\+(\\d+)\\s+AP\\b${SHORT_NOT_LIST}`),
     build: (m) => ({ side: 'attacker', mod: { apBonus: parseInt(m[1], 10) }, summary: `+${m[1]} AP` }),
   },
   // "+N BS / WS / BS and WS" — a to-hit characteristic improvement; the BS/WS token pins the phase
@@ -864,7 +940,7 @@ const MOD_PATTERNS = [
   // "improve the Strength characteristic ... by N" (T'au Battlesuit ranged-attack buffs) — the
   // Strength twin of the AP improve pattern above.
   {
-    re: new RegExp(`improves? (?:the )?strength characteristic[^.]*?by ${NUM}`, 'i'),
+    re: new RegExp(`improves? (?:the )?strength${NOT_LIST} characteristic[^.]*?by ${NUM}`, 'i'),
     build: (m) => ({ side: 'attacker', mod: { strengthBonus: numFrom(m[1]) }, summary: `+${numFrom(m[1])} Strength` }),
   },
   // "N+ InSv" — the catalogues' invulnerable-save shorthand (AdMech "4+ InSv", Tyranid Warriors
@@ -1509,8 +1585,19 @@ export function stripDesignerNotes(text) {
   return s;
 }
 
+// An "Or:" option (mapper 21, ledger item 27) is an alternative to the option before it ("+1 S. OR: +1 S, AP and
+// [HAZARDOUS]"; Ferocious Show-off's "+1 A. Or: If this unit has 11+, +2 A"). Read as two plain options they stacked
+// when ticked (+3 A). It now reads as an "instead" tier, stored as the extra on top of the option before it.
+const OR_OPTION_RE = /(?:<ins>\s*)?\bOR\s*:\s*(?:<\/ins>)?\s*/gi;
+
 export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = false } = {}) {
-  text = keywordCase(stripDesignerNotes(text)); // a marked keyword name keeps its lowercase words in the run (see keywordCase)
+  // The "Or:" label still marks the rule as a choice (CHOICE_RE: every option off by default), read before it is rewritten.
+  const orChoice = /(?:^|[▪■▫•>-]|\.)\s*(?:<ins>\s*)?or\s*:/i.test(String(text ?? ''));
+  // Only a NUMERIC option is rewritten: its extra over the option before it can be stored. A keyword option ("▪ [LETHAL
+  // HITS]. ▪ Or: [SUSTAINED HITS 1].") keeps both options behind the choice toggle, as before.
+  text = keywordCase(
+    stripDesignerNotes(text).replace(OR_OPTION_RE, (m, at, s) => (/^[^▪■•.\n]*\d/.test(s.slice(at + m.length).replace(/\[[^\]]*\]/g, '')) ? 'instead, ' : m)),
+  ); // a marked keyword name keeps its lowercase words in the run (see keywordCase)
   const raw = cleanRuleText(text);
   const notes = [];
   if (!raw) {
@@ -1744,7 +1831,7 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   // one enemy unit" held its Feel No Pain 5+, and Surprise Assault's Tunnel Marker distances its re-roll of
   // hit rolls of 1. The heal words moved to the clause check (mapClause). A choice between listed options
   // still flags every option wherever it sits (the "▪ Or:" bullet follows its first option).
-  const choice = CHOICE_RE.test(mapText) || (KEYWORD_CHOICE_RE.test(mapText) && !ALL_OPTIONS_RE.test(mapText));
+  const choice = orChoice || CHOICE_RE.test(mapText) || (KEYWORD_CHOICE_RE.test(mapText) && !ALL_OPTIONS_RE.test(mapText));
   for (const e of effects) if (!e.condition && (choice || clauseOf.get(e) >= activationAt)) e._suspect = true;
 
   // Without a review surface (every caller but captureUnitAbilities: pack rules, .rosz roster rules,

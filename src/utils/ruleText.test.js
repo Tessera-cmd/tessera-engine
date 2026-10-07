@@ -1743,12 +1743,9 @@ describe('two-gate tiers keep the old single-slot choice (review pass 2 verifica
     const r = mapRuleText(
       'Each time a unit from your army is selected to fight, if that unit made a Charge move this turn, until the end of the phase, add 1 to the Attacks characteristic of melee weapons equipped by models in that unit. If your unit is Battle-shocked, add 2 to the Attacks characteristic of melee weapons equipped by models in that unit instead.',
     );
-    expect(r.effects.map((e) => e.mods.attackBonus)).toEqual([1, 2]);
-    expect(r.effects[0].condition).toBe('onCharge');
-    // Gated, and NOT on the charge toggle. (Its own-unit Battle-shock gate currently reads as the
-    // generic target toggle, a known pre-existing label limit; the property pinned here is the gate.)
-    expect(r.effects[1].condition).toBeTruthy();
-    expect(r.effects[1].condition).not.toBe('onCharge');
+    // Mapper 21 (ledger item 26): its own-unit Battle-shock gate no longer reads as the TARGET toggle. Unread, the
+    // tier would ride the charge toggle (+3 on every charge), so it is dropped: never on the charge toggle, never stacked.
+    expect(r.effects.map((e) => [e.condition, e.mods.attackBonus])).toEqual([['onCharge', 1]]);
   });
 });
 
@@ -2146,8 +2143,9 @@ describe('unread-trigger precision (mapper version 3, 2026-10-03)', () => {
 
   it('a readable gate gets the delta too, and the structured buff of a catalogue enhancement does not swallow it', () => {
     const r = all("Add 1 to the Attacks characteristic of the bearer's melee weapons. While the bearer is Battle-shocked, add 2 to the Attacks characteristic of the bearer's melee weapons instead.");
-    expect(r.map((e) => [e.condition, e.mods.attackBonus])).toEqual([[null, 1], ['targetCondition', 1]]);
-    expect(at(r, 'fight', ['targetCondition']).attackBonus).toBe(2);
+    // The bearer's own Battle-shock is the rule toggle, not the target's (mapper 21, ledger item 26).
+    expect(r.map((e) => [e.condition, e.mods.attackBonus])).toEqual([[null, 1], ['ruleTrigger', 1]]);
+    expect(at(r, 'fight', ['ruleTrigger']).attackBonus).toBe(2);
     const enh = planPackRules(det(null, {
       enhancements: [{
         name: 'Brand of Zeal',
@@ -2509,7 +2507,7 @@ describe('the leader gate tags (mapper 6)', () => {
     const e = effs('While the bearer is leading a unit, models in that unit have the Feel No Pain 6+ ability. While that unit is Battle-shocked, models in that unit have the Feel No Pain 4+ ability instead.');
     expect(e.map((x) => [x.mods.fnp, x.condition, x.leaderOnly])).toEqual([
       [6, null, true],
-      [4, 'targetCondition', true],
+      [4, 'ruleTrigger', true], // the led unit's own Battle-shock, not the target's (mapper 21)
     ]);
     // a subjectless "while leading that unit" in the later sentence keeps the earlier led-only phrase too
     const both = effs('For each FOO unit from your army, while one or more CHARACTER models are leading that unit, you can re-roll Charge rolls made for it. If that model is a BAR, that model has the Feel No Pain 3+ ability while leading that unit.');
@@ -2999,7 +2997,7 @@ describe('mapper 17 (ledger items 38 + part of 27)', () => {
     expect(read('Each time a model in this unit makes a ranged attack that targets the closest eligible target, or makes a melee attack in a turn in which it made a Charge move, improve the Strength characteristic of that attack by 2.')).toEqual([{ p: 'fight', c: 'onCharge', m: { strengthBonus: 2 } }]);
   });
   it('spaced or missing re-roll hyphens are read; a roll "to determine" a mortal wound is not a wound roll', () => {
-    expect(cleanRuleText('you can re roll the Hit roll; Re - roll a Wound roll of 1; while Battle - shocked')).toBe('you can re-roll the Hit roll; Re-roll a Wound roll of 1; while Battle - shocked');
+    expect(cleanRuleText('you can re roll the Hit roll; Re - roll a Wound roll of 1; while Battle - shocked')).toBe('you can re-roll the Hit roll; Re-roll a Wound roll of 1; while Battle-shocked'); // "Battle - shocked" read since mapper 21
     expect(read('Each time a model in this unit makes a melee attack, re roll a Wound roll of 1.')).toEqual([{ p: 'fight', c: null, m: { reroll: { wound: 'ones' } } }]);
     expect(mapRuleText('When you select an enemy FOO unit, you can re-roll rolls to determine whether that enemy unit suffers a mortal wound.', { name: 'X' }).effects).toEqual([]);
   });
@@ -3066,5 +3064,48 @@ describe('stripDesignerNotes (ledger item 18)', () => {
   it('BREAKING VARIANT: the real rule after a catalogue note is still read', () => {
     const t = "**Designer’s Note**: *This means that the selected models can be given Enhancements.* Surprise Assault: Each time a Tyranids model from your army makes an attack, re-roll a Hit roll of 1.";
     expect(mapRuleText(t, { name: 'X', source: 'detachment' }).effects.map((e) => e.mods)).toEqual([{ reroll: { hit: 'ones' } }]);
+  });
+});
+
+// ---- mapper 21 (ledger items 26 + 27) -------------------------------------------------------------------
+describe('mapper 21: stat lists, shorthand, Or options, own-unit gates (ledger items 26 + 27)', () => {
+  const mods = (t, source = 'enhancement') => mapRuleText(t, { name: 'X', source }).effects.map((e) => [e.condition, e.mods]);
+  it('a list of characteristics gives every stat, once', () => {
+    expect(mods('While this model is leading a unit, add 1 to the Attacks and Strength characteristics of melee weapons equipped by models in that unit.', 'detachment')).toEqual([[null, { attackBonus: 1, strengthBonus: 1 }]]);
+    expect(mods("Improve the Attacks, Strength and Armour Penetration characteristics of the bearer's weapons by 1.")).toEqual([[null, { attackBonus: 1, strengthBonus: 1, apBonus: 1 }]]);
+    expect(mods("Improve the Armour Penetration and Damage characteristics of the bearer's melee weapons by 1.")).toEqual([[null, { apBonus: 1, damageBonus: 1 }]]);
+  });
+  it('BREAKING VARIANT: a single stat still reads alone', () => {
+    expect(mods('Add 1 to the Attacks characteristic of melee weapons.')).toEqual([[null, { attackBonus: 1 }]]);
+    expect(mods('Improve the Armour Penetration characteristic of melee weapons by 1.')).toEqual([[null, { apBonus: 1 }]]);
+  });
+  it('the shorthand: "+2 A", "+1 A and S", "+1 A, AP and D"', () => {
+    expect(mods("This model's melee attacks have +2 A")).toEqual([[null, { attackBonus: 2 }]]);
+    expect(mods("This model's melee attacks have +1 A and S.")).toEqual([[null, { attackBonus: 1, strengthBonus: 1 }]]);
+    expect(mods("That weapon's attacks have +1 A, AP and D.")).toEqual([[null, { attackBonus: 1, apBonus: 1, damageBonus: 1 }]]);
+  });
+  it('BREAKING VARIANT: "D3+3 A" is a dice value, not +3 Attacks', () => {
+    expect(mods("WHEN: Your Shooting phase. TARGET: One unit. EFFECT: Your unit's grenade launchers have D3+3 A .", 'stratagem')).toEqual([]);
+  });
+  it('an "Or:" option is an instead tier of the option before it: ticking gives the second option, not both', () => {
+    expect(mods("ORKS INFANTRY model only. This model's melee attacks have: - +1 A. - <ins>Or:</ins> If this unit has 11+, +2 A.")).toEqual([
+      ['ruleTrigger', { attackBonus: 1 }],
+      ['ruleTrigger', { attackBonus: 1 }],
+    ]);
+  });
+  it("the attacker's own unit being Battle-shocked is not the target's state", () => {
+    const r = mods("Add 1 to the Attacks, Strength and Damage characteristics of the bearer's melee weapons. While the bearer is Battle-shocked, add 2 to the Attacks, Strength and Damage characteristics of the bearer's melee weapons instead.");
+    expect(r.map((x) => x[0])).toEqual([null, 'ruleTrigger']);
+    expect(mods('Each time a model in this unit makes an attack that targets a unit that is Battle - shocked, add 1 to the Wound roll.')).toEqual([['targetCondition', { woundModifier: 1 }]]);
+  });
+  it("the attacker's own keyword is not the target's: it waits for the rule toggle", () => {
+    expect(mods('WHEN: Your Shooting phase. TARGET: One Cryptek unit. EFFECT: If your unit has the Necron Warriors keyword, until the end of the phase, models in your unit have a 5+ invulnerable save.', 'stratagem')).toEqual([['ruleTrigger', { invuln: 5 }]]);
+    expect(mods('Each time a model in this unit makes an attack that targets a unit, if that unit does not have the IMPERIUM keyword, add 1 to the Hit roll.')).toEqual([['targetCondition', { hitModifier: 1 }]]);
+  });
+  it('BREAKING VARIANT: "that unit" after an enemy unit is the enemy (Psychological Saboteur keeps the target gate)', () => {
+    expect(mods('While an enemy unit is with 12" of this model, if that unit is Battle-shocked: - Each time a model in that unit makes an attack, subtract 1 from the Hit roll')).toEqual([['targetCondition', { hitPenalty: 1 }]]);
+  });
+  it('"within an objective you control" is the objective toggle', () => {
+    expect(mods('While the bearer is leading a unit, models in that unit have the Feel No Pain 6+ ability while they are within an objective you control.')).toEqual([['objectiveControl', { fnp: 6 }]]);
   });
 });
