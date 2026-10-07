@@ -18,6 +18,7 @@ import {
   enhancementMatches,
   modsToEffects,
   statBuffScope,
+  defenceReach,
   degradeInfo,
   mergedDetachmentText,
   MERGED_DETACHMENT_NOTE,
@@ -2793,5 +2794,82 @@ describe('scopeUnit: a scope named with "unit(s)" reads the attached unit (item 
     expect(e.scopeUnit).toBe(true);
     expect(effectAppliesToUnit(e, ['INFANTRY'], 'Testers', [{ keywords: ['TEST CHARACTER'] }])).toBe(true);
     expect(effectAppliesToUnit(e, ['INFANTRY'], 'Testers')).toBe(false);
+  });
+});
+
+// ---- who a defensive buff reaches (mapper 10, ledger item 75) ----------------
+// 11e Core Rules 19.04: a rule for a single specified model only applies to that model. Synthetic wording.
+describe('defenceReach / modelOnly (ledger item 75)', () => {
+  it('reads the subject the clause gives the save', () => {
+    expect(defenceReach('The bearer has the Feel No Pain 5+ ability.')).toBe('model');
+    expect(defenceReach('Add 1 to the bearer\'s Wounds characteristic and the bearer has the Feel No Pain 5+ ability.')).toBe('model');
+    expect(defenceReach('Each time an attack is allocated to this model, halve the Damage characteristic of that attack.')).toBe('model');
+    expect(defenceReach('this model has a 3+ invulnerable save')).toBe('model');
+    expect(defenceReach('Models in the bearer\'s unit have a 5+ invulnerable save.')).toBe('unit');
+    expect(defenceReach('all models in this model\'s unit have a 4+ invulnerable save')).toBe('unit');
+    expect(defenceReach('This unit has 5+ InSv.')).toBe('unit');
+    expect(defenceReach('Each time an attack is allocated to a model in this unit, subtract 1 from the Damage characteristic of that attack.')).toBe('unit');
+    expect(defenceReach('FOO INFANTRY units from your army have the Feel No Pain 6+ ability.')).toBe('unit');
+    expect(defenceReach('Feel No Pain 6+.')).toBeNull();
+    expect(defenceReach('No save words here.')).toBeNull();
+  });
+  it('a bulleted item with no subject reads its lead-in', () => {
+    expect(defenceReach('5+ InSv.', 'The bearer has:')).toBe('model');
+    expect(defenceReach('5+ InSv.', 'Models in this unit have:')).toBe('unit');
+  });
+  it('mapRuleText tags the bearer\'s Feel No Pain, not the unit\'s', () => {
+    const own = mapRuleText('FOO model only. The bearer has the Feel No Pain 5+ ability.', { name: 'E' });
+    expect(own.effects.find((e) => e.mods.fnp === 5)).toMatchObject({ side: 'defender', modelOnly: true });
+    const led = mapRuleText('While the bearer is leading a unit, models in that unit have the Feel No Pain 6+ ability.', { name: 'E' });
+    expect(led.effects.find((e) => e.mods.fnp === 6).modelOnly).toBeUndefined();
+  });
+  it('per clause: the bearer\'s save is one model\'s, a later unit-wide tier is everyone\'s', () => {
+    const r = mapRuleText(
+      'The bearer has the Feel No Pain 5+ ability. Once per battle, at the start of any phase, the bearer can use this Enhancement. If it does, until the end of the phase, models in the bearer\'s unit have a 4+ invulnerable save.',
+      { name: 'E' },
+    );
+    expect(r.effects.find((e) => e.mods.fnp === 5)?.modelOnly).toBe(true);
+    expect(r.effects.find((e) => e.mods.invuln === 4)?.modelOnly).toBeUndefined();
+  });
+  it('captureUnitAbilities tags a datasheet ability on "this model" (the Halve Damage shape)', () => {
+    const [e] = captureUnitAbilities([{ name: 'Tough', text: 'Each time an attack is allocated to this model, halve the Damage characteristic of that attack.' }]);
+    expect(e).toMatchObject({ side: 'defender', modelOnly: true, mods: { halveDamage: true } });
+    const [u] = captureUnitAbilities([{ name: 'Wall', text: 'Each time an attack is allocated to a model in this unit, subtract 1 from the Damage characteristic of that attack.' }]);
+    expect(u.modelOnly).toBeUndefined();
+  });
+  it('an attacker buff is never tagged', () => {
+    const r = mapRuleText('The bearer\'s melee weapons have [LETHAL HITS].', { name: 'E' });
+    expect(r.effects.every((e) => e.modelOnly === undefined)).toBe(true);
+  });
+});
+
+// Review 2026-10-07 (ledger item 75), each a breaking variant of the first cut.
+describe('defenceReach review cases (ledger item 75)', () => {
+  it('"a unit that contains a model" is not one model (the keyword words of "that X model" are capitalised)', () => {
+    expect(defenceReach('While a unit that contains a model with this ability is selected as the target of an attack, it has the Feel No Pain 5+ ability.')).toBe('unit');
+    expect(defenceReach('Each time an attack is allocated to this model, if that attack was made by a FOO model, subtract 1 from the Damage characteristic of that attack.')).toBe('model');
+    expect(defenceReach('Select one model in your unit. That model has a 4+ invulnerable save.')).toBe('model');
+    expect(defenceReach('that FOO BAR model has a 4+ invulnerable save')).toBe('model');
+  });
+  it('each save is read from its own words: a unit Feel No Pain beside a one-model invulnerable save', () => {
+    const clause = 'While this model is leading a unit, that unit has the Feel No Pain 5+ ability and this model has a 4+ invulnerable save.';
+    expect(defenceReach(clause, null, 'fnp')).toBe('unit');
+    expect(defenceReach(clause, null, 'invuln')).toBe('model');
+    const r = mapRuleText(clause, { name: 'E' });
+    expect(r.effects.find((e) => e.mods.fnp === 5)?.modelOnly).toBeUndefined();
+    expect(r.effects.find((e) => e.mods.invuln === 4)?.modelOnly).toBe(true);
+  });
+  it('"the bearer\'s squad" is a unit; "halve the Damage" without "characteristic" is read', () => {
+    expect(defenceReach('The bearer’s squad has the Feel No Pain 5+ ability.')).toBe('unit');
+    expect(defenceReach('Each time an attack is allocated to this model, halve the Damage of that attack.')).toBe('model');
+  });
+});
+
+describe('defenceReach reads the Damage reduction itself (ledger item 75, review pass 2)', () => {
+  it('a Damage bonus beside "the bearer" does not make the unit\'s reduction one model\'s', () => {
+    const clause = 'The bearer has +1 Damage on its melee weapons and, each time an attack is allocated to a model in the bearer\'s unit, subtract 1 from the Damage characteristic of that attack.';
+    expect(defenceReach(clause, null, 'damage')).toBe('unit');
+    expect(defenceReach('Each time an attack is allocated to this model, subtract 1 from the Damage characteristic of that attack.', null, 'damage')).toBe('model');
+    expect(defenceReach('Each time an attack is allocated to this model, halve the Damage of that attack.', null, 'damage')).toBe('model');
   });
 });

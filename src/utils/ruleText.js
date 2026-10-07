@@ -64,7 +64,10 @@
 //     names one keeps its scope, ungated), so "WOLF GUARD BATTLE LEADER model only. While
 //     the bearer is leading a unit, … that unit have [LANCE]" reaches the squad it leads. A scope named only with
 //     "unit(s)" is tagged `scopeUnit` and matches the attached unit's keyword union; a "model(s)" scope does not.
-export const MAPPER_VERSION = 9;
+// 10 = ledger item 75: a Feel No Pain, invulnerable save or Damage reduction whose clause gives it to one model ("The
+//     bearer has the Feel No Pain 5+ ability", "Each time an attack is allocated to this model, halve the Damage") is
+//     tagged `modelOnly` and reaches only that model (19.04; see defenceReach), never the unit it leads.
+export const MAPPER_VERSION = 10;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -1453,6 +1456,7 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   const clauses = splitClauses(mapText);
   // The lead-in a bulleted item continues (the last unbulleted clause, when it ends with a colon).
   let leadIn = null;
+  let leadBody = null; // ...and its text, for who a bulleted defensive item reaches (tagModelOnly)
   // The first clause carrying an activation word (see the ability-level suspicion below), and each
   // effect's clause, so an activation only reaches the effects stated with or after it.
   let activationAt = Infinity;
@@ -1502,6 +1506,7 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
         body = body.slice(opener[0].length).trim();
         prev = null; // a new sub-rule is never a tier of the previous one
         leadIn = null;
+        leadBody = null;
         headEffects = [];
         leadTag = null;
         if (!listItem && !clause.startsWith(BULLET)) {
@@ -1536,6 +1541,7 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
     }
     for (const e of r.effects) clauseOf.set(e, ci);
     if (leadTag) for (const e of r.effects) Object.assign(e, leadTag);
+    tagModelOnly(r.effects, body, bullet ? leadBody : null);
     effects.push(...r.effects);
     matched.push(...r.matched);
     if (activationAt === Infinity && ACTIVATION_RE.test(body.replace(TARGET_RANGE_RE, 'targets a unit'))) activationAt = ci;
@@ -1559,8 +1565,13 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
     // a catalogue text missing the lead-in's colon) is the lead-in of the bulleted items after it (mapper 5):
     // read as a sentence of its own it left its first item applying on every attack. Only a trigger opener
     // counts, so a flavour sentence before a list never gates it.
-    if (/:\s*$/.test(body)) leadIn = r.prev;
-    else if (!bullet) leadIn = !r.effects.length && DANGLING_LEAD_RE.test(body) ? r.prev : null;
+    if (/:\s*$/.test(body)) {
+      leadIn = r.prev;
+      leadBody = body;
+    } else if (!bullet) {
+      leadIn = !r.effects.length && DANGLING_LEAD_RE.test(body) ? r.prev : null;
+      leadBody = leadIn ? body : null;
+    }
   }
 
   // Rule-internal keyword grants (round-3 review): a scope naming a keyword this rule itself
@@ -2131,6 +2142,67 @@ export function statBuffScope(text, stat) {
     if (subject !== 'unit') return 'bearer';
   }
   return seen ? 'unit' : 'bearer';
+}
+
+// ---- who a defensive buff reaches (mapper 10, ledger item 75) ----
+// 11e Core Rules 19.04: "Abilities/rules that affect a single specified model (e.g. from an enhancement or an item of
+// wargear) only ever apply to that model, even while part of an attached unit. Otherwise, abilities/rules that affect
+// a unit (or models in it) apply to every model in an attached unit." The engine gave every Feel No Pain, invulnerable
+// save and Damage reduction to every model group (effects.js distributeDefensive), so "The bearer has the Feel No Pain
+// 4+ ability" on a Captain protected the whole squad he led, and a Gravis Captain's "Each time an attack is allocated
+// to this model, halve the Damage" halved it for every Intercessor.
+// A defender effect carrying one of those mods is tagged `modelOnly: true` when the subject its own CLAUSE gives it is
+// one model: the nearest subject before the save's words ("the bearer has", "allocated to this model", "this model
+// has"), else a bulleted item's lead-in. A unit subject ("models in this / that / the bearer's unit", "this unit",
+// "a model in this unit", "units from your army") or no subject leaves it untagged: every model, as before. The engine
+// (effects.js applyToSim) gives a tagged effect only to the model that holds it.
+// The save's words, per kind (an effect is read from the words of its own kind: review 2026-10-07, a clause can give a
+// Feel No Pain to the unit and an invulnerable save to one model).
+const DEFENCE_WORDS = {
+  fnp: /\bFeel\s+No[t]?\s+Pain\b/gi,
+  invuln: /\binvulnerable\s+saves?\b|\bInSv\b/gi,
+  // the reduction itself, never a Damage bonus earlier in the clause ("The bearer has +1 Damage …, and each time an
+  // attack is allocated to a model in the bearer's unit, subtract 1 from the Damage": review pass 2)
+  damage: /\b(?:halve|subtract\s+\d+\s+from|reduce)\s+the\s+Damage\b/gi,
+};
+const DEFENCE_KIND = { fnp: 'fnp', invuln: 'invuln', damageReduction: 'damage', halveDamage: 'damage' };
+const DEFENCE_KEYS = Object.keys(DEFENCE_KIND);
+// group 1: a unit (or several models); group 2: one model. "the bearer's unit / squad" and "this model's unit" are units.
+const DEFENCE_SUBJECT_RE =
+  /(\bmodels\b|\bunits?\b|\bsquads?\b|\ba\s+model\s+in\b|\beach\s+model\s+in\b)|(\bthe\s+bearer\b(?!['’]s\s+(?:\w+\s+)?(?:unit|squad))|\bthis\s+(?:model|Fortification|Psyker|Vehicle|Monster|Character|Titan)\b(?!['’]s\s+(?:\w+\s+)?(?:unit|squad)))/gi;
+// "that VEHICLE model", "that model": CASE-SENSITIVE keyword words, so "a unit that contains a model" is not one model.
+const DEFENCE_THAT_MODEL_RE = /\b[Tt]hat\s+(?:[A-Z][\w-]*\s+){0,3}model\b(?!s|['’]s\s+(?:\w+\s+)?(?:unit|squad))/g;
+function lastDefenceSubject(seg) {
+  const s = String(seg || '');
+  let last = null;
+  let at = -1;
+  for (const m of s.matchAll(DEFENCE_SUBJECT_RE)) if (m.index > at) [at, last] = [m.index, m[1] ? 'unit' : 'model'];
+  for (const m of s.matchAll(DEFENCE_THAT_MODEL_RE)) if (m.index > at) [at, last] = [m.index, 'model'];
+  return last;
+}
+// 'model' | 'unit' | null (no subject read) for the save words of `kind` ('fnp' | 'invuln' | 'damage'; omitted: every
+// kind) in `clause`: 'model' when ANY of them is given to one model (the safe direction), else 'unit' when one is given
+// to a unit. Pure; exported for tests.
+export function defenceReach(clause, lead = null, kind = null) {
+  const t = String(clause || '');
+  let reach = null;
+  for (const [k, re] of Object.entries(DEFENCE_WORDS)) {
+    if (kind && k !== kind) continue;
+    for (const m of t.matchAll(re)) {
+      const r = lastDefenceSubject(t.slice(0, m.index)) || lastDefenceSubject(lead);
+      if (r === 'model') return 'model';
+      reach = reach || r;
+    }
+  }
+  return reach;
+}
+// An effect is one model's when every save it carries is (an effect carries one kind on every real rule).
+function tagModelOnly(effects, clause, lead) {
+  for (const e of effects) {
+    if (e.side !== 'defender') continue;
+    const kinds = new Set(DEFENCE_KEYS.filter((k) => e.mods?.[k] != null && e.mods[k] !== false && e.mods[k] !== 0).map((k) => DEFENCE_KIND[k]));
+    if (kinds.size && [...kinds].every((k) => defenceReach(clause, lead, k) === 'model')) e.modelOnly = true;
+  }
 }
 
 export function modsToEffects(mods, name = 'Enhancement', text = '') {

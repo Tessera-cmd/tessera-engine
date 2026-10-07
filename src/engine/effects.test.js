@@ -527,3 +527,98 @@ describe('unitWide statline buffs reach every model (19.04, ledger item 6)', () 
     expect(Math.abs(r5.woundsDealt.mean - 166.67)).toBeLessThan(4);
   });
 });
+
+// ---- one-model saves (ledger item 75) ----------------------------------------
+// 11e Core Rules 19.04: a rule for a single specified model (an enhancement, an item of wargear) only ever applies to
+// that model, even in an attached unit. A `modelOnly` Feel No Pain / invulnerable save / Damage reduction reaches the
+// model holding it, never the squad.
+describe('modelOnly defensive buffs reach one model (19.04, ledger item 75)', () => {
+  const fnp5 = { side: 'defender', mods: { fnp: 5 }, modelOnly: true };
+  const squad = () => ({
+    models: 5, T: 4, W: 2, SV: 3, FNP: null,
+    profiles: [{ name: 'Sgt', models: 1, W: 2, SV: 3 }],
+    attached: [{ id: 'cap', name: 'Captain', W: 5, SV: 3, FNP: null }, { id: 'anc', name: 'Ancient', W: 4, SV: 3, FNP: null }],
+  });
+  it('resolveEffects keeps a modelOnly save apart from the unit-wide ones (other mods stay the unit\'s)', () => {
+    const { defender } = resolveEffects([{ ...fnp5, mods: { fnp: 5, saveReroll: 'ones' } }, { side: 'defender', mods: { invuln: 4 } }], { phase: 'shooting' });
+    expect(defender.fnp).toBeNull();
+    expect(defender.invuln).toBe(4);
+    expect(defender.saveReroll).toBe('ones');
+    expect(defender.modelOnly).toEqual([{ holder: null, fnp: 5, invuln: null, damageReduction: 0, halveDamage: false }]);
+  });
+  it('an enhancement (no holder) lands on the bearer: the first attached character, never the squad', () => {
+    const { defender } = applyToSim({}, squad(), resolveEffects([fnp5], { phase: 'shooting' }));
+    expect(defender.FNP).toBeNull();
+    expect(defender.profiles[0].FNP).toBeUndefined();
+    expect(defender.attached[0].FNP).toBe(5);
+    expect(defender.attached[1].FNP).toBeNull();
+  });
+  it('holder <position>: an attached character\'s own ability reaches that character alone; an unknown holder is dropped', () => {
+    const own = applyToSim({}, squad(), resolveEffects([{ ...fnp5, holder: 1 }], { phase: 'shooting' })).defender;
+    expect(own.attached.map((c) => c.FNP)).toEqual([null, 5]);
+    expect(own.FNP).toBeNull();
+    for (const holder of [2, -1, 'gone']) {
+      const lost = applyToSim({}, squad(), resolveEffects([{ ...fnp5, holder }], { phase: 'shooting' })).defender;
+      expect([lost.FNP, ...lost.attached.map((c) => c.FNP)]).toEqual([null, null, null]);
+    }
+  });
+  it('position counts characters the way allocation reads them: a null slot is skipped, an embedded leader is position 0', () => {
+    const gap = { models: 5, W: 1, SV: 3, attached: [null, { name: 'A', W: 4 }] };
+    expect(applyToSim({}, gap, resolveEffects([{ ...fnp5, holder: 0 }], { phase: 'shooting' })).defender.attached[1].FNP).toBe(5);
+    const embedded = { models: 5, W: 1, SV: 3, leader: { name: 'L', W: 4 } };
+    expect(applyToSim({}, embedded, resolveEffects([{ ...fnp5, holder: 0 }], { phase: 'shooting' })).defender.leader.FNP).toBe(5);
+  });
+  it('the bearer is the first character allocation reads: the attached list over an embedded leader (ledger item 76)', () => {
+    const both = { models: 5, W: 1, SV: 3, leader: { name: 'old', W: 4 }, attached: [{ name: 'A', W: 4, SV: 3 }] };
+    const fnp = applyToSim({}, both, resolveEffects([fnp5], { phase: 'shooting' })).defender;
+    expect(fnp.attached[0].FNP).toBe(5);
+    expect(fnp.leader.FNP).toBeUndefined();
+    const sv = applyToSim({}, both, resolveEffects([{ side: 'defender', mods: { saveSet: 2 } }], { phase: 'shooting' })).defender;
+    expect(sv.attached[0].SV).toBe(2);
+    expect(sv.leader.SV).toBeUndefined();
+  });
+  it('a champion that inherits the body\'s save keeps the better of it and the buff (unit-wide and unit-held alike)', () => {
+    const body = { models: 5, W: 1, SV: 3, FNP: 4, INV: 4, damageReduction: 1, profiles: [{ name: 'Sgt', models: 1, W: 2 }] };
+    const wide = applyToSim({}, body, resolveEffects([{ side: 'defender', mods: { fnp: 6, invuln: 5, damageReduction: 1 } }], { phase: 'shooting' })).defender;
+    expect(wide.profiles[0]).toMatchObject({ FNP: 4, INV: 4, damageReduction: 2 });
+    expect(wide).toMatchObject({ FNP: 4, INV: 4, damageReduction: 2 });
+    const held = applyToSim({}, body, resolveEffects([{ side: 'defender', mods: { fnp: 6 }, modelOnly: true, holder: 'unit' }], { phase: 'shooting' })).defender;
+    expect(held.profiles[0].FNP).toBe(4);
+  });
+  it('holder unit: the unit\'s own "this model" ability reaches its body and champions, not the characters', () => {
+    const { defender } = applyToSim({}, squad(), resolveEffects([{ ...fnp5, holder: 'unit' }], { phase: 'shooting' }));
+    expect(defender.FNP).toBe(5);
+    expect(defender.profiles[0].FNP).toBe(5);
+    expect(defender.attached.map((c) => c.FNP)).toEqual([null, null]);
+  });
+  it('no holder and no character: a single model keeps it, a multi-model squad drops it (no bearer)', () => {
+    const r = resolveEffects([fnp5], { phase: 'shooting' });
+    expect(applyToSim({}, { models: 1, W: 5, SV: 3 }, r).defender.FNP).toBe(5);
+    expect(applyToSim({}, { models: 10, W: 1, SV: 3 }, r).defender.FNP).toBeUndefined();
+  });
+  it('a character keeps the better of its own value and the buff', () => {
+    const base = { models: 5, W: 1, SV: 3, attached: [{ id: 'cap', W: 5, SV: 3, INV: 4 }] };
+    const r = resolveEffects([{ side: 'defender', mods: { invuln: 5 }, modelOnly: true, holder: 0 }], { phase: 'shooting' });
+    expect(applyToSim({}, base, r).defender.attached[0].INV).toBe(4);
+  });
+  it('BREAKING VARIANT: an untagged Feel No Pain still reaches every model group', () => {
+    const { defender } = applyToSim({}, squad(), resolveEffects([{ side: 'defender', mods: { fnp: 5 } }], { phase: 'shooting' }));
+    expect([defender.FNP, defender.profiles[0].FNP, ...defender.attached.map((c) => c.FNP)]).toEqual([5, 5, 5, 5]);
+  });
+  it('engine: a leader\'s own Halve Damage leaves the squad\'s damage untouched (closed form)', () => {
+    // 5 attacks, BS2+, S8 v T4 wound 2+, no save, D2 into W2 bodyguards: 5 x 5/6 x 5/6 x 2 = 6.94 damage, never
+    // reaching the leader (characters are allocated last). The old unit-wide Halve made it 3.47.
+    const attacker = { models: 5, weapons: [{ name: 'gun', type: 'ranged', count: 5, A: 1, BS: 2, S: 8, AP: 0, D: 2, keywords: [] }] };
+    const base = { models: 10, T: 4, SV: 7, W: 2, keywords: ['INFANTRY'], attached: [{ id: 'cap', name: 'Captain', models: 1, T: 4, SV: 7, W: 5, keywords: ['CHARACTER', 'INFANTRY'] }] };
+    const halve = { side: 'defender', mods: { halveDamage: true }, modelOnly: true, holder: 0 };
+    const own = applyToSim({}, base, resolveEffects([halve], { phase: 'shooting' })).defender;
+    expect(own.halveDamage).toBeUndefined();
+    expect(own.attached[0].halveDamage).toBe(true);
+    const all = applyToSim({}, base, resolveEffects([{ ...halve, modelOnly: undefined, holder: undefined }], { phase: 'shooting' })).defender;
+    const seed = 0x75;
+    const rOwn = runSimulation(attacker, own, { phase: 'ranged', iterations: 6000, seed });
+    const rAll = runSimulation(attacker, all, { phase: 'ranged', iterations: 6000, seed });
+    expect(Math.abs(rOwn.woundsDealt.mean - 6.94)).toBeLessThan(0.15);
+    expect(Math.abs(rAll.woundsDealt.mean - 3.47)).toBeLessThan(0.1);
+  });
+});

@@ -25,6 +25,11 @@
 //                                             // attached character must carry one phrase (see effectAppliesToUnit)
 //     unitWide?: true,                        // a saveSet/woundBonus/toughBonus that reaches EVERY model (19.04),
 //                                             // not just the bearer (see applyToSim)
+//     modelOnly?: true,                       // an fnp/invuln/damageReduction/halveDamage given to ONE model (19.04):
+//                                             // reaches only the model holding it, never the unit (see applyToSim)
+//     holder?: 'unit' | number,               // RUN-TIME only (utils/leaderAuras.js): whose datasheet ability a
+//                                             // modelOnly effect is, the primary unit's or the attached character's
+//                                             // position in the defender's character list (attachedCharsOf)
 //     mods: {
 //       // attacker-side (offensive):
 //       hitModifier?, woundModifier?,         // ints; the engine clamps each to +/-1
@@ -246,6 +251,9 @@ function emptyDefender() {
     unitSaveSet: null,
     unitWoundBonus: 0,
     unitToughBonus: 0,
+    // Feel No Pain / invulnerable save / Damage reduction given to ONE model (ledger item 75, `modelOnly`): one entry
+    // per effect, { holder, fnp, invuln, damageReduction, halveDamage }, applied to that model alone (applyToSim).
+    modelOnly: [],
     grantUnitKeywords: [],
     removeUnitKeywords: [],
   };
@@ -289,7 +297,15 @@ export function resolveEffects(effects, ctx = {}) {
     const bucket = (e.side || 'attacker') === 'defender' ? def : atk;
     if (m.grantUnitKeywords) bucket.grantUnitKeywords.push(...m.grantUnitKeywords);
     if (m.removeUnitKeywords) bucket.removeUnitKeywords.push(...m.removeUnitKeywords);
-    if ((e.side || 'attacker') === 'defender') {
+    if ((e.side || 'attacker') === 'defender' && e.modelOnly === true) {
+      // 11e Core Rules 19.04: a rule for a single specified model only ever applies to that model, even in an attached
+      // unit. Its saves and Damage reduction are kept apart from the unit-wide ones; its other mods (a save re-roll,
+      // a -1 to be hit, unit keywords) still read as the unit's, as before.
+      const own = { holder: e.holder ?? null, fnp: m.fnp ?? null, invuln: m.invuln ?? null, damageReduction: m.damageReduction || 0, halveDamage: !!m.halveDamage };
+      if (own.fnp != null || own.invuln != null || own.damageReduction || own.halveDamage) def.modelOnly.push(own);
+      if (m.hitPenalty) def.hitPenalty += m.hitPenalty;
+      if (m.saveReroll) def.saveReroll = strongerReroll(def.saveReroll, m.saveReroll);
+    } else if ((e.side || 'attacker') === 'defender') {
       if (m.fnp != null) def.fnp = def.fnp == null ? m.fnp : Math.min(def.fnp, m.fnp);
       if (m.invuln != null) def.invuln = def.invuln == null ? m.invuln : Math.min(def.invuln, m.invuln);
       if (m.damageReduction) def.damageReduction += m.damageReduction;
@@ -342,8 +358,36 @@ export function distributeDefensive(defender, d) {
   let out = mergeDefensive(defender, d);
   if (out.leader) out = { ...out, leader: mergeDefensive(out.leader, d) };
   if (Array.isArray(out.attached)) out = { ...out, attached: out.attached.map((c) => mergeDefensive(c, d)) };
-  if (Array.isArray(out.profiles)) out = { ...out, profiles: out.profiles.map((p) => mergeDefensive(p, d)) };
+  if (Array.isArray(out.profiles)) out = { ...out, profiles: out.profiles.map((p) => mergeDefensive(inheritBody(p, defender, d), d)) };
   return out;
+}
+
+// A champion profile that leaves a defensive field unset inherits the body's (engine/allocation.js makeGroup: FNP / INV
+// when undefined, halve / -Damage when null). Merging a buff into the unset field directly gave the champion the buff's
+// value instead of the better of it and the body's (review 2026-10-07: a body with FNP 4+ and a unit FNP 6+ left the
+// champion on 6+). So the body's own value is copied in first, for the fields the patch changes. Pure.
+function inheritBody(p, body, d) {
+  if (!p || typeof p !== 'object') return p;
+  const out = { ...p };
+  if (d.fnp != null && out.FNP === undefined) out.FNP = body.FNP;
+  if (d.invuln != null && out.INV === undefined) out.INV = body.INV;
+  if (d.halveDamage && out.halveDamage == null) out.halveDamage = body.halveDamage;
+  if (d.damageReduction && out.damageReduction == null) out.damageReduction = body.damageReduction;
+  return out;
+}
+
+// The defender's attached characters, in the order engine/allocation.js attachedChars reads them (the `attached` list
+// when there is one, else an embedded `leader`), and a copy of the defender with the i-th one replaced.
+function attachedCharsOf(defender) {
+  if (Array.isArray(defender?.attached)) return defender.attached.filter(Boolean);
+  return defender?.leader ? [defender.leader] : [];
+}
+function withChar(defender, i, fn) {
+  if (Array.isArray(defender.attached)) {
+    let n = -1;
+    return { ...defender, attached: defender.attached.map((c) => (c && ++n === i ? fn(c) : c)) };
+  }
+  return i === 0 && defender.leader ? { ...defender, leader: fn(defender.leader) } : defender;
 }
 
 /**
@@ -389,11 +433,11 @@ export function applyToSim(baseOptions, baseDefender, resolved) {
   // distributed — applying a 2+ save to a whole led squad would be a glaring over-buff. Target the
   // attached leader if the defending unit has one (an enhancement is on a character, usually the
   // leader), else the first attached character, else the unit's own profile (a standalone character).
+  // The first character is picked the way engine/allocation.js reads them (attachedCharsOf: the `attached` list, else an
+  // embedded `leader`; review 2026-10-07, ledger item 76: a unit carrying both used to buff a leader the engine ignores).
   if (d.saveSet != null || d.woundBonus || d.toughBonus) {
-    if (defender.leader) defender = { ...defender, leader: mergeUnitStats(defender.leader, d) };
-    else if (Array.isArray(defender.attached) && defender.attached.length) {
-      defender = { ...defender, attached: defender.attached.map((c, i) => (i === 0 ? mergeUnitStats(c, d) : c)) };
-    } else if ((defender.models ?? 1) <= 1) {
+    if (attachedCharsOf(defender).length) defender = withChar(defender, 0, (c) => mergeUnitStats(c, d));
+    else if ((defender.models ?? 1) <= 1) {
       // a standalone single-model character IS the bearer (a Captain with Artificer Armour, defending).
       defender = mergeUnitStats(defender, d);
     }
@@ -403,7 +447,30 @@ export function applyToSim(baseOptions, baseDefender, resolved) {
     // apply, the safe direction), rather than over-buff the squad.
   }
 
+  // A Feel No Pain / invulnerable save / Damage reduction given to ONE model (ledger item 75, 19.04) reaches only it:
+  //   holder 'unit'   the primary unit's own datasheet ability ("this model has…"): every model of that datasheet,
+  //                   the body and its champion profiles, never an attached character;
+  //   holder <id>     an attached character's own ability: that character alone (none matching: dropped);
+  //   no holder       an enhancement: its bearer, picked as the Save/W/T bearer above (the leader, else the first
+  //                   attached character, else a single-model unit; a multi-model unit with no character: dropped).
+  for (const own of d.modelOnly || []) defender = mergeModelOnly(defender, own);
+
   return { options, defender };
+}
+
+function mergeModelOnly(defender, own) {
+  const holder = own.holder;
+  if (holder === 'unit') {
+    let out = mergeDefensive(defender, own);
+    if (Array.isArray(out.profiles)) out = { ...out, profiles: out.profiles.map((p) => mergeDefensive(inheritBody(p, defender, own), own)) };
+    return out;
+  }
+  const chars = attachedCharsOf(defender);
+  if (Number.isInteger(holder)) return holder >= 0 && holder < chars.length ? withChar(defender, holder, (c) => mergeDefensive(c, own)) : defender;
+  if (holder != null) return defender; // an unknown holder is dropped (under-applied), never spread
+  if (chars.length) return withChar(defender, 0, (c) => mergeDefensive(c, own));
+  if ((defender.models ?? 1) <= 1) return mergeDefensive(defender, own);
+  return defender;
 }
 
 // Apply unit-statline buffs (Save set / +Wounds / +Toughness) to ONE profile (the bearer). Keeps the
@@ -458,6 +525,6 @@ export function isDefenderActive(d) {
   return (
     d.fnp != null || d.invuln != null || d.damageReduction || d.halveDamage || d.hitPenalty ||
     d.saveReroll !== 'none' || d.saveSet != null || d.woundBonus || d.toughBonus ||
-    d.unitSaveSet != null || d.unitWoundBonus || d.unitToughBonus
+    d.unitSaveSet != null || d.unitWoundBonus || d.unitToughBonus || (d.modelOnly || []).length
   );
 }
