@@ -87,7 +87,8 @@
 // 19 = ledger item 86: a weapon bonus worded for one model ("the bearer's melee weapons", "each time this model makes an
 //     attack", a catalogue enhancement's structured weapon modifier) is tagged `modelOnly` and reaches that model's
 //     weapons only (combat.js options.weaponMods), never the squad it leads.
-export const MAPPER_VERSION = 19;
+// 20 = ledger item 18: a Designer's Note is not read as rule text (stripDesignerNotes).
+export const MAPPER_VERSION = 20;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -1495,8 +1496,21 @@ const ROUND_TIER_RE = /^(?:during|in|from)\s+the\s+(?:first|second|third|fourth|
  */
 // `holdUnresolved`: the caller has a review surface (captureUnitAbilities), so a tier whose gate can't
 // be resolved is kept as a held (`_suspect`) effect instead of being dropped.
+// A Designer's Note explains a rule, it never adds one (mapper 20, ledger item 18). Read as rule text it did: the
+// Tome of Ectoclades' note restating the Oath of Moment re-roll became the enhancement's own re-roll (the army rule
+// already gives it), and Fates in Flux's fast-dice note read as "re-roll saves". The catalogue sets a note in
+// italics ("Designer's Note: *...*", the label sometimes bold), so the whole italic span goes; the packs print it as
+// plain prose, so its first sentence goes (every live pack note measured is one sentence). Text after the note (the
+// catalogue's Subterranean Assault keeps its real rule there) is untouched. Pure; exported for tests.
+export function stripDesignerNotes(text) {
+  let s = String(text ?? '');
+  s = s.replace(/\**Designer[’']s Note\**:?\**\s*\*[^*]*\*/gi, ' ');
+  s = s.replace(/\**Designer[’']s Note\**:?\**\s*[^.!?]*[.!?]?/gi, ' ');
+  return s;
+}
+
 export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = false } = {}) {
-  text = keywordCase(text); // a marked keyword name keeps its lowercase words in the run (see keywordCase)
+  text = keywordCase(stripDesignerNotes(text)); // a marked keyword name keeps its lowercase words in the run (see keywordCase)
   const raw = cleanRuleText(text);
   const notes = [];
   if (!raw) {

@@ -20,6 +20,7 @@ import {
   statBuffScope,
   defenceReach,
   attackReach,
+  stripDesignerNotes,
   degradeInfo,
   mergedDetachmentText,
   MERGED_DETACHMENT_NOTE,
@@ -3050,5 +3051,20 @@ describe('attackReach / attacker modelOnly (ledger item 86)', () => {
     expect(one[0].modelOnly).toBe(true);
     expect(unit[0].modelOnly).toBeUndefined();
     expect(text[0].modelOnly).toBeUndefined();
+  });
+});
+
+// ---- a Designer's Note is never rule text (mapper 20, ledger item 18) ----------------
+describe('stripDesignerNotes (ledger item 18)', () => {
+  it('the Tome of Ectoclades note restating the Oath of Moment re-roll adds nothing to the enhancement', () => {
+    const t = "Watch Master or Captain model only. Once per battle, after you have selected your Oath of Moment target, the bearer can use this Enhancement. If it does, select a second enemy unit to be an Oath of Moment target. Designer's Note: *This means that each time a model with the Oath of Moment ability makes an attack that targets either of your Oath of Moment targets, you can re-roll the Hit roll.*";
+    expect(mapRuleText(t, { name: 'Tome', source: 'enhancement' }).effects).toEqual([]);
+  });
+  it('a plain-prose pack note loses its sentence only', () => {
+    expect(stripDesignerNotes("Spend tokens. Designer's Note: When using fast dice rolling, re-roll saving throws at once. Next rule here.")).toBe('Spend tokens.   Next rule here.');
+  });
+  it('BREAKING VARIANT: the real rule after a catalogue note is still read', () => {
+    const t = "**Designer’s Note**: *This means that the selected models can be given Enhancements.* Surprise Assault: Each time a Tyranids model from your army makes an attack, re-roll a Hit roll of 1.";
+    expect(mapRuleText(t, { name: 'X', source: 'detachment' }).effects.map((e) => e.mods)).toEqual([{ reroll: { hit: 'ones' } }]);
   });
 });
