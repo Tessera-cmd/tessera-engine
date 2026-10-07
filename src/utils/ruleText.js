@@ -74,7 +74,9 @@
 //     before it (The Lion Helm's 4+ invulnerable save, Iron Resolve's bearer Feel No Pain).
 // 13 = ledger item 83: a save a bodyguard gives the character leading it ("that Character model has …") and a leader's
 //     "other Character models attached …" (`otherChars`) are kept and routed to that character (gatherRunAbilities).
-export const MAPPER_VERSION = 13;
+// 14 = ledger item 79: a fused detachment page worded "<X> unit only" is held; "Bearer's" is never a scope keyword; an
+//     AP / Damage / Strength / roll modifier stated "on a Critical Wound / Hit," is not simulated (it read as flat).
+export const MAPPER_VERSION = 14;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -411,6 +413,8 @@ const SCOPE_STOPWORDS = new Set([
   'INSTEAD', 'OTHERWISE', 'IN', 'AT', 'ON', 'AS', 'OF', 'OR', 'AND', 'NOT', 'NO', 'THEN', 'BUT',
   'SUCH', 'EVERY', 'ITS', 'THEIR', 'TO', 'FROM', 'FOR', 'WITH', 'ADD', 'SUBTRACT', 'IMPROVE',
   'ONCE', 'PER', 'SEE', 'ONLY', 'BOTH', 'MORE', 'FEWER', 'NEW', 'FIRST', 'SECOND', 'THIRD',
+  // "the Bearer's unit" (a catalogue's capital B, Piercing Talons): the bearer is a role, never a keyword (mapper 14).
+  'BEARER', "BEARER'S", 'BEARER’S',
 ]);
 
 // Model-type / class-keyword scope of a clause, side-aware. GW scopes a detachment rule inside
@@ -1204,6 +1208,10 @@ function mapClause(
     // ranged attacks have: ▪ [LETHAL HITS] . ▪ [SUSTAINED HITS 1] .").
     (!condition && !!lead?.suspect);
   const add = (side, mod, summary, phaseOverride) => {
+    // "… makes an attack, on a Critical Wound, improve the Armour Penetration characteristic of that attack by 1": the
+    // engine cannot give AP or Damage to critical wounds alone, and read as a flat bonus it applied to every attack
+    // (Ingrained Superiority). Not simulated (mapper 14, ledger item 79); under-applies, the safe direction.
+    if (side === 'attacker' && CRIT_ONLY_RE.test(clause) && Object.keys(mod || {}).some((k) => CRIT_ONLY_KEYS.has(k))) return;
     const eff = { name, side, phase: phaseOverride || phase, condition, mods: mod };
     const sideScope = side === 'defender' ? scope.defender : scope.attacker;
     if (sideScope.length) eff.scope = sideScope;
@@ -1365,6 +1373,9 @@ function leaderGateOf(text) {
 
 // The ability-level gates mapRuleText applies to every conditionless effect (see there).
 const ABILITY_ONCE_RE = /\bonce per (?:battle|turn|game)\b/i;
+// A modifier that only applies to a critical hit or wound ("on a Critical Wound, improve the AP …"): see mapClause add.
+const CRIT_ONLY_RE = /\b(?:on|for)\s+(?:an?\s+|each\s+)?(?:unmodified\s+)?Critical\s+(?:Hit|Wound)s?\s*,/i;
+const CRIT_ONLY_KEYS = new Set(['apBonus', 'damageBonus', 'strengthBonus', 'woundModifier', 'hitModifier']);
 const ONCE_OPENER_RE = /^\W*(?:in addition,\s*)?once per (?:battle|turn|game)\b/i;
 // "A TRANSPORT unit … this unit is embarked within has: …" (ledger item 80): the effect needs the unit embarked, a board
 // state the sim does not track, so its trigger is unread (the rule-trigger gate).
@@ -2397,7 +2408,9 @@ function applyStructuredMods(plan, rawMods, rawText = plan.text) {
 // seven fused pages: Haloscreed Battle Clade, Corsair Coterie, Veiled Blade Elimination Force, Pantheon of
 // Woe, Freebooter Krew, Hammer of Avernii, Saga of the Great Wolf x2) and 0 of the 432 read from the 37
 // live 11e catalogues. Such a rule is held (text kept, no effect) until the page reads cleanly.
-const MERGED_DETACHMENT_RX = /\bbearer\b|\bmodels? only\b/i;
+// "<X> unit only." (singular) is an enhancement's restriction too (Yriel's Own, mapper 14, ledger item 79); a genuine
+// detachment rule restricts a SECTION with the plural ("Shadow Legion Khorne units only").
+const MERGED_DETACHMENT_RX = /\bbearer\b|\bmodels? only\b|\bunit only\b/i;
 export function mergedDetachmentText(text) {
   return typeof text === 'string' && MERGED_DETACHMENT_RX.test(text);
 }
