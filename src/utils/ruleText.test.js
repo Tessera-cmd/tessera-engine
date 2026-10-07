@@ -2999,3 +2999,17 @@ describe('mapper 17 (ledger items 38 + part of 27)', () => {
     expect(mapRuleText('When you select an enemy FOO unit, you can re-roll rolls to determine whether that enemy unit suffers a mortal wound.', { name: 'X' }).effects).toEqual([]);
   });
 });
+
+describe('mapper 18: a bracket that qualifies is not a grant (ledger item 27)', () => {
+  const grants = (t) => mapRuleText(t, { name: 'X' }).effects.flatMap((e) => e.mods.grantKeywords || []);
+  it('qualifiers, removals and the enemy\'s weapon never grant', () => {
+    expect(grants('Until the end of the phase, your unit\'s [TORRENT] ranged attacks have [BLAST 1].')).toEqual(['BLAST 1']);
+    expect(grants('Your unit\'s [BLAST] ranged attacks: - Do not have [BLAST]. - Have +1 S.')).toEqual([]);
+    expect(grants('Models in the bearer\'s unit have the Feel No Pain 4+ ability against Critical Wounds caused by attacks with the [DEVASTATING WOUNDS] ability.')).toEqual([]);
+    expect(grants('This unit\'s ranged attacks (excluding [TORRENT] attacks) have +3" R.')).toEqual([]);
+  });
+  it('BREAKING VARIANT: a real grant still reads', () => {
+    expect(grants('Ranged weapons equipped by models in this unit have the [LETHAL HITS] ability.')).toEqual(['LETHAL HITS']);
+    expect(grants('Until the end of the phase, weapons equipped by models in your unit have the [SUSTAINED HITS 1] and [IGNORES COVER] abilities.')).toEqual(['SUSTAINED HITS 1', 'IGNORES COVER']);
+  });
+});

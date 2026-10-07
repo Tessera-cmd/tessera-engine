@@ -82,7 +82,9 @@
 //     phase word no longer sets the effect's phase (Enfilading Emergence, A Perfect Ambush, Starfall Shells).
 // 17 = ledger item 38: "makes a ranged attack … or makes a melee attack" reads as either phase, and an attack that
 //     "targets a (visible) unit / target, <modifier>" is every attack, not an unread trigger (Hallowed Ground).
-export const MAPPER_VERSION = 17;
+// 18 = ledger item 27 (part): a bracketed keyword that qualifies ("[TORRENT] ranged attacks", "do not have [BLAST]", "attacks with the
+//     [DEVASTATING WOUNDS] ability") is never read as a grant.
+export const MAPPER_VERSION = 18;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -1006,9 +1008,16 @@ function grantKeywordMods(t) {
   const out = [];
   // Capture every bracketed token, keep only recognised weapon keywords (with their number).
   const re = /\[([A-Z][A-Z0-9 +\-]*?)\]/g;
+  const T = t.toUpperCase();
   let m;
-  while ((m = re.exec(t.toUpperCase()))) {
+  while ((m = re.exec(T))) {
     const tok = m[1].trim();
+    // A bracket that QUALIFIES rather than grants (mapper 18, ledger item 27): "your unit's [TORRENT] ranged attacks have
+    // [BLAST 1]" (only those weapons; Synchronised Inferno granted TORRENT to everything), "[BLAST] ranged attacks: do not
+    // have [BLAST]" (a removal, Foebreaker Firestorm), "caused by attacks with the [DEVASTATING WOUNDS] ability" (the
+    // ENEMY's weapon, Runes of Warding gave the bearer's unit Devastating Wounds). Skipped, never granted.
+    if (/^\s*(?:RANGED\s+|MELEE\s+)?(?:ATTACKS?|WEAPONS?)\b/.test(T.slice(m.index + m[0].length))) continue;
+    if (/\b(?:(?:DO\s+NOT|DOES\s+NOT|CANNOT|CAN\s+NOT)(?:\s+(?:HAVE|HAS|GAINS?))?|LOSES?|WITHOUT|EXCLUDING|WITH(?:\s+(?:THE|AN?))?|(?:THAT|WHICH)\s+(?:HAS|HAVE)(?:\s+THE)?|MADE\s+WITH|CAUSED\s+BY)\s*(?:THE\s+)?$/.test(T.slice(Math.max(0, m.index - 30), m.index))) continue;
     const base = GRANTABLE_KEYWORDS.find((k) => tok === k || tok.startsWith(k));
     if (base) out.push({ side: 'attacker', mod: { grantKeywords: [tok] }, summary: tok });
   }
