@@ -2892,3 +2892,40 @@ describe('target carve-outs become targetExcl (ledger item 77)', () => {
     expect(r.effects.every((e) => e.targetExcl === undefined)).toBe(true);
   });
 });
+
+// ---- mapper 12 (ledger items 80 + 82) ------------------------------------------------------------------------
+describe('once-per-battle opener gates only what follows; embarked effects are triggered (ledger items 80 + 82)', () => {
+  const read = (t) => mapRuleText(t, { name: 'X' }).effects.map((e) => ({ mods: e.mods, c: e.condition }));
+  it('an always-on sentence before "In addition, once per battle" stays always on', () => {
+    expect(read('Models in the bearer\'s unit have a 4+ invulnerable save. In addition, once per battle, in any phase, the bearer can do a thing. When it does, until the end of the phase, models in the bearer\'s unit have the Feel No Pain 5+ ability.')).toEqual([
+      { mods: { invuln: 4 }, c: null },
+      { mods: { fnp: 5 }, c: 'oncePerBattle' },
+    ]);
+    expect(read('The bearer has the Feel No Pain 5+ ability. Once per battle, the bearer can use this Enhancement. If it does, until the end of the phase, models in the bearer\'s unit have the Feel No Pain 5+ ability.')).toEqual([
+      { mods: { fnp: 5 }, c: null },
+      { mods: { fnp: 5 }, c: 'oncePerBattle' },
+    ]);
+  });
+  it('BREAKING VARIANT: a trailing "once per battle" still gates the whole rule', () => {
+    expect(read('Add 1 to the Hit roll for attacks made by this unit. This ability can only be used once per battle.')).toEqual([{ mods: { hitModifier: 1 }, c: 'oncePerBattle' }]);
+    expect(read('Once per battle, at the start of any phase, this model can use this ability. If it does, until the end of the phase, this model has a 3+ invulnerable save.')).toEqual([{ mods: { invuln: 3 }, c: 'oncePerBattle' }]);
+  });
+  it('an effect for the transport a unit is embarked within waits on the rule trigger', () => {
+    expect(read('FOO model only. A TRANSPORT unit (excluding WALKER units) this unit is embarked within has: - +2" M. - 5+ InSv.')).toEqual([{ mods: { invuln: 5 }, c: 'ruleTrigger' }]);
+  });
+});
+
+describe('captureUnitAbilities: save auras that are not the datasheet\'s statline (mapper 12)', () => {
+  const cap = (t) => captureUnitAbilities([{ name: 'A', text: t }]).map((e) => ({ mods: e.mods, captured: !!e.captured, leaderOnly: !!e.leaderOnly }));
+  it('a leader aura save is kept and applied (leader-gated); it used to be dropped as a statline note', () => {
+    expect(cap('While this model is leading a unit, models in that unit have a 4+ invulnerable save.')).toEqual([{ mods: { invuln: 4 }, captured: false, leaderOnly: true }]);
+  });
+  it('"models in the bearer\'s unit" (one model\'s wargear) is kept but held for review', () => {
+    expect(cap('Models in the bearer\'s unit have a 5+ invulnerable save.')).toEqual([{ mods: { invuln: 5 }, captured: true, leaderOnly: false }]);
+  });
+  it('BREAKING VARIANT: the shapes it cannot route stay dropped', () => {
+    expect(cap('This model has a 4+ invulnerable save.')).toEqual([]);
+    expect(cap('While this model is leading a unit, other Character models attached to that unit have the Feel No Pain 4+ ability.')).toEqual([]);
+    expect(cap('While a Character model is leading this unit, that Character model has the Feel No Pain 4+ ability.')).toEqual([]);
+  });
+});

@@ -69,7 +69,10 @@
 //     tagged `modelOnly` and reaches only that model (19.04; see defenceReach), never the unit it leads.
 // 11 = ledger item 77: a carve-out on the attack's target ("targets a unit (excluding MONSTERS and VEHICLES)") is the
 //     effect's `targetExcl`, checked against the defender's keywords, no longer this side's own exclusion.
-export const MAPPER_VERSION = 11;
+// 12 = ledger items 80 + 82: an effect for a unit "embarked within" a transport is behind the rule-trigger gate; a
+//     sentence opening "(In addition,) once per battle" gates only itself and what follows, not the always-on sentences
+//     before it (The Lion Helm's 4+ invulnerable save, Iron Resolve's bearer Feel No Pain).
+export const MAPPER_VERSION = 12;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -1191,6 +1194,7 @@ function mapClause(
       (source !== 'stratagem' && DURATION_RE.test(stratagemEffectText(clause)) && !SELECTED_DURATION_RE.test(clause)) ||
       COUNT_TRIGGER_RE.test(clause) ||
       BATTLE_ROUND_RE.test(clause) ||
+      EMBARKED_RE.test(clause) ||
       TALLY_ROW_RE.test(clause) ||
       ZONE_RE.test(clause) ||
       DESIGNATED_TARGET_RE.test(clause)) ||
@@ -1359,6 +1363,10 @@ function leaderGateOf(text) {
 
 // The ability-level gates mapRuleText applies to every conditionless effect (see there).
 const ABILITY_ONCE_RE = /\bonce per (?:battle|turn|game)\b/i;
+const ONCE_OPENER_RE = /^\W*(?:in addition,\s*)?once per (?:battle|turn|game)\b/i;
+// "A TRANSPORT unit … this unit is embarked within has: …" (ledger item 80): the effect needs the unit embarked, a board
+// state the sim does not track, so its trigger is unread (the rule-trigger gate).
+const EMBARKED_RE = /\bis\s+embarked\s+(?:within|in|on)\b/i;
 const ABILITY_WAAAGH_RE = /\bwaaa?gh!?\b[^.]{0,30}?\bactive\b|\bis active for your army\b/i;
 // The activation words read across clauses (mapRuleText's ability-level suspicion), and the target-range
 // phrase they ignore.
@@ -1477,6 +1485,13 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   // The first clause carrying an activation word (see the ability-level suspicion below), and each
   // effect's clause, so an activation only reaches the effects stated with or after it.
   let activationAt = Infinity;
+  // The once-per-battle gate (ledger item 82): a sentence that OPENS with "Once per battle" ("In addition, once per
+  // battle, …") starts a new, once-only part of the rule, so it gates only what it and the later clauses say; the
+  // sentences before it are always on ("Models in the bearer's unit have a 4+ invulnerable save. In addition, once per
+  // battle, …", The Lion Helm). Anywhere else ("This ability can only be used once per battle", trailing), the whole
+  // rule stays gated, as before.
+  let onceAt = Infinity;
+  let onceRuleWide = false;
   const clauseOf = new Map();
   // "Instead" tiers whose modifier REPLACES a head modifier of the same kind (see INSTEAD_DELTA).
   const insteadPairs = [];
@@ -1562,6 +1577,10 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
     effects.push(...r.effects);
     matched.push(...r.matched);
     if (activationAt === Infinity && ACTIVATION_RE.test(body.replace(TARGET_RANGE_RE, 'targets a unit'))) activationAt = ci;
+    if (ABILITY_ONCE_RE.test(body)) {
+      if (ONCE_OPENER_RE.test(body) && !ABILITY_ONCE_RE.test(body.replace(ONCE_OPENER_RE, ''))) onceAt = Math.min(onceAt, ci);
+      else onceRuleWide = true;
+    }
     if (r.bearer?.length) bearer = [...r.bearer];
     // The bearer gate (ledger item 57): engine/effects.js effectAppliesToUnit passes it when a phrase matches the unit's
     // own keywords or an attached character's (the model that can carry the enhancement).
@@ -1631,7 +1650,8 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   if (degradeAbility) for (const e of effects) e.condition = 'damaged';
   const abilityGate = ABILITY_ONCE_RE.test(mapText) ? 'oncePerBattle' : ABILITY_WAAAGH_RE.test(mapText) ? 'armyAbilityActive' : null;
   // (A tier the slot can't tell apart from its head stays held: the ability gate would let it ride along.)
-  if (abilityGate) for (const e of effects) if (!e.condition && !UNRESOLVED_TIER.has(e)) e.condition = abilityGate;
+  const gatedHere = (e) => abilityGate !== 'oncePerBattle' || onceRuleWide || !clauseOf.has(e) || clauseOf.get(e) >= onceAt;
+  if (abilityGate) for (const e of effects) if (!e.condition && !UNRESOLVED_TIER.has(e) && gatedHere(e)) e.condition = abilityGate;
 
   // Ability-LEVEL suspicion: an activation / aura / heal / phase trigger ANYWHERE in the ability
   // often sits in a DIFFERENT clause than the +effect it gates (Blessing of the Omnissiah: "In your
@@ -1832,7 +1852,17 @@ export function captureUnitAbilities(items = []) {
     const onlyStatline =
       r.effects.every(defensiveSaveKeys) &&
       r.effects.some((e) => Object.keys(e.mods || {}).some((k) => k === 'invuln' || k === 'fnp'));
-    if (onlyStatline) continue; // the INV/FNP (+ any save-reroll rider) is already on the statline
+    // Two shapes are not this datasheet's own statline (mapper 12, 2026-10-07):
+    //   - a LEADER AURA, "While this model is leading a unit, models in that unit have the Feel No Pain 5+ ability"
+    //     (Librarian, Hospitaller, Technomancer …): kept and applied, leader-gated as every leader aura is. It used to be
+    //     dropped here, so it applied nowhere. Not "other CHARACTER models attached" (Visarch, Locus): still dropped.
+    //   - "Models in the bearer's unit have a 4+ invulnerable save" (The Lion Helm, Serpent Shield, Weavefield crest): a
+    //     unit aura from one model's wargear, which may not be taken; kept but HELD for review, never auto-applied.
+    // A bodyguard's "that Character model has …" stays dropped: it is the leader's save, which this unit cannot route.
+    const leaderAura = r.effects.every((e) => e.leaderOnly === true) && /\bmodels\s+in\s+that\s+unit\b/i.test(text) && !/\bother\s+character/i.test(text);
+    const bearerUnitAura = /\bmodel(?:s|['’]s)?\s+in\s+the\s+bearer['’]s\s+unit\b/i.test(text);
+    if (onlyStatline && !leaderAura && !bearerUnitAura) continue; // the INV/FNP (+ any save-reroll rider) is already on the statline
+    const holdAll = onlyStatline && !leaderAura && bearerUnitAura;
     // A "select/choose one of the following" ability is a per-phase CHOICE; the mapper grants EVERY
     // option, so none can be auto-applied (the player picks one) — route them all to review.
     const isChoice = CHOICE_RE.test(text);
@@ -1865,7 +1895,7 @@ export function captureUnitAbilities(items = []) {
         (Array.isArray(m.grantKeywords) && m.grantKeywords.length > 0) ||
         m.reroll?.hit === 'ones' ||
         m.reroll?.wound === 'ones';
-      const apply = conditioned || (safeAlwaysOn && !negAtk && !isChoice && !_suspect);
+      const apply = !holdAll && (conditioned || (safeAlwaysOn && !negAtk && !isChoice && !_suspect));
       // The ABILITY's name, never a sub-rule label the mapper read inside it: the datasheet view, the
       // abilities editor and the matrix toggles all join a captured effect to its ability BY NAME
       // (2026-10-03 review: "Carmine Wrath" orphaned the "Legacy of the Angel" card).
