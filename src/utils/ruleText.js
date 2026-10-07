@@ -78,7 +78,9 @@
 //     AP / Damage / Strength / roll modifier stated "on a Critical Wound / Hit," is not simulated (it read as flat).
 // 15 = ledger item 84: "on a Critical Wound, improve the Armour Penetration characteristic of that attack by N" is
 //     `critApBonus: N`, simulated on the critical wounds alone (combat.js); other crit-only modifiers stay unsimulated.
-export const MAPPER_VERSION = 15;
+// 16 = ledger item 64: a duration running to a NEXT phase ("until the end of your next Fight phase") spans phases, so its
+//     phase word no longer sets the effect's phase (Enfilading Emergence, A Perfect Ambush, Starfall Shells).
+export const MAPPER_VERSION = 16;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -259,6 +261,13 @@ const NUM = '(\\d+|one|two|three|four|five|six)';
 // stored 'fight' and never applied. When the rest of the clause names the weapon type, the weapon type wins.
 // A duration with no weapon type beside it keeps the reading below (deliberately unchanged).
 const DURATION_PHASE_RE = /\buntil\s+the\s+(?:start|end)\s+of\s+(?:the|that|this|your|your\s+opponent's)(?:\s+next)?\s+(?:fight|shooting)\s+phase\b/gi;
+// A duration running to a NEXT phase ("until the end of your next Fight phase", "until the start of your next Shooting
+// phase") spans phases (mapper 16, ledger item 64; owner ruling 2026-10-05, "whatever the rule says, make it so"): set up
+// in the Movement phase it covers your Shooting and Fight phases; started in your Shooting phase it covers the opponent's
+// whole turn. Its phase word is never the effect's phase, so the clause is read without it ('any' when nothing else names
+// a phase). The sim has no turn owner, so "your" / "your opponent's" cannot narrow it further. A duration with no "next"
+// ("until the end of the Fight phase") is the current phase and still names it.
+const SPAN_DURATION_RE = /\buntil\s+the\s+(?:start|end)\s+of\s+(?:the\s+|your\s+|your\s+opponent['’]s\s+|the\s+enemy['’]s\s+)?next\s+(?:fight|shooting|command|movement|charge)\s+phase\b/gi;
 function detectPhase(t) {
   const rest = t.replace(DURATION_PHASE_RE, ' ');
   if (rest !== t) {
@@ -266,6 +275,7 @@ function detectPhase(t) {
     const ranged = /\b(ranged weapons?|ranged attacks?|made with ranged)\b/i.test(rest);
     if (melee !== ranged) return melee ? 'fight' : 'shooting';
   }
+  t = t.replace(SPAN_DURATION_RE, ' ');
   const either = /\b(?:shoot(?:ing)?\s+or\s+(?:the\s+)?fight|fight\s+or\s+(?:the\s+)?shoot(?:ing)?)\b/i.test(t);
   if (either || (/\b(fight phase|selected to fight)\b/i.test(t) && /\b(shooting phase|selected to shoot)\b/i.test(t))) {
     const melee = /\b(melee weapons?|melee attacks?|made with melee)\b/i.test(t);

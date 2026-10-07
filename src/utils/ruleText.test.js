@@ -2956,3 +2956,15 @@ describe('mapper 15: AP on a critical wound is critApBonus (ledger item 84)', ()
     expect(mapRuleText('Each time a model in this unit makes an attack, on a Critical Wound, add 1 to the Damage characteristic of that attack.', { name: 'X' }).effects).toEqual([]);
   });
 });
+
+describe('mapper 16: a duration to a NEXT phase spans phases (ledger item 64)', () => {
+  const phaseOf = (t) => mapRuleText(t, { name: 'X' }).effects.map((e) => e.phase);
+  it('"until the end of your next Fight phase" applies in every phase it covers', () => {
+    expect(phaseOf('Until the end of your next Fight phase, weapons equipped by models in your unit have the [SUSTAINED HITS 1] ability.')).toEqual(['any']);
+    expect(phaseOf('Until the start of your next Shooting phase, each time a model in that enemy unit makes an attack, subtract 1 from the Hit roll.')).toEqual(['any']);
+  });
+  it('BREAKING VARIANT: a duration with no "next" is the current phase; a weapon type still wins', () => {
+    expect(phaseOf('Until the end of the Fight phase, weapons equipped by models in your unit have the [LETHAL HITS] ability.')).toEqual(['fight']);
+    expect(phaseOf('Until the end of your next Fight phase, ranged weapons equipped by models in your unit have the [LETHAL HITS] ability.')).toEqual(['shooting']);
+  });
+});
