@@ -2984,3 +2984,18 @@ describe('enhancement eligibility: comma lists and hyphenated keywords (ledger i
     expect(enhancementMatches(enhancementEligibility({ text: 'SPEEDER unit only. This unit has a thing.' }), ['VEHICLE', 'LAND SPEEDER'])).toBe(true);
   });
 });
+
+describe('mapper 17 (ledger items 38 + part of 27)', () => {
+  const read = (t) => mapRuleText(t, { name: 'X' }).effects.map((e) => ({ p: e.phase, c: e.condition, m: e.mods }));
+  it('Hallowed Ground shape: a visible target or a melee attack is every attack, both phases', () => {
+    expect(read('Each time a model in a FOO unit from your army makes a ranged attack that targets a visible target or makes a melee attack, re-roll a Hit roll of 1.')).toEqual([{ p: 'any', c: null, m: { reroll: { hit: 'ones' } } }]);
+  });
+  it('BREAKING VARIANT: halves with their own conditions keep the phase reading (Indomitor Doctrines)', () => {
+    expect(read('Each time a model in this unit makes a ranged attack that targets the closest eligible target, or makes a melee attack in a turn in which it made a Charge move, improve the Strength characteristic of that attack by 2.')).toEqual([{ p: 'fight', c: 'onCharge', m: { strengthBonus: 2 } }]);
+  });
+  it('spaced or missing re-roll hyphens are read; a roll "to determine" a mortal wound is not a wound roll', () => {
+    expect(cleanRuleText('you can re roll the Hit roll; Re - roll a Wound roll of 1; while Battle - shocked')).toBe('you can re-roll the Hit roll; Re-roll a Wound roll of 1; while Battle - shocked');
+    expect(read('Each time a model in this unit makes a melee attack, re roll a Wound roll of 1.')).toEqual([{ p: 'fight', c: null, m: { reroll: { wound: 'ones' } } }]);
+    expect(mapRuleText('When you select an enemy FOO unit, you can re-roll rolls to determine whether that enemy unit suffers a mortal wound.', { name: 'X' }).effects).toEqual([]);
+  });
+});

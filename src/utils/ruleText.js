@@ -80,7 +80,9 @@
 //     `critApBonus: N`, simulated on the critical wounds alone (combat.js); other crit-only modifiers stay unsimulated.
 // 16 = ledger item 64: a duration running to a NEXT phase ("until the end of your next Fight phase") spans phases, so its
 //     phase word no longer sets the effect's phase (Enfilading Emergence, A Perfect Ambush, Starfall Shells).
-export const MAPPER_VERSION = 16;
+// 17 = ledger item 38: "makes a ranged attack … or makes a melee attack" reads as either phase, and an attack that
+//     "targets a (visible) unit / target, <modifier>" is every attack, not an unread trigger (Hallowed Ground).
+export const MAPPER_VERSION = 17;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -232,6 +234,10 @@ export function cleanRuleText(text) {
     .replace(/&apos;/g, "'")
     .replace(/&quot;/g, '"')
     .replace(/[‐‑‒–—―]/g, '-') // hyphen/dash variants -> '-'
+    // A spaced or missing hyphen in "re-roll" (mapper 17, ledger items 27 + 38): pack PDFs read "re - roll" and a catalogue
+    // text has "re roll" (Hallowed Ground), which matched nothing. ("Battle - shocked" is left as is: read, "your unit is
+    // Battle-shocked" took the TARGET toggle, a wrong gate that stacked Maddened Ferocity's "instead" tier.)
+    .replace(/\b(re)(?:\s+-\s*|\s*-\s+|\s+)(roll)/gi, '$1-$2')
     .replace(/[‘’]/g, "'") // curly single quotes -> '
     .replace(/[“”]/g, '"') // curly double quotes -> "
     .replace(/\s+/g, ' ')
@@ -276,11 +282,17 @@ function detectPhase(t) {
     if (melee !== ranged) return melee ? 'fight' : 'shooting';
   }
   t = t.replace(SPAN_DURATION_RE, ' ');
-  const either = /\b(?:shoot(?:ing)?\s+or\s+(?:the\s+)?fight|fight\s+or\s+(?:the\s+)?shoot(?:ing)?)\b/i.test(t);
+  // "makes a ranged attack … or makes a melee attack" is either phase too (mapper 17, ledger item 38, Hallowed Ground).
+  const either =
+    /\b(?:shoot(?:ing)?\s+or\s+(?:the\s+)?fight|fight\s+or\s+(?:the\s+)?shoot(?:ing)?)\b/i.test(t) ||
+    // Only the unqualified shape: a half carrying its own condition ("targets the closest eligible target, or makes a
+    // melee attack in a turn in which it made a Charge move", Indomitor Doctrines) keeps its phase reading.
+    /\branged\s+attack\s+that\s+targets\s+(?:a|an)\s+(?:visible\s+)?(?:unit|target)\s+or\s+makes\s+a\s+melee\s+attack\s*,/i.test(t);
   if (either || (/\b(fight phase|selected to fight)\b/i.test(t) && /\b(shooting phase|selected to shoot)\b/i.test(t))) {
     const melee = /\b(melee weapons?|melee attacks?|made with melee)\b/i.test(t);
     const ranged = /\b(ranged weapons?|ranged attacks?|made with ranged)\b/i.test(t);
     if (!melee && !ranged) return 'any';
+    if (melee && ranged) return 'any'; // both kinds named in an either-phase clause (mapper 17)
     if (melee !== ranged) return melee ? 'fight' : 'shooting';
   }
   if (/\b(melee weapons?|melee attacks?|fight phase|in the fight phase|made with melee|selected to fight)\b/i.test(t)) return 'fight';
@@ -968,12 +980,15 @@ function rerollMods(raw) {
     // only model a blanket re-roll, so promoting it to 'all' over-applies. Skip it — but NOT
     // "re-roll one OR MORE" (that IS a blanket re-roll). (#capture-safety)
     if (/\bre-?roll\s+(?:one(?!\s+or\s+more)|a\s+single)\b/i.test(clause)) continue;
+    // "re-roll rolls to determine whether that enemy unit suffers a mortal wound" (Psyk-Out Grenades) re-rolls some other
+    // roll, never a Hit or Wound roll; nor is a "mortal wound" a wound roll (mapper 17).
+    if (/\brolls?\s+to\s+determine\b/i.test(clause)) continue;
     const kind = rerollKind(clause);
     if (/\bhit\b/i.test(clause) && !seen.has('hit')) {
       out.push({ side: 'attacker', mod: { reroll: { hit: kind } }, summary: 'Re-roll Hits' });
       seen.add('hit');
     }
-    if (/\bwound\b/i.test(clause) && !seen.has('wound')) {
+    if (/\bwound\b/i.test(clause.replace(/\bmortal\s+wounds?\b/gi, '')) && !seen.has('wound')) {
       out.push({ side: 'attacker', mod: { reroll: { wound: kind } }, summary: 'Re-roll Wounds' });
       seen.add('wound');
     }
@@ -1181,7 +1196,10 @@ function mapClause(
       // trigger (Armoured Spearhead, 2026-10-03): only the bare "an enemy unit," followed DIRECTLY by
       // the modifier is exempt — "…an enemy unit, excluding CHARACTER units, …" and "the closest enemy
       // unit" stay suspect.
-      /\btargets?\s+(?:(?:a|an|one)\b(?!\s+enemy\s+unit\s*,\s*(?:add|subtract|re-?roll|improve|worsen|you\s+can\s+re-?roll)\b)|the\s+closest\b)/i.test(clause) ||
+      // Mapper 17 (ledger item 38): a plain or "visible" target is every attack too (the sim's ranged attacks target a
+      // visible unit; Indirect Fire has its own toggle), as is the same with "or makes a melee attack" (Hallowed Ground:
+      // "makes a ranged attack that targets a visible target or makes a melee attack, re-roll a Hit roll of 1").
+      /\btargets?\s+(?:(?:a|an|one)\b(?!\s+(?:(?:enemy|visible)\s+)?(?:enemy\s+)?(?:unit|target)(?:\s+or\s+makes\s+(?:a|an)\s+(?:melee|ranged)\s+attack)?\s*,\s*(?:add|subtract|re-?roll|improve|worsen|you\s+can\s+re-?roll)\b)|the\s+closest\b)/i.test(clause) ||
       // …and the exempt shape, like a conjunct HEAD ("…add 1 to the Hit roll, and if …", which lost
       // the tail's "if" in the split), stays held when another gate word the mapper can't resolve
       // sits anywhere in it ("Until the end of the phase, …", "Unless this unit is Engaged, …").
