@@ -622,3 +622,42 @@ describe('modelOnly defensive buffs reach one model (19.04, ledger item 75)', ()
     expect(Math.abs(rAll.woundsDealt.mean - 3.47)).toBeLessThan(0.1);
   });
 });
+
+// ---- the bearer's statline with no base value (ledger item 76) ----------------------------------------------
+// A character with no Toughness of its own fights on the body's (allocation.js `ch.T ?? bodyT`), so an enhancement's
+// +T adds to that. `(null || 0) + 1` made it Toughness 1. A +W with no base value has nothing to add to: dropped.
+describe('bearer statline buffs with no base value (ledger item 76)', () => {
+  const plusT = resolveEffects([{ side: 'defender', mods: { toughBonus: 1 } }], { phase: 'shooting' });
+  const plusW = resolveEffects([{ side: 'defender', mods: { woundBonus: 1 } }], { phase: 'shooting' });
+  it('a character with no Toughness gets the body\'s plus the bonus, never the bonus alone', () => {
+    const attached = applyToSim({}, { models: 5, T: 5, W: 2, SV: 3, attached: [{ name: 'C', W: 5, SV: 3, T: null }] }, plusT).defender;
+    expect(attached.attached[0].T).toBe(6);
+    const embedded = applyToSim({}, { models: 5, T: 4, W: 2, SV: 3, leader: { name: 'L', W: 4, SV: 3, T: null } }, plusT).defender;
+    expect(embedded.leader.T).toBe(5);
+    expect(embedded.T).toBe(4); // the bodyguard is untouched
+    const own = applyToSim({}, { models: 5, T: 4, W: 2, SV: 3, attached: [{ name: 'C', W: 5, SV: 3, T: 6 }] }, plusT).defender;
+    expect(own.attached[0].T).toBe(7);
+  });
+  it('a +W or +T with nothing to add to is dropped, not read as the whole value', () => {
+    const noW = applyToSim({}, { models: 5, T: 4, W: 2, SV: 3, attached: [{ name: 'C', SV: 3, W: null, T: 4 }] }, plusW).defender;
+    expect(noW.attached[0].W).toBeNull();
+    const lone = applyToSim({}, { models: 1, W: 4, SV: 3, T: null }, plusT).defender;
+    expect(lone.T).toBeNull();
+    expect(applyToSim({}, { models: 5, T: 4, W: 2, SV: 3, attached: [{ name: 'C', SV: 3, W: 4, T: 4 }] }, plusW).defender.attached[0].W).toBe(5);
+  });
+  it('the unit-wide path still leaves an inheriting character null (it inherits the buffed body)', () => {
+    const r = resolveEffects([{ side: 'defender', mods: { toughBonus: 1 }, unitWide: true }], { phase: 'shooting' });
+    const d = applyToSim({}, { models: 5, T: 4, W: 2, SV: 3, attached: [{ name: 'C', W: 5, SV: 3, T: null }] }, r).defender;
+    expect(d.T).toBe(5);
+    expect(d.attached[0].T).toBeNull();
+  });
+  it('engine: the enhanced character alone is wounded on 5+ by S4 (T4 body + 1), not on 2+ (T1)', () => {
+    // Only the character is left (no bodyguard models): 600 S4 shots, BS 2+, no save. T5: 600 x 5/6 x 1/3 = 166.7.
+    const attacker = { models: 600, weapons: [{ name: 'gun', type: 'ranged', count: 600, A: 1, BS: 2, S: 4, AP: 0, D: 1, keywords: [] }] };
+    const base = { models: 0, T: 4, SV: 7, W: 1, keywords: ['INFANTRY'], attached: [{ name: 'C', models: 1, T: null, SV: 7, W: 100000, keywords: ['CHARACTER'] }] };
+    const up = applyToSim({}, base, plusT).defender;
+    expect(up.attached[0].T).toBe(5);
+    const r = runSimulation(attacker, up, { phase: 'ranged', iterations: 3000, seed: 76 });
+    expect(Math.abs(r.woundsDealt.mean - 166.67)).toBeLessThan(4);
+  });
+});

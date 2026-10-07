@@ -436,7 +436,8 @@ export function applyToSim(baseOptions, baseDefender, resolved) {
   // The first character is picked the way engine/allocation.js reads them (attachedCharsOf: the `attached` list, else an
   // embedded `leader`; review 2026-10-07, ledger item 76: a unit carrying both used to buff a leader the engine ignores).
   if (d.saveSet != null || d.woundBonus || d.toughBonus) {
-    if (attachedCharsOf(defender).length) defender = withChar(defender, 0, (c) => mergeUnitStats(c, d));
+    // A character with no Toughness of its own fights on the body's (allocation.js: `ch.T ?? bodyT`), so its +T adds to that.
+    if (attachedCharsOf(defender).length) defender = withChar(defender, 0, (c) => mergeUnitStats(c, d, false, defender.T));
     else if ((defender.models ?? 1) <= 1) {
       // a standalone single-model character IS the bearer (a Captain with Artificer Armour, defending).
       defender = mergeUnitStats(defender, d);
@@ -476,12 +477,16 @@ function mergeModelOnly(defender, own) {
 // Apply unit-statline buffs (Save set / +Wounds / +Toughness) to ONE profile (the bearer). Keeps the
 // better Save (lower target), sums W/T. The fields match the unit/leader schema (SV/W/T).
 // `explicitOnly`: a stat the group leaves null (it inherits the body's) stays null (the unit-wide path).
-function mergeUnitStats(target, d, explicitOnly = false) {
+// `inheritT` (the bearer path, ledger item 76): the Toughness a character with none of its own fights on (the body's), so
+// a +T adds to it. A +W or +T with no base value to add to is dropped (under-applied), never read as the whole value:
+// `(null || 0) + 1` made an enhanced character Toughness 1, far easier to wound than without the enhancement.
+function mergeUnitStats(target, d, explicitOnly = false, inheritT = null) {
   if (!target || typeof target !== 'object' || !d) return target;
   const out = { ...target };
   if (d.saveSet != null && !(explicitOnly && out.SV == null)) out.SV = out.SV == null ? d.saveSet : Math.min(out.SV, d.saveSet);
-  if (d.woundBonus && !(explicitOnly && out.W == null)) out.W = (out.W || 0) + d.woundBonus;
-  if (d.toughBonus && !(explicitOnly && out.T == null)) out.T = (out.T || 0) + d.toughBonus;
+  if (d.woundBonus && out.W != null) out.W += d.woundBonus;
+  const baseT = out.T ?? (explicitOnly ? null : inheritT);
+  if (d.toughBonus && baseT != null) out.T = baseT + d.toughBonus;
   return out;
 }
 
