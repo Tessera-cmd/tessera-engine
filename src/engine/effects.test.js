@@ -692,3 +692,13 @@ describe('critApBonus through the effects layer (ledger item 84)', () => {
     expect(applyToSim({ critApBonus: 1 }, { models: 1 }, r).options).toMatchObject({ critApBonus: 3, apBonus: 1 });
   });
 });
+
+describe('leaderGateMet startedLeading (ledger item 45, 19.04 footnote)', () => {
+  it('a leaderOnly effect passes for a lone character that started leading; ledOnly and attached cases unchanged', () => {
+    expect(leaderGateMet({ leaderOnly: true }, [], { startedLeading: true })).toBe(true);
+    expect(leaderGateMet({ leaderOnly: true }, [])).toBe(false);
+    expect(leaderGateMet({ ledOnly: true }, [], { startedLeading: true })).toBe(false);
+    expect(leaderGateMet({ ledOnly: 'FOO' }, [], { startedLeading: true })).toBe(false);
+    expect(leaderGateMet({ leaderOnly: true }, [{ keywords: ['CHARACTER'] }], { startedLeading: false })).toBe(true);
+  });
+});

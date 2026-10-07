@@ -207,22 +207,23 @@ export function filterEffectsForUnit(effects, unitKeywords, unitFaction, attache
 // `attachedChars` are the characters attached to that unit for this run; null/undefined = nobody attached,
 // so a tagged effect is dropped (under-applying is the safe direction). An untagged effect always passes, so
 // every untagged run is unchanged. The phrase is matched the same way a scope is (effectAppliesToUnit).
-// Deliberate simplification: 19.04's footnote keeps a leader's own "while leading" abilities after its
-// bodyguard is destroyed, if it started the battle attached; the sim reads a lone character as one that never
-// led (attach the bodyguard to simulate the aura).
-export function leaderGateMet(effect, attachedChars) {
+// `opts.startedLeading` (ledger item 45; 19.04 footnote: "leader / support units continue to benefit from their own
+// 'while this model is leading a unit' abilities even after their bodyguard unit is destroyed, provided they started the
+// battle in an attached unit"): a lone character the player marks as having started attached keeps its OWN leaderOnly
+// effects. A bodyguard's "while a … model is leading this unit" (ledOnly) still needs a character attached.
+export function leaderGateMet(effect, attachedChars, opts = {}) {
   if (!effect) return true;
   const led = effect.ledOnly === true ? '' : typeof effect.ledOnly === 'string' ? effect.ledOnly.trim() : null;
   if (effect.leaderOnly !== true && led == null) return true;
   const chars = (attachedChars || []).filter(Boolean);
-  if (!chars.length) return false;
+  if (!chars.length) return opts.startedLeading === true && effect.leaderOnly === true && led == null;
   if (!led) return true;
   return chars.some((c) => effectAppliesToUnit({ scope: [led] }, c.keywords || [], c.faction || ''));
 }
 
 // The effects whose leader gate the attached characters meet (see leaderGateMet).
-export function filterLeaderGated(effects, attachedChars) {
-  return (effects || []).filter((e) => leaderGateMet(e, attachedChars));
+export function filterLeaderGated(effects, attachedChars, opts = {}) {
+  return (effects || []).filter((e) => leaderGateMet(e, attachedChars, opts));
 }
 
 const REROLL_RANK = { none: 0, ones: 1, failed: 2, all: 3 };

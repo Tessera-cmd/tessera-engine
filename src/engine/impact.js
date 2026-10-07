@@ -29,7 +29,8 @@ export const LEADER_WAITING = 'A character leading the unit';
 // "while … leading" effects need a character attached to the unit (effects.js leaderGateMet,
 // 2026-10-05). `attached` = that unit's attached characters; absent = nobody attached, so a
 // leader-gated rule effect is dropped. Same order as one collectEffects call.
-function sideEffects(abilities, sel, attached) {
+// `startedLeading`: the side's lone character started the battle leading a unit (19.04 footnote, ledger item 45).
+function sideEffects(abilities, sel, attached, startedLeading = false) {
   return [
     ...collectEffects({ abilities }),
     ...filterLeaderGated(
@@ -40,6 +41,7 @@ function sideEffects(abilities, sel, attached) {
         enhancements: new Set(sel.enhancements),
       }),
       attached,
+      { startedLeading },
     ),
   ];
 }
@@ -54,13 +56,13 @@ function resolveSelection(ctx, atkSel, defSel, conditions, baseOptions = ctx.bas
   // Scope-gate: a model-type-scoped army/detachment effect is dropped for a side whose unit lacks
   // that keyword. ctx.attackerKeywords/defenderKeywords are optional; omitted == no gating.
   const atkEffects = filterEffectsForUnit(
-    sideEffects(ctx.attackerAbilities, atkSel, ctx.attackerAttached).filter(offensive),
+    sideEffects(ctx.attackerAbilities, atkSel, ctx.attackerAttached, ctx.attackerStartedLeading).filter(offensive),
     ctx.attackerKeywords,
     ctx.attackerFaction,
     ctx.attackerAttached,
   );
   const defEffects = filterEffectsForUnit(
-    sideEffects(ctx.defenderAbilities, defSel, ctx.defenderAttached).filter(defensive),
+    sideEffects(ctx.defenderAbilities, defSel, ctx.defenderAttached, ctx.defenderStartedLeading).filter(defensive),
     ctx.defenderKeywords,
     ctx.defenderFaction,
     ctx.defenderAttached,
