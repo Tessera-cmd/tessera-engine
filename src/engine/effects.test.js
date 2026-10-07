@@ -718,3 +718,27 @@ describe('leaderOf: "while this model is leading a FOO unit" checks the led unit
     expect(effectAppliesToUnit(plain, ['INFANTRY', 'GREY HUNTERS'], 'Space Wolves', [ragnar])).toBe(true);
   });
 });
+
+describe('modelOnly attacker effects become weaponMods (ledger item 86)', () => {
+  it('resolveEffects keeps them apart from the unit-wide bonuses; applyToSim passes them as options.weaponMods', () => {
+    const r = resolveEffects(
+      [
+        { side: 'attacker', mods: { attackBonus: 3, damageBonus: 1 }, modelOnly: true, holder: 0 },
+        { side: 'attacker', mods: { reroll: { hit: 'ones' }, grantKeywords: ['lethal hits'] }, modelOnly: true, holder: 'unit' },
+        { side: 'attacker', mods: { attackBonus: 1 } },
+      ],
+      { phase: 'fight' },
+    );
+    expect(r.attacker.attackBonus).toBe(1);
+    expect(r.attacker.weaponMods).toEqual([
+      { holder: 0, attackBonus: 3, damageBonus: 1 },
+      { holder: 'unit', hitReroll: 'ones', grantKeywords: ['LETHAL HITS'] },
+    ]);
+    const { options } = applyToSim({}, { models: 5 }, r);
+    expect(options.attackBonus).toBe(1);
+    expect(options.weaponMods).toHaveLength(2);
+  });
+  it('BREAKING VARIANT: with no one-model effect options carry no weaponMods', () => {
+    expect(applyToSim({}, { models: 5 }, resolveEffects([{ side: 'attacker', mods: { attackBonus: 1 } }], { phase: 'fight' })).options.weaponMods).toBeUndefined();
+  });
+});

@@ -517,6 +517,45 @@ export function resolveConditionalKeywords(keywords, defenderKeywords) {
 // `defender` (optional, additive) enables conditional-keyword resolution against the target —
 // simulateUnitAttack and the Monte Carlo metadata pass it; a defender-less call (tests, display
 // paths that have no target) behaves exactly as before.
+// ---- weapon bonuses for ONE model (ledger item 86) ------------------------------------------------------------
+// 11e Core Rules 19.04: a rule that affects a single specified model (an enhancement, a datasheet ability worded "this
+// model") only applies to that model, even in an attached unit. `options.weaponMods` carries such weapon bonuses, each
+// { holder, attackBonus?, strengthBonus?, apBonus?, damageBonus?, critApBonus?, hitModifier?, woundModifier?,
+// hitReroll?, woundReroll?, grantKeywords? }, applied only to the holder's weapons:
+//   'unit'  the unit's own weapons (its body and champions), never an attached character's;
+//   <n>     the n-th attached character (attachedChars order);
+//   null    an enhancement's bearer: the first attached character, else a single-model unit; a multi-model unit with no
+//           character has no bearer, so it is dropped (under-applied).
+// Pure; no weaponMods leaves every weapon on the shared options object (the original path, bit-identical).
+const RR_RANK = { none: 0, ones: 1, failed: 2, all: 3 };
+const stronger = (a, b) => ((RR_RANK[b] ?? 0) > (RR_RANK[a] ?? 0) ? b : a || 'none');
+const SUM_KEYS = ['attackBonus', 'strengthBonus', 'apBonus', 'damageBonus', 'critApBonus', 'hitModifier', 'woundModifier'];
+function modsForHolder(attacker, options, holder) {
+  const list = Array.isArray(options?.weaponMods) ? options.weaponMods : [];
+  if (!list.length) return null;
+  const chars = attachedChars(attacker).filter(Boolean);
+  const bearer = chars.length ? 0 : (attacker?.models ?? 1) <= 1 ? 'unit' : undefined;
+  const mine = list.filter((m) => m && (m.holder == null ? bearer : m.holder) === holder);
+  if (!mine.length) return null;
+  const out = {};
+  for (const m of mine) {
+    for (const k of SUM_KEYS) if (m[k]) out[k] = (out[k] || 0) + m[k];
+    if (m.hitReroll) out.hitReroll = stronger(out.hitReroll, m.hitReroll);
+    if (m.woundReroll) out.woundReroll = stronger(out.woundReroll, m.woundReroll);
+    if (Array.isArray(m.grantKeywords) && m.grantKeywords.length) out.grantKeywords = [...(out.grantKeywords || []), ...m.grantKeywords.map((x) => String(x).toUpperCase())];
+  }
+  return out;
+}
+// The options one holder's weapons fire with: the shared options plus its own bonuses.
+function optionsWith(options, mods) {
+  if (!mods) return options;
+  const o = { ...options };
+  for (const k of SUM_KEYS) if (mods[k]) o[k] = (options[k] || 0) + mods[k];
+  if (mods.hitReroll) o.hitReroll = stronger(options.hitReroll || 'none', mods.hitReroll);
+  if (mods.woundReroll) o.woundReroll = stronger(options.woundReroll || 'none', mods.woundReroll);
+  return o;
+}
+
 export function groupWeapons(attacker, options, defender = null) {
   const phase = options.phase || 'ranged'; // 'ranged' | 'melee' | 'all'
   const groups = new Map();
@@ -527,14 +566,15 @@ export function groupWeapons(attacker, options, defender = null) {
   const defKw = defender
     ? [...(defender.keywords || []), ...attachedChars(defender).flatMap((ch) => ch.keywords || [])]
     : null;
-  const add = (weapon, defaultCount) => {
+  const add = (weapon, defaultCount, mods = null) => {
     if (phase !== 'all' && weapon.type !== phase) return;
     const count = weapon.count != null ? weapon.count : defaultCount;
     if (!count) return;
-    // Merge granted keywords (deduped) so they resolve and grouping stays consistent.
-    const mergedKw = granted.length ? [...new Set([...kwList(weapon), ...granted])] : kwList(weapon);
+    // Merge granted keywords (deduped) so they resolve and grouping stays consistent; a holder's own grants too.
+    const grants = mods?.grantKeywords?.length ? [...granted, ...mods.grantKeywords] : granted;
+    const mergedKw = grants.length ? [...new Set([...kwList(weapon), ...grants])] : kwList(weapon);
     const resolvedKw = defKw ? resolveConditionalKeywords(mergedKw, defKw) : mergedKw;
-    const w = granted.length || resolvedKw !== mergedKw ? { ...weapon, keywords: resolvedKw } : weapon;
+    const w = grants.length || resolvedKw !== mergedKw ? { ...weapon, keywords: resolvedKw } : weapon;
     // Canonicalise the dice-able fields so a numeric 2 and a string '2' (or 'd6'/'D6')
     // merge into one group — they fire identically, and a type-split only fragments the
     // per-weapon breakdown display.
@@ -549,15 +589,19 @@ export function groupWeapons(attacker, options, defender = null) {
       canon(w.D),
       w.meltaBonus ?? null,
       resolvedKw.slice().sort(),
+      // A holder's own bonuses split its weapons from an identical profile without them (ledger item 86).
+      ...(mods ? [JSON.stringify(SUM_KEYS.map((k) => mods[k] || 0).concat([mods.hitReroll || '', mods.woundReroll || '']))] : []),
     ]);
     if (groups.has(key)) groups.get(key).count += count;
-    else groups.set(key, { weapon: w, count });
+    else groups.set(key, mods ? { weapon: w, count, options: optionsWith(options, mods) } : { weapon: w, count });
   };
-  for (const w of attacker.weapons || []) add(w, attacker.models);
+  const unitMods = modsForHolder(attacker, options, 'unit');
+  for (const w of attacker.weapons || []) add(w, attacker.models, unitMods);
   // Each attached character (Leader and/or Support) fires alongside the unit.
-  for (const ch of attachedChars(attacker)) {
-    for (const w of ch.weapons || []) add(w, ch.models ?? 1);
-  }
+  attachedChars(attacker).forEach((ch, i) => {
+    const chMods = modsForHolder(attacker, options, i);
+    for (const w of ch?.weapons || []) add(w, ch.models ?? 1, chMods);
+  });
   return [...groups.values()];
 }
 
@@ -574,7 +618,7 @@ export function simulateUnitAttack(attacker, defender, options = {}, rng) {
   const perProfile = [];
   for (const g of groupWeapons(attacker, options, defender)) {
     const before = state.woundsDealt;
-    simulateAttackSequence(g.weapon, g.count, defender, state, options, rng);
+    simulateAttackSequence(g.weapon, g.count, defender, state, g.options || options, rng);
     perProfile.push(state.woundsDealt - before);
   }
   return {

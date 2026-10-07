@@ -19,6 +19,7 @@ import {
   modsToEffects,
   statBuffScope,
   defenceReach,
+  attackReach,
   degradeInfo,
   mergedDetachmentText,
   MERGED_DETACHMENT_NOTE,
@@ -26,6 +27,9 @@ import {
 import { effectAppliesToUnit, resolveEffects, CONDITIONS } from '../engine/effects.js';
 
 const modsOf = (r, pred) => r.effects.filter(pred).map((e) => e.mods);
+// One model's weapon bonuses (mapper 19, ledger item 86) resolve into attacker.weaponMods; fold them back for a total.
+const FOLD_KEYS = ['hitModifier', 'woundModifier', 'apBonus', 'critApBonus', 'damageBonus', 'strengthBonus', 'attackBonus'];
+const folded = (atk) => { const o = { ...atk }; for (const m of atk.weaponMods || []) for (const k of FOLD_KEYS) if (m[k]) o[k] = (o[k] || 0) + m[k]; return o; };
 
 describe('degradeInfo (F2.1 — 10e degrade ability, not a statline bracket)', () => {
   // Real BSData ability text (SM Redemptor-style): name carries the "1-M" range, text repeats it.
@@ -603,10 +607,10 @@ describe('structured wargear modifiers — modsToEffects (Session 45)', () => {
       { target: 'ranged', op: 'addKw', keywords: ['IGNORES COVER'] },
     ]);
     expect(out).toEqual([
-      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { strengthBonus: 1 }, source: 'enhancement' },
-      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { attackBonus: 1 }, source: 'enhancement' },
-      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { apBonus: 1 }, source: 'enhancement' }, // improve AP by 1
-      { name: 'Enhancement', side: 'attacker', phase: 'shooting', condition: null, mods: { grantKeywords: ['IGNORES COVER'] }, source: 'enhancement' },
+      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { strengthBonus: 1 }, source: 'enhancement', modelOnly: true },
+      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { attackBonus: 1 }, source: 'enhancement', modelOnly: true },
+      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { apBonus: 1 }, source: 'enhancement', modelOnly: true }, // improve AP by 1
+      { name: 'Enhancement', side: 'attacker', phase: 'shooting', condition: null, mods: { grantKeywords: ['IGNORES COVER'] }, source: 'enhancement', modelOnly: true },
     ]);
   });
   it('unit buffs → defender saveSet / woundBonus / toughBonus', () => {
@@ -628,11 +632,11 @@ describe('structured wargear modifiers — modsToEffects (Session 45)', () => {
     // Orks "Master Meknologist" (the one real 10e case): ranged BS -1 → +1 to hit in the shooting phase.
     // The structured delta is signed for the characteristic (decrement = improvement), so hit = -delta.
     expect(modsToEffects([{ target: 'ranged', op: 'add', stat: 'BS', delta: -1 }], 'Master Meknologist')).toEqual([
-      { name: 'Master Meknologist', side: 'attacker', phase: 'shooting', condition: null, mods: { hitModifier: 1 }, source: 'enhancement' },
+      { name: 'Master Meknologist', side: 'attacker', phase: 'shooting', condition: null, mods: { hitModifier: 1 }, source: 'enhancement', modelOnly: true },
     ]);
     // a melee WS improvement → fight-phase +1 to hit
     expect(modsToEffects([{ target: 'melee', op: 'add', stat: 'WS', delta: -1 }])).toEqual([
-      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { hitModifier: 1 }, source: 'enhancement' },
+      { name: 'Enhancement', side: 'attacker', phase: 'fight', condition: null, mods: { hitModifier: 1 }, source: 'enhancement', modelOnly: true },
     ]);
   });
 });
@@ -1215,8 +1219,8 @@ describe('F2.1 — degrading "Damaged: 1-N wounds remaining" brackets', () => {
     const effects = cap('While this model has 1-6 wounds remaining, each time this model makes an attack, subtract 1 from the Hit roll.');
     // Default: no conditions active -> the penalty does not apply. This is the Session-37 safety
     // property that the old blanket DROP protected; gating preserves it exactly.
-    expect(resolveEffects(effects, { activeConditions: [] }).attacker.hitModifier).toBe(0);
-    expect(resolveEffects(effects, { activeConditions: ['damaged'] }).attacker.hitModifier).toBe(-1);
+    expect(folded(resolveEffects(effects, { activeConditions: [] }).attacker).hitModifier).toBe(0);
+    expect(folded(resolveEffects(effects, { activeConditions: ['damaged'] }).attacker).hitModifier).toBe(-1);
   });
 
   it('`damaged` is a registered situational condition, so the sim renders a toggle for it', () => {
@@ -1284,8 +1288,8 @@ describe('F2.1 — degrade brackets that the real catalogue writes awkwardly', (
     expect(cond(text)).toEqual(['damaged']);
     // and it is inert until toggled
     const effects = captureUnitAbilities([{ name: 'Damaged: 1-7 Wounds Remaining', text }]);
-    expect(resolveEffects(effects, { activeConditions: [] }).attacker.hitModifier).toBe(0);
-    expect(resolveEffects(effects, { activeConditions: ['damaged'] }).attacker.hitModifier).toBe(-1);
+    expect(folded(resolveEffects(effects, { activeConditions: [] }).attacker).hitModifier).toBe(0);
+    expect(folded(resolveEffects(effects, { activeConditions: ['damaged'] }).attacker).hitModifier).toBe(-1);
   });
 
   it('BREAKING VARIANT: a band scoped to a NAMED model still gates (The Silent King)', () => {
@@ -2043,7 +2047,7 @@ describe('unread-trigger precision (mapper version 3, 2026-10-03)', () => {
   const all = (text) => mapRuleText(text, { name: 'X' }).effects;
   const G = ' � '; // a faction pack's full stop, as the PDF text layer delivers it
   const strat = (when, effect) => `WHEN: ${when}${G}TARGET: One unit from your army${G}EFFECT: ${effect}${G}`;
-  const at = (effs, phase, activeConditions = []) => resolveEffects(effs, { phase, activeConditions }).attacker;
+  const at = (effs, phase, activeConditions = []) => folded(resolveEffects(effs, { phase, activeConditions }).attacker);
 
   // 1. Trigger vocabulary.
   it('BREAKING VARIANT: a move, turn, ability-use or disembark trigger gates its clause (it applied on every attack)', () => {
@@ -2837,9 +2841,9 @@ describe('defenceReach / modelOnly (ledger item 75)', () => {
     const [u] = captureUnitAbilities([{ name: 'Wall', text: 'Each time an attack is allocated to a model in this unit, subtract 1 from the Damage characteristic of that attack.' }]);
     expect(u.modelOnly).toBeUndefined();
   });
-  it('an attacker buff is never tagged', () => {
+  it('an attacker buff on the bearer weapons is the bearer\'s (mapper 19, ledger item 86)', () => {
     const r = mapRuleText('The bearer\'s melee weapons have [LETHAL HITS].', { name: 'E' });
-    expect(r.effects.every((e) => e.modelOnly === undefined)).toBe(true);
+    expect(r.effects.every((e) => e.modelOnly === true)).toBe(true);
   });
 });
 
@@ -3011,5 +3015,40 @@ describe('mapper 18: a bracket that qualifies is not a grant (ledger item 27)', 
   it('BREAKING VARIANT: a real grant still reads', () => {
     expect(grants('Ranged weapons equipped by models in this unit have the [LETHAL HITS] ability.')).toEqual(['LETHAL HITS']);
     expect(grants('Until the end of the phase, weapons equipped by models in your unit have the [SUSTAINED HITS 1] and [IGNORES COVER] abilities.')).toEqual(['SUSTAINED HITS 1', 'IGNORES COVER']);
+  });
+});
+
+// ---- whose weapons a bonus reaches (mapper 19, ledger item 86) ----------------
+describe('attackReach / attacker modelOnly (ledger item 86)', () => {
+  const tags = (t) => mapRuleText(t, { name: 'X' }).effects.filter((e) => e.side === 'attacker').map((e) => e.modelOnly === true);
+  it('the bearer\'s weapons and "each time this model" are one model\'s', () => {
+    expect(tags("Add 3 to the Attacks characteristic of the bearer's melee weapons.")).toEqual([true]);
+    expect(tags('Each time this model makes a melee attack, add 1 to the Hit roll.')).toEqual([true]);
+    expect(tags("The bearer's melee weapons have the [LETHAL HITS] ability.")).toEqual([true]);
+  });
+  it('BREAKING VARIANT: a unit subject always reads as the unit', () => {
+    expect(tags('While this model is leading a unit, each time a model in that unit makes a melee attack, add 1 to the Wound roll.')).toEqual([false]);
+    expect(tags("Each time a model in the bearer's unit makes an attack, re-roll a Hit roll of 1.")).toEqual([false]);
+    expect(tags('Ranged weapons equipped by models in this unit have the [LETHAL HITS] ability.')).toEqual([false]);
+  });
+  it('attackReach: unit wins over model; neither is null', () => {
+    expect(attackReach("Add 1 to the Strength characteristic of the bearer's weapons and of weapons equipped by models in the bearer's unit.")).toBe('unit');
+    expect(attackReach('Add 1 to the Hit roll.')).toBe(null);
+    expect(attackReach('add 1 to the Hit roll', "Each time this model makes an attack:")).toBe('model');
+  });
+  it('BREAKING VARIANT: an army rule, detachment rule or stratagem worded "this model" stays unit-wide', () => {
+    const text = 'Each time this model makes a melee attack, add 1 to the Hit roll.';
+    for (const kind of ['army', 'detachment', 'stratagem']) {
+      expect(mapRuleText(text, { name: 'X', source: kind }).effects.map((e) => e.modelOnly)).toEqual([undefined]);
+    }
+    expect(mapRuleText(text, { name: 'X', source: 'enhancement' }).effects.map((e) => e.modelOnly)).toEqual([true]);
+  });
+  it('a structured enhancement modifier is the bearer\'s unless scoped to the unit', () => {
+    const one = modsToEffects([{ scope: 'model', target: 'melee', op: 'add', stat: 'A', delta: 1 }], 'E', '');
+    const unit = modsToEffects([{ scope: 'unit', target: 'melee', op: 'add', stat: 'A', delta: 1 }], 'E', '');
+    const text = modsToEffects([{ scope: 'model', target: 'melee', op: 'add', stat: 'A', delta: 1 }], 'E', 'Add 1 to the Attacks characteristic of melee weapons equipped by models in the bearer\'s unit.');
+    expect(one[0].modelOnly).toBe(true);
+    expect(unit[0].modelOnly).toBeUndefined();
+    expect(text[0].modelOnly).toBeUndefined();
   });
 });

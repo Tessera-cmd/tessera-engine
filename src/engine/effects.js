@@ -253,6 +253,9 @@ function emptyAttacker() {
     hitReroll: 'none',
     woundReroll: 'none',
     grantKeywords: [],
+    // Weapon bonuses for ONE model (ledger item 86, `modelOnly` attacker effects): one entry per effect, applied by
+    // combat.js groupWeapons to its holder's weapons only (options.weaponMods).
+    weaponMods: [],
     // UNIT keywords a detachment adds/removes on this side (distinct from grantKeywords,
     // which are WEAPON keywords). They change the effective keyword set used for Anti-
     // targeting and leader compatibility. Most keywords are permanent datasheet ones; a
@@ -351,6 +354,15 @@ export function resolveEffects(effects, ctx = {}) {
         if (m.woundBonus) def.woundBonus += m.woundBonus;
         if (m.toughBonus) def.toughBonus += m.toughBonus;
       }
+    } else if (e.modelOnly === true) {
+      // 11e Core Rules 19.04 (ledger item 86): a weapon bonus for one model ("the bearer's melee weapons", "each time this
+      // model makes an attack") reaches that model's weapons only, never the squad it leads.
+      const wm = { holder: e.holder ?? null };
+      for (const k of ['hitModifier', 'woundModifier', 'apBonus', 'critApBonus', 'damageBonus', 'strengthBonus', 'attackBonus']) if (m[k]) wm[k] = m[k];
+      if (m.reroll?.hit) wm.hitReroll = m.reroll.hit;
+      if (m.reroll?.wound) wm.woundReroll = m.reroll.wound;
+      if (m.grantKeywords?.length) wm.grantKeywords = m.grantKeywords.map((k) => String(k).toUpperCase());
+      if (Object.keys(wm).length > 1) atk.weaponMods.push(wm);
     } else {
       if (m.hitModifier) atk.hitModifier += m.hitModifier;
       if (m.woundModifier) atk.woundModifier += m.woundModifier;
@@ -443,6 +455,8 @@ export function applyToSim(baseOptions, baseDefender, resolved) {
   // The engine's saveReroll applies to the DEFENDER's saves, so a defender re-roll lands here.
   options.saveReroll = strongerReroll(baseOptions.saveReroll || 'none', d.saveReroll);
   options.grantKeywords = [...(baseOptions.grantKeywords || []), ...a.grantKeywords];
+  // One model's weapon bonuses (ledger item 86): applied per holder by combat.js groupWeapons.
+  if ((a.weaponMods || []).length || (baseOptions.weaponMods || []).length) options.weaponMods = [...(baseOptions.weaponMods || []), ...(a.weaponMods || [])];
 
   // Defensive auras apply unit-wide — to the body AND the attached leader/champions.
   let defender = distributeDefensive(baseDefender, d);
@@ -553,7 +567,7 @@ export function collectEffects({ abilities = [], armyRule = null, detachment = n
 // Convenience: does this resolved patch actually change anything? (for UI summaries)
 export function isAttackerActive(a) {
   return (
-    a.hitModifier || a.woundModifier || a.apBonus || a.critApBonus || a.damageBonus ||
+    (a.weaponMods || []).length || a.hitModifier || a.woundModifier || a.apBonus || a.critApBonus || a.damageBonus ||
     a.strengthBonus || a.attackBonus ||
     a.hitReroll !== 'none' || a.woundReroll !== 'none' || a.grantKeywords.length
   );

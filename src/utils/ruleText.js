@@ -84,7 +84,10 @@
 //     "targets a (visible) unit / target, <modifier>" is every attack, not an unread trigger (Hallowed Ground).
 // 18 = ledger item 27 (part): a bracketed keyword that qualifies ("[TORRENT] ranged attacks", "do not have [BLAST]", "attacks with the
 //     [DEVASTATING WOUNDS] ability") is never read as a grant.
-export const MAPPER_VERSION = 18;
+// 19 = ledger item 86: a weapon bonus worded for one model ("the bearer's melee weapons", "each time this model makes an
+//     attack", a catalogue enhancement's structured weapon modifier) is tagged `modelOnly` and reaches that model's
+//     weapons only (combat.js options.weaponMods), never the squad it leads.
+export const MAPPER_VERSION = 19;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -1633,7 +1636,7 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
     }
     for (const e of r.effects) clauseOf.set(e, ci);
     if (leadTag) for (const e of r.effects) Object.assign(e, leadTag);
-    tagModelOnly(r.effects, body, bullet ? leadBody : null);
+    tagModelOnly(r.effects, body, bullet ? leadBody : null, source);
     effects.push(...r.effects);
     matched.push(...r.matched);
     if (activationAt === Infinity && ACTIVATION_RE.test(body.replace(TARGET_RANGE_RE, 'targets a unit'))) activationAt = ci;
@@ -2316,8 +2319,33 @@ export function defenceReach(clause, lead = null, kind = null) {
   return reach;
 }
 // An effect is one model's when every save it carries is (an effect carries one kind on every real rule).
-function tagModelOnly(effects, clause, lead) {
+// ---- whose weapons a bonus reaches (mapper 19, ledger item 86) -------------------------------------------------
+// The attacker-side twin of defenceReach (19.04): "add 3 to the Attacks characteristic of the bearer's melee weapons",
+// "each time this model makes an attack, add 1 to the Hit roll" are ONE model's weapons; the engine (combat.js
+// options.weaponMods) gives them to that model alone. A unit subject in the same clause ("models in the bearer's unit",
+// "this unit's", "a model in this unit", "units from your army") always reads as the unit (the old behaviour), so a
+// leader aura is never narrowed. Neither: no tag.
+const ATK_UNIT_RE = /\bmodels?\s+in\s+(?:the\s+bearer['’]s|this|that|its|your|the)\s+unit\b|\b(?:this|that|the\s+bearer['’]s|your|its)\s+unit['’]s\b|\bequipped\s+by\s+models\b|\beach\s+time\s+a\s+model\s+in\b|\b(?:models?|units?)\s+from\s+your\s+army\b/i;
+const ATK_MODEL_RE = /\b(?:the\s+bearer|this\s+model)['’]s\s+(?:melee\s+|ranged\s+)?(?:weapons?|attacks?)\b|\b(?:weapons?|attacks?)\s+(?:equipped\s+by|made\s+by)\s+(?:the\s+bearer|this\s+model)\b|\beach\s+time\s+(?:the\s+bearer|this\s+model)\s+(?:makes|is\s+selected|shoots|fights)\b/i;
+// 'model' | 'unit' | null for an attacker clause (or a bulleted item's lead-in). Pure; exported for tests.
+export function attackReach(clause, lead = null) {
+  for (const t of [String(clause || ''), String(lead || '')]) {
+    if (!t) continue;
+    if (ATK_UNIT_RE.test(t)) return 'unit';
+    if (ATK_MODEL_RE.test(t)) return 'model';
+  }
+  return null;
+}
+
+function tagModelOnly(effects, clause, lead, source) {
   for (const e of effects) {
+    if (e.side === 'attacker') {
+      // Only an enhancement or a datasheet ability names one model. In an army rule, a detachment rule or a stratagem
+      // "this model" is each model the rule reaches, so those stay unit-wide (tagging them dropped the rule for a squad).
+      const oneModelSource = source == null || source === 'enhancement' || source === 'ability';
+      if (oneModelSource && Object.keys(e.mods || {}).length && attackReach(clause, lead) === 'model') e.modelOnly = true;
+      continue;
+    }
     if (e.side !== 'defender') continue;
     if (OTHER_CHARS_RE.test(String(clause || ''))) {
       if (DEFENCE_KEYS.some((k) => e.mods?.[k] != null && e.mods[k] !== false && e.mods[k] !== 0)) e.otherChars = true;
@@ -2346,7 +2374,11 @@ export function modsToEffects(mods, name = 'Enhancement', text = '') {
         else if (m.stat === 'BS' || m.stat === 'WS') mod.hitModifier = -m.delta;
       }
       if (Object.keys(mod).length) {
-        out.push({ name, side: 'attacker', phase: m.target === 'melee' ? 'fight' : 'shooting', condition: null, mods: mod, source: 'enhancement' });
+        // A structured weapon modifier changes the BEARER's own weapon profiles (mapper 19, ledger item 86), so it is
+        // one model's unless the catalogue scopes it to the unit or the enhancement's text gives it to the unit.
+        const eff = { name, side: 'attacker', phase: m.target === 'melee' ? 'fight' : 'shooting', condition: null, mods: mod, source: 'enhancement' };
+        if (m.scope !== 'unit' && attackReach(text) !== 'unit') eff.modelOnly = true;
+        out.push(eff);
       }
     } else if (m.target === 'unit') {
       const mod = {};

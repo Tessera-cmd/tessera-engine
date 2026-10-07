@@ -6,7 +6,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { runSimulation } from './monteCarlo.js';
-import { evalValue } from './dice.js';
+import { evalValue, makeRng } from './dice.js';
+import { simulateUnitAttack } from './combat.js';
 
 const N = 30000;
 const SEED = 0x1234abcd;
@@ -571,5 +572,36 @@ describe('critApBonus: AP improved on critical wounds only (ledger item 84)', ()
     const d1 = runSimulation(dev, horde, { phase: 'ranged', iterations: 100, seed: 3, critApBonus: 1 });
     const d0 = runSimulation(dev, horde, { phase: 'ranged', iterations: 100, seed: 3 });
     expect(d1.woundsDealt).toEqual(d0.woundsDealt); // Dev crits never reach a save: the bonus changes nothing
+  });
+});
+
+// ---- weapon bonuses for ONE model (ledger item 86) ----------------------------------------------------------------
+// 11e Core Rules 19.04: "add 3 to the Attacks characteristic of the bearer's melee weapons" is the bearer's weapons only,
+// never the squad it leads. options.weaponMods routes each bonus to its holder's weapons.
+describe('weaponMods: a weapon bonus reaches its holder\'s weapons only (ledger item 86)', () => {
+  const blade = (name) => ({ name, type: 'melee', A: 1, WS: 3, S: 4, AP: 0, D: 1, keywords: [] });
+  const squad = () => ({ models: 10, weapons: [blade('Sword')], attached: [{ name: 'Captain', models: 1, weapons: [blade('Relic')] }] });
+  const target = { models: 1000, T: 4, SV: 7, W: 1, keywords: ['INFANTRY'] };
+  const attacks = (atk, o) => simulateUnitAttack(atk, target, { phase: 'melee', ...o }, makeRng(1)).attacks;
+  it('holder 0 (the attached character), holder unit (the squad), no holder (the bearer: first character)', () => {
+    expect(attacks(squad(), {})).toBe(11);
+    expect(attacks(squad(), { weaponMods: [{ holder: 0, attackBonus: 3 }] })).toBe(14); // 10 x 1 + 1 x 4
+    expect(attacks(squad(), { weaponMods: [{ holder: 'unit', attackBonus: 3 }] })).toBe(41); // 10 x 4 + 1 x 1
+    expect(attacks(squad(), { weaponMods: [{ holder: null, attackBonus: 3 }] })).toBe(14);
+  });
+  it('no bearer: a lone character takes it, a multi-model unit with no character drops it', () => {
+    expect(attacks({ models: 1, weapons: [blade('Relic')] }, { weaponMods: [{ holder: null, attackBonus: 3 }] })).toBe(4);
+    expect(attacks({ models: 10, weapons: [blade('Sword')] }, { weaponMods: [{ holder: null, attackBonus: 3 }] })).toBe(10);
+  });
+  it('a keyword granted to one holder is that holder\'s; same-profile weapons split into separate groups', () => {
+    const atk = { models: 10, weapons: [blade('Blade')], attached: [{ name: 'C', models: 1, weapons: [blade('Blade')] }] };
+    const groups = groupWeapons(atk, { phase: 'melee', weaponMods: [{ holder: 0, grantKeywords: ['LETHAL HITS'] }] });
+    expect(groups.map((g) => [g.count, g.weapon.keywords])).toEqual([[10, []], [1, ['LETHAL HITS']]]);
+    expect(groupWeapons(atk, { phase: 'melee' }).map((g) => g.count)).toEqual([11]); // no mods: one group, as before
+  });
+  it('BREAKING VARIANT: an empty weaponMods list is bit-identical to none', () => {
+    const a = runSimulation(squad(), target, { phase: 'melee', iterations: 50, seed: 9 });
+    const b = runSimulation(squad(), target, { phase: 'melee', iterations: 50, seed: 9, weaponMods: [] });
+    expect(b.woundsDealt).toEqual(a.woundsDealt);
   });
 });
