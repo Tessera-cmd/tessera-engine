@@ -702,3 +702,19 @@ describe('leaderGateMet startedLeading (ledger item 45, 19.04 footnote)', () => 
     expect(leaderGateMet({ leaderOnly: true }, [{ keywords: ['CHARACTER'] }], { startedLeading: false })).toBe(true);
   });
 });
+
+describe('leaderOf: "while this model is leading a FOO unit" checks the led unit (ledger item 46)', () => {
+  const eff = { side: 'attacker', mods: { hitModifier: 1 }, leaderOnly: true, leaderOf: 'BLOOD CLAWS' };
+  const ragnar = { keywords: ['CHARACTER', 'EPIC HERO'] };
+  it('applies only when the attached unit it leads carries the phrase (plural tolerance)', () => {
+    expect(effectAppliesToUnit(eff, ['INFANTRY', 'BLOOD CLAW'], 'Space Wolves', [ragnar])).toBe(true);
+    expect(effectAppliesToUnit(eff, ['INFANTRY', 'GREY HUNTERS'], 'Space Wolves', [ragnar])).toBe(false);
+  });
+  it('a lone character cannot show what it led: dropped', () => {
+    expect(effectAppliesToUnit(eff, ['CHARACTER', 'EPIC HERO'], 'Space Wolves', [])).toBe(false);
+  });
+  it('BREAKING VARIANT: an untagged leaderOnly effect is unaffected', () => {
+    const plain = { side: 'attacker', mods: { hitModifier: 1 }, leaderOnly: true };
+    expect(effectAppliesToUnit(plain, ['INFANTRY', 'GREY HUNTERS'], 'Space Wolves', [ragnar])).toBe(true);
+  });
+});

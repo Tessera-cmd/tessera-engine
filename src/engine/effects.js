@@ -153,8 +153,15 @@ function keywordSet(keywords, faction, into = new Set()) {
 //   - a `scopeUnit` effect (its scope named with "unit(s)") matches its scope AND its scopeExcl against the
 //     attached unit's keyword union: 19.03, "An attached unit has all of the keywords of all of its component
 //     units". A model-phrased scope keeps the bodyguard's own keywords (19.03: models do not gain each other's).
+// `leaderOf` (ledger item 46; mapper tag from "while this model is leading a BLOOD CLAWS unit"): the effect needs a
+// character attached AND the unit it leads (this unit, the bodyguard) to carry that phrase in its OWN keywords. A lone
+// character cannot show what it led, so it drops the effect (even with started-leading ticked: the safe direction).
 export function effectAppliesToUnit(effect, unitKeywords, unitFaction, attachedChars) {
   const chars = (attachedChars || []).filter(Boolean);
+  if (typeof effect?.leaderOf === 'string' && effect.leaderOf.trim()) {
+    if (!chars.length) return false;
+    if (!phraseMatchesKeywords(effect.leaderOf.toUpperCase().trim(), keywordSet(unitKeywords, unitFaction))) return false;
+  }
   if (effect?.bearer?.length) {
     const holders = [keywordSet(unitKeywords, unitFaction), ...chars.map((c) => keywordSet(c.keywords, c.faction))];
     const ok = effect.bearer.some((b) => {
