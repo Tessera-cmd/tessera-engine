@@ -2923,9 +2923,8 @@ describe('captureUnitAbilities: save auras that are not the datasheet\'s statlin
   it('"models in the bearer\'s unit" (one model\'s wargear) is kept but held for review', () => {
     expect(cap('Models in the bearer\'s unit have a 5+ invulnerable save.')).toEqual([{ mods: { invuln: 5 }, captured: true, leaderOnly: false }]);
   });
-  it('BREAKING VARIANT: the shapes it cannot route stay dropped', () => {
+  it('BREAKING VARIANT: a plain statline save stays dropped (the character-routed shapes are kept since mapper 13)', () => {
     expect(cap('This model has a 4+ invulnerable save.')).toEqual([]);
-    expect(cap('While this model is leading a unit, other Character models attached to that unit have the Feel No Pain 4+ ability.')).toEqual([]);
-    expect(cap('While a Character model is leading this unit, that Character model has the Feel No Pain 4+ ability.')).toEqual([]);
+    expect(cap('While a Character model is leading a unit that contains a FOO model, that Character model has the Feel No Pain 4+ ability.')).toEqual([]);
   });
 });

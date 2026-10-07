@@ -72,7 +72,9 @@
 // 12 = ledger items 80 + 82: an effect for a unit "embarked within" a transport is behind the rule-trigger gate; a
 //     sentence opening "(In addition,) once per battle" gates only itself and what follows, not the always-on sentences
 //     before it (The Lion Helm's 4+ invulnerable save, Iron Resolve's bearer Feel No Pain).
-export const MAPPER_VERSION = 12;
+// 13 = ledger item 83: a save a bodyguard gives the character leading it ("that Character model has …") and a leader's
+//     "other Character models attached …" (`otherChars`) are kept and routed to that character (gatherRunAbilities).
+export const MAPPER_VERSION = 13;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -1860,9 +1862,13 @@ export function captureUnitAbilities(items = []) {
     //     unit aura from one model's wargear, which may not be taken; kept but HELD for review, never auto-applied.
     // A bodyguard's "that Character model has …" stays dropped: it is the leader's save, which this unit cannot route.
     const leaderAura = r.effects.every((e) => e.leaderOnly === true) && /\bmodels\s+in\s+that\s+unit\b/i.test(text) && !/\bother\s+character/i.test(text);
+    // Mapper 13 (ledger item 83): a save routed to a character, never this datasheet's statline: a bodyguard's "that
+    // Character model has …" (`modelOnly` + `ledOnly`: the character leading it) and a leader's "other Character models
+    // attached …" (`otherChars`). utils/leaderAuras.js gatherRunAbilities stamps the character that holds it.
+    const charSave = r.effects.every((e) => (e.modelOnly === true && e.ledOnly != null) || (e.otherChars === true && e.leaderOnly === true));
     const bearerUnitAura = /\bmodel(?:s|['’]s)?\s+in\s+the\s+bearer['’]s\s+unit\b/i.test(text);
-    if (onlyStatline && !leaderAura && !bearerUnitAura) continue; // the INV/FNP (+ any save-reroll rider) is already on the statline
-    const holdAll = onlyStatline && !leaderAura && bearerUnitAura;
+    if (onlyStatline && !leaderAura && !bearerUnitAura && !charSave) continue; // the INV/FNP (+ any save-reroll rider) is already on the statline
+    const holdAll = onlyStatline && !leaderAura && !charSave && bearerUnitAura;
     // A "select/choose one of the following" ability is a per-phase CHOICE; the mapper grants EVERY
     // option, so none can be auto-applied (the player picks one) — route them all to review.
     const isChoice = CHOICE_RE.test(text);
@@ -2218,7 +2224,11 @@ const DEFENCE_KEYS = Object.keys(DEFENCE_KIND);
 const DEFENCE_SUBJECT_RE =
   /(\bmodels\b|\bunits?\b|\bsquads?\b|\ba\s+model\s+in\b|\beach\s+model\s+in\b)|(\bthe\s+bearer\b(?!['’]s\s+(?:\w+\s+)?(?:unit|squad))|\bthis\s+(?:model|Fortification|Psyker|Vehicle|Monster|Character|Titan)\b(?!['’]s\s+(?:\w+\s+)?(?:unit|squad)))/gi;
 // "that VEHICLE model", "that model": CASE-SENSITIVE keyword words, so "a unit that contains a model" is not one model.
-const DEFENCE_THAT_MODEL_RE = /\b[Tt]hat\s+(?:[A-Z][\w-]*\s+){0,3}model\b(?!s|['’]s\s+(?:\w+\s+)?(?:unit|squad))/g;
+// "that Character has" (a bodyguard's save for the character leading it, Tyrant Guard) is one model too (mapper 13).
+const DEFENCE_THAT_MODEL_RE = /\b[Tt]hat\s+(?:(?:[A-Z][\w-]*\s+){0,3}model\b(?!s|['’]s\s+(?:\w+\s+)?(?:unit|squad))|(?:CHARACTER|Character)\b(?!\s+(?:units?|models)\b))/g;
+// "other CHARACTER models attached to that unit have …" (The Visarch, Locus): the save goes to the OTHER characters
+// attached with this one, never the bodyguard or this model (`otherChars`, mapper 13, ledger item 83).
+const OTHER_CHARS_RE = /\bother\s+(?:CHARACTER|Character)\s+models?\b/;
 function lastDefenceSubject(seg) {
   const s = String(seg || '');
   let last = null;
@@ -2247,6 +2257,10 @@ export function defenceReach(clause, lead = null, kind = null) {
 function tagModelOnly(effects, clause, lead) {
   for (const e of effects) {
     if (e.side !== 'defender') continue;
+    if (OTHER_CHARS_RE.test(String(clause || ''))) {
+      if (DEFENCE_KEYS.some((k) => e.mods?.[k] != null && e.mods[k] !== false && e.mods[k] !== 0)) e.otherChars = true;
+      continue;
+    }
     const kinds = new Set(DEFENCE_KEYS.filter((k) => e.mods?.[k] != null && e.mods[k] !== false && e.mods[k] !== 0).map((k) => DEFENCE_KIND[k]));
     if (kinds.size && [...kinds].every((k) => defenceReach(clause, lead, k) === 'model')) e.modelOnly = true;
   }
