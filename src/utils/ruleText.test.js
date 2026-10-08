@@ -3118,3 +3118,17 @@ describe('planEnh keeps the restrictionOnly bearer flag', () => {
     expect(planPackRules(raw(false)).detachments[0].enhancements[0].restrictionOnly).toBeUndefined();
   });
 });
+
+// Ledger item 70 (MAPPER_VERSION 23): a random outcome table gives one outcome, so none is applied always-on.
+describe('a random outcome table is a choice', () => {
+  const enh = (text) => planPackRules({ faction: 'Orks', armyRule: null, detachments: [{ name: 'D', rule: null, stratagems: [], enhancements: [{ name: 'Bionik Workshop', text }] }] }).detachments[0].enhancements[0];
+  it('Bionik Workshop: the +1 Strength outcome is gated, never always-on', () => {
+    const e = enh('Big Mek or Painboy model only. At the start of the battle, roll one D3 and compare the result to the list below. Until the end of the battle, models in the bearer’s unit have that bioniks ability. 1. Bionik Legs: Add 2" to the Move characteristic of this model. 2. Bionik Arms: Add 1 to the Strength characteristic of melee weapons equipped by this model. 3. Bionik Bonce: Improve the Weapon Skill characteristic of melee weapons equipped by this model by 1.');
+    expect(e.effects.length).toBeGreaterThan(0);
+    expect(e.effects.every((x) => x.condition)).toBe(true);
+  });
+  it('BREAKING VARIANT: a plain roll ("roll one D6: on a 2+") is not a table', () => {
+    const e = enh('Orks model only. Add 1 to the Strength characteristic of melee weapons equipped by the bearer. Each time the bearer is destroyed, roll one D6: on a 4+, nothing happens.');
+    expect(e.effects.some((x) => !x.condition && x.mods.strengthBonus === 1)).toBe(true);
+  });
+});

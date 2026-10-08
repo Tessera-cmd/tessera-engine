@@ -94,7 +94,9 @@
 //     Battle-shocked or having a keyword is no longer read as the target's state; "Battle - shocked" is read; "within
 //     an objective you control" is the objective toggle.
 // 22 = ledger item 89: a planned enhancement keeps the catalogue's `restrictionOnly` bearer flag (no effect changes).
-export const MAPPER_VERSION = 22;
+// 23 = ledger item 70: a random outcome table ("roll one D3 and compare the result to the list below") is a choice: each
+//     outcome is gated or held, never applied together.
+export const MAPPER_VERSION = 23;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -106,6 +108,9 @@ const SITUATIONAL_CONDITIONS = new Set(['objectiveControl', 'oncePerBattle', 'ar
 // The generic gate for an effect whose trigger the mapper could not read, on every path WITHOUT a
 // review surface (pack rules, .rosz roster rules, the typed-ability preview; see mapRuleText).
 const RULE_TRIGGER = 'ruleTrigger';
+// A random outcome table (ledger item 70: Orks Bionik Workshop, "roll one D3 and compare the result to the list below")
+// gives ONE of its listed effects, picked by a roll the sim can't see, so each is a choice (gated or held), never all on.
+const RANDOM_TABLE_RE = /\broll (?:one |a )?D\d+\b[^.]{0,40}\bcompare the result\b/i;
 const RULE_TRIGGER_NOTE = 'Part of this rule depends on a trigger the sim can\'t read, so that part is off by default. Turn on "Rule trigger met" for the round it applies.';
 const NON_COMBAT_NOTE = 'Mapped the combat part; an action or movement part is ignored (the sim only resolves the attack).';
 const INSTEAD_NOTE = 'A bonus this rule gives "instead" is stored as the extra on top of the basic bonus, so with its toggle on the total matches the rule.';
@@ -1832,7 +1837,7 @@ export function mapRuleText(text, { name = 'Rule', source, holdUnresolved = fals
   // one enemy unit" held its Feel No Pain 5+, and Surprise Assault's Tunnel Marker distances its re-roll of
   // hit rolls of 1. The heal words moved to the clause check (mapClause). A choice between listed options
   // still flags every option wherever it sits (the "▪ Or:" bullet follows its first option).
-  const choice = orChoice || CHOICE_RE.test(mapText) || (KEYWORD_CHOICE_RE.test(mapText) && !ALL_OPTIONS_RE.test(mapText));
+  const choice = orChoice || CHOICE_RE.test(mapText) || RANDOM_TABLE_RE.test(mapText) || (KEYWORD_CHOICE_RE.test(mapText) && !ALL_OPTIONS_RE.test(mapText));
   for (const e of effects) if (!e.condition && (choice || clauseOf.get(e) >= activationAt)) e._suspect = true;
 
   // Without a review surface (every caller but captureUnitAbilities: pack rules, .rosz roster rules,
