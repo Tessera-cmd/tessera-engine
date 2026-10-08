@@ -93,7 +93,8 @@
 //     an "instead" tier of the option before it (still a choice, off by default); the attacker's OWN unit being
 //     Battle-shocked or having a keyword is no longer read as the target's state; "Battle - shocked" is read; "within
 //     an objective you control" is the objective toggle.
-export const MAPPER_VERSION = 21;
+// 22 = ledger item 89: a planned enhancement keeps the catalogue's `restrictionOnly` bearer flag (no effect changes).
+export const MAPPER_VERSION = 22;
 
 // Conditions the SIM models as player-controlled engagement state (these keep a rule 'mapped').
 // Mirrors engine/effects.js CONDITIONS minus the situational ones below.
@@ -2633,6 +2634,8 @@ export function planPackRules(raw = {}) {
     // The source catalogue entry id (bsdataRules) — kept so the linked .rosz export can write the
     // enhancement selection; absent on PDF/AI-sourced packs (they resolve by name instead).
     if (e?.bsId) p = { ...p, bsId: e.bsId };
+    // The catalogue's bearer flag (bsdata, ledger item 89): the restriction names the only possible bearers.
+    if (e?.restrictionOnly) p = { ...p, restrictionOnly: true };
     // The raw structured modifiers ride on the planned entry too, so a stored enhancement can be
     // re-mapped exactly after a mapper fix (customRules replanLibraryStore): its effects depend on
     // them as well as on its text.

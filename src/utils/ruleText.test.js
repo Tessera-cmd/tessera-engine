@@ -3109,3 +3109,12 @@ describe('mapper 21: stat lists, shorthand, Or options, own-unit gates (ledger i
     expect(mods('While the bearer is leading a unit, models in that unit have the Feel No Pain 6+ ability while they are within an objective you control.')).toEqual([['objectiveControl', { fnp: 6 }]]);
   });
 });
+
+// Ledger item 89 (MAPPER_VERSION 22): the catalogue's restrictionOnly bearer flag rides on the planned enhancement.
+describe('planEnh keeps the restrictionOnly bearer flag', () => {
+  const raw = (flag) => ({ faction: 'Aeldari', armyRule: null, detachments: [{ name: 'D', rule: null, stratagems: [], enhancements: [{ name: 'Pirate Prince', text: 'Prince Yriel unit only. X.', points: 15, ...(flag ? { restrictionOnly: true } : {}) }] }] });
+  it('keeps the flag when the source carries it, and never invents it', () => {
+    expect(planPackRules(raw(true)).detachments[0].enhancements[0].restrictionOnly).toBe(true);
+    expect(planPackRules(raw(false)).detachments[0].enhancements[0].restrictionOnly).toBeUndefined();
+  });
+});
