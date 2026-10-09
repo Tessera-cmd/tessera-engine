@@ -360,6 +360,29 @@ describe('Overwatch: hits only on an unmodified 6', () => {
   });
 });
 
+// The SimConfig toggles are shared by the Shooting and Fight tabs, so a shooting-only one left on
+// must do nothing to a melee weapon (owner bug report 2026-10-08: cover left on into the Fight tab).
+describe('shooting-only options never touch a melee weapon', () => {
+  const melee = (w) => ({ models: 100, weapons: [{ type: 'melee', count: 100, A: 1, WS: 3, S: 4, AP: 0, D: 1, ...w }] });
+  const P_HIT_3 = 4 / 6;
+  const runMelee = (atk, def, opts = {}) => run(atk, def, { phase: 'melee', ...opts });
+  it('Overwatch left on: a melee attack still hits on its WS (not 6s only)', () => {
+    const res = runMelee(melee(), target(), { overwatch: true });
+    approx(res.kills.mean, 100 * P_HIT_3 * P_W_S4T4); // 33.3, not 8.33
+  });
+  it('cover, plunging fire and Heavy left on: a melee attack still hits on its WS', () => {
+    const res = runMelee(melee({ keywords: ['HEAVY'] }), target(), { targetInCover: true, plungingFire: true, remainedStationary: true });
+    approx(res.kills.mean, 100 * P_HIT_3 * P_W_S4T4);
+  });
+  it('melta range left on: a melee MELTA weapon gains no damage (half range needs a range)', () => {
+    const def = target({ W: 3 });
+    const plain = runMelee(melee({ D: 1, keywords: ['MELTA 2'] }), def);
+    expect(plain.woundsDealt.mean).toBeGreaterThan(0);
+    const left = runMelee(melee({ D: 1, keywords: ['MELTA 2'] }), def, { withinMeltaRange: true });
+    expect(left.woundsDealt.mean).toBe(plain.woundsDealt.mean); // same seed, same rolls: bit-identical
+  });
+});
+
 describe('Feel No Pain applies to Devastating-Wounds mortal wounds', () => {
   it('FNP reduces applied mortal wounds by its pass rate', () => {
     const w = { A: 1, BS: 3, S: 4, AP: 0, D: 1, keywords: ['DEVASTATING WOUNDS'] };

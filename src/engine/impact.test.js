@@ -121,6 +121,19 @@ describe('manual modifier variants (what each buff is worth)', () => {
     expect(sus.kind).toBe('modifier');
   });
 
+  it('gives a shooting-only toggle left on from the Shooting tab no variant in a fight', () => {
+    const opts = { phase: 'all', hitModifier: 1, remainedStationary: true, withinRapidFireRange: true, withinMeltaRange: true, plungingFire: true, overwatch: true, charging: true };
+    const ctx = (phase) => ({
+      attackerAbilities: [], defenderAbilities: [], atkRules: emptyRules, defRules: emptyRules, conditions: [],
+      baseOptions: opts, baseDefender: defender(1), phase,
+    });
+    const keys = (phase) => buildImpactPlan(ctx(phase)).variants.map((v) => v.key).sort();
+    expect(keys('fight')).toEqual(['mod:charging', 'mod:hitMod']);
+    expect(keys('shooting')).toEqual(
+      ['mod:charging', 'mod:hitMod', 'mod:melta', 'mod:overwatch', 'mod:plunging', 'mod:rapidfire', 'mod:stationary'],
+    );
+  });
+
   it('reads Sustained Hits as worth something when the extra hits convert (vs W2)', () => {
     const plan = planWith({ grantKeywords: ['SUSTAINED HITS 2'] }, 2);
     const imp = impactOf(plan, 'mod:kw:SUSTAINED HITS 2', 2);

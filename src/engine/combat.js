@@ -334,6 +334,9 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   // simplification not separately modelled.)
   const hitGate = indirect ? 4 : 0; // minimum UNMODIFIED roll that can hit
   const hitReroll = indirect ? 'none' : o.hitReroll; // Indirect attacks can't be re-rolled
+  // Overwatch is a shooting attack, so it never touches a melee weapon: the toggle is shared by
+  // both phases in the UI and a value left on from shooting must not turn a fight into 6s-only.
+  const overwatch = ranged && !!o.overwatch;
 
   let autoWounds = 0; // hits that auto-wound (Lethal Hits on a critical hit)
   let normalHits = 0; // hits that proceed to the wound roll
@@ -343,7 +346,7 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
     if (torrent) {
       pass = true;
       crit = false; // no hit roll -> no critical hit -> Lethal/Sustained cannot trigger
-    } else if (o.overwatch) {
+    } else if (overwatch) {
       const r = d6(rng); // Overwatch: hits land only on an unmodified 6 (a critical hit)
       pass = r === 6;
       crit = r === 6;
@@ -425,7 +428,7 @@ export function simulateAttackSequence(weapon, count, defender, state, options, 
   const critAp = Math.min(0, ap - Math.max(0, o.critApBonus || 0)); // a negative (hand-entered) bonus never helps the save
   const critSplit = critAp !== ap && critToSave > 0;
   const meltaAdd =
-    hasKw(weapon, 'MELTA') && o.withinMeltaRange
+    ranged && hasKw(weapon, 'MELTA') && o.withinMeltaRange // half RANGE: a melee weapon has none
       ? (weapon.meltaBonus ?? kwValue(weapon, 'MELTA', 1)) // dflt 1: bare keyword ≠ no-op
       : 0;
   const damageBonus = o.damageBonus || 0;

@@ -93,12 +93,12 @@ const MANUAL_MODIFIERS = [
   { key: 'attackBonus', on: (o) => o.attackBonus, label: (o) => `+${o.attackBonus} Attacks`, without: (o) => ({ ...o, attackBonus: 0 }) },
   { key: 'hitReroll', on: (o) => o.hitReroll && o.hitReroll !== 'none', label: (o) => `re-roll hits (${o.hitReroll})`, without: (o) => ({ ...o, hitReroll: 'none' }) },
   { key: 'woundReroll', on: (o) => o.woundReroll && o.woundReroll !== 'none', label: (o) => `re-roll wounds (${o.woundReroll})`, without: (o) => ({ ...o, woundReroll: 'none' }) },
-  { key: 'stationary', on: (o) => o.remainedStationary, label: () => 'Heavy condition met', without: (o) => ({ ...o, remainedStationary: false }) },
-  { key: 'rapidfire', on: (o) => o.withinRapidFireRange, label: () => 'Rapid Fire range', without: (o) => ({ ...o, withinRapidFireRange: false }) },
-  { key: 'melta', on: (o) => o.withinMeltaRange, label: () => 'Melta range', without: (o) => ({ ...o, withinMeltaRange: false }) },
+  { key: 'stationary', rangedOnly: true, on: (o) => o.remainedStationary, label: () => 'Heavy condition met', without: (o) => ({ ...o, remainedStationary: false }) },
+  { key: 'rapidfire', rangedOnly: true, on: (o) => o.withinRapidFireRange, label: () => 'Rapid Fire range', without: (o) => ({ ...o, withinRapidFireRange: false }) },
+  { key: 'melta', rangedOnly: true, on: (o) => o.withinMeltaRange, label: () => 'Melta range', without: (o) => ({ ...o, withinMeltaRange: false }) },
   { key: 'charging', on: (o) => o.charging, label: () => 'Charging', without: (o) => ({ ...o, charging: false }) },
-  { key: 'plunging', on: (o) => o.plungingFire, label: () => 'Plunging fire', without: (o) => ({ ...o, plungingFire: false }) },
-  { key: 'overwatch', on: (o) => o.overwatch, label: () => 'Overwatch', without: (o) => ({ ...o, overwatch: false }) },
+  { key: 'plunging', rangedOnly: true, on: (o) => o.plungingFire, label: () => 'Plunging fire', without: (o) => ({ ...o, plungingFire: false }) },
+  { key: 'overwatch', rangedOnly: true, on: (o) => o.overwatch, label: () => 'Overwatch', without: (o) => ({ ...o, overwatch: false }) },
 ];
 
 // Cap on total leave-one-out variants, so a kitchen-sink setup can't balloon the per-run work
@@ -183,6 +183,9 @@ export function buildImpactPlan(ctx) {
     push(`mod:${key}`, label, 'modifier', 'attacker', resolveSelection(ctx, atkRules, defRules, conditions, withoutOpts));
   for (const m of MANUAL_MODIFIERS) {
     if (variants.length >= MAX_VARIANTS) break;
+    // A shooting-only toggle left on from the Shooting tab does nothing in a fight, so it gets no
+    // variant there (it would only read as "little effect", a hint about a toggle that does not apply).
+    if (m.rangedOnly && ctx.phase === 'fight') continue;
     if (m.on(base)) pushMod(m.key, m.label(base), m.without(base));
   }
   for (const kw of base.grantKeywords || []) {
